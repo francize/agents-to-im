@@ -1,130 +1,99 @@
 # Usage Guide
 
-This skill works with both **Claude Code** (via `/claude-to-im` slash commands) and **Codex** (via natural language like "start bridge", "配置", "诊断"). All commands below use Claude Code syntax; Codex users can use equivalent natural language.
+这个 skill 现在是 Feishu/Lark 单通道版本。你通过 `/agents-to-im ...` 管理 daemon，但真正的模型对话发生在 Bot 自动创建的群里。
 
 ## setup
 
-Interactive wizard that configures the bridge.
+`setup` 不再是多平台向导，而是 Feishu-only 配置说明：
 
+```bash
+/agents-to-im setup
 ```
-/claude-to-im setup
-```
 
-The wizard will prompt you for:
+你需要准备：
+- `CTI_FEISHU_APP_ID`
+- `CTI_FEISHU_APP_SECRET`
+- `CTI_DEFAULT_WORKDIR`
 
-1. **Channels to enable** -- Enter comma-separated values: `telegram`, `discord`, `feishu`, `qq`
-2. **Platform credentials** -- Bot tokens, app IDs, and secrets for each enabled channel
-3. **Allowed users** (optional) -- Restrict which users can interact with the bot
-4. **Working directory** -- Default project directory for Claude Code sessions
-5. **Model and mode** -- Claude model and interaction mode (code/plan/ask)
+可选项：
+- `CTI_FEISHU_DOMAIN`
+- `CTI_FEISHU_ALLOWED_USERS`
+- `CTI_CLAUDE_DEFAULT_MODEL`
+- `CTI_CODEX_DEFAULT_MODEL`
+- `CTI_CLAUDE_CODE_EXECUTABLE`
+- `CTI_CODEX_API_KEY`
+- `CTI_CODEX_BASE_URL`
+- `CTI_AUTO_APPROVE`
 
-After collecting input, the wizard validates tokens by calling each platform's API and reports results.
-
-Example interaction:
-
-```
-> /claude-to-im setup
-Which channels to enable? telegram,discord
-Enter Telegram bot token: <your-token>
-Enter Discord bot token: <your-token>
-Default working directory [/current/dir]: /Users/me/projects
-Model [claude-sonnet-4-20250514]:
-Mode [code]:
-
-Validating tokens...
-  Telegram: OK (bot @MyBotName)
-  Discord: OK (format valid)
-
-Config written to ~/.claude-to-im/config.env
-```
+还需要在飞书开放平台开启：
+- 长连接事件 `im.message.receive_v1`
+- 卡片回调 `card.action.trigger`
 
 ## start
 
-Starts the bridge daemon in the background.
+启动 bridge daemon：
 
+```bash
+/agents-to-im start
 ```
-/claude-to-im start
-```
 
-The daemon process ID is stored in `~/.claude-to-im/runtime/bridge.pid`. If the daemon is already running, the command reports the existing process.
-
-If startup fails, run `/claude-to-im doctor` to diagnose issues.
+如果启动失败，优先执行 `/agents-to-im doctor`。
 
 ## stop
 
-Stops the running bridge daemon.
+停止 daemon：
 
+```bash
+/agents-to-im stop
 ```
-/claude-to-im stop
-```
-
-Sends SIGTERM to the daemon process and cleans up the PID file.
 
 ## status
 
-Shows whether the daemon is running and basic health information.
+查看 daemon 运行状态：
 
-```
-/claude-to-im status
+```bash
+/agents-to-im status
 ```
 
-Output includes:
-- Running/stopped state
-- PID (if running)
-- Uptime
-- Connected channels
+输出会包含：
+- 运行/停止状态
+- PID
+- 运行时长
+- 已启用渠道（现在固定为 `feishu`）
 
 ## logs
 
-Shows recent log output from the daemon.
+查看最近日志：
 
-```
-/claude-to-im logs        # Last 50 lines (default)
-/claude-to-im logs 200    # Last 200 lines
-```
-
-Logs are stored in `~/.claude-to-im/logs/` and are automatically redacted to mask secrets.
-
-## reconfigure
-
-Interactively update the current configuration.
-
-```
-/claude-to-im reconfigure
+```bash
+/agents-to-im logs
+/agents-to-im logs 200
 ```
 
-Displays current settings with secrets masked, then prompts for changes. After updating, you must restart the daemon for changes to take effect:
-
-```
-/claude-to-im stop
-/claude-to-im start
-```
+日志文件默认位于 `~/.agents-to-im/logs/`，会自动脱敏。
 
 ## doctor
 
-Runs diagnostic checks and reports issues.
+执行本地诊断：
 
+```bash
+/agents-to-im doctor
 ```
-/claude-to-im doctor
-```
 
-Checks performed:
-- Node.js version (>= 20 required)
-- Claude Code CLI availability
-- Config file exists and has correct permissions
-- Required tokens are set for enabled channels
-- Token validity (API calls)
-- QQ credentials and gateway reachability (if QQ enabled)
-- Daemon process health
-- Log directory writability
+当前检查项包括：
+- Node.js 版本
+- 配置文件存在性
+- Feishu 必填环境变量
+- Claude CLI 可用性
+- Codex SDK / 鉴权是否可用
+- daemon 进程状态
+- 飞书长连接事件配置提醒
 
-### QQ notes
+## Runtime 行为
 
-QQ currently supports **C2C private chat only**:
-- No inline approval buttons — permissions use text `/perm ...` commands
-- No streaming preview
-- Image inbound only (no image replies)
-- No group/channel support yet
-- Required config: `CTI_QQ_APP_ID`, `CTI_QQ_APP_SECRET` (obtain from https://q.qq.com/qqbot/openclaw)
-- `CTI_QQ_ALLOWED_USERS` takes `user_openid` values, not QQ numbers
-- Set `CTI_QQ_IMAGE_ENABLED=false` if the provider doesn't support image input
+运行时选择改成按会话决定：
+- 私聊 Bot 只接受 `/new:claude` 和 `/new:codex`
+- 每次 `/new:*` 都会创建一个新群，并把群和 session 一一绑定
+- 群内默认启用流式卡片输出
+- 群内 `/reset` 会创建新 session，但保持当前群的 runtime
+- 权限交互优先走卡片按钮，必要时可在群内使用 `/perm allow|allow_session|deny <id>`

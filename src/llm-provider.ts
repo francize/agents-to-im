@@ -2,7 +2,7 @@
  * LLM Provider using @anthropic-ai/claude-agent-sdk query() function.
  *
  * Converts SDK stream events into the SSE format expected by
- * the claude-to-im bridge conversation engine.
+ * the upstream bridge conversation engine.
  */
 
 import fs from 'node:fs';
@@ -91,7 +91,7 @@ export function isNonClaudeModel(model?: string): boolean {
  * CTI_ENV_ISOLATION (default "inherit"):
  *   "inherit" — full parent env minus CLAUDECODE (recommended; daemon
  *               already runs in a clean launchd/setsid environment)
- *   "strict"  — only whitelist + CTI_* + ANTHROPIC_* from config.env
+ *   "strict"  — only whitelist + CTI_* + ANTHROPIC_* / OPENAI_* / CODEX_* from config.env
  */
 export function buildSubprocessEnv(): Record<string, string> {
   const mode = process.env.CTI_ENV_ISOLATION || 'inherit';
@@ -112,19 +112,10 @@ export function buildSubprocessEnv(): Record<string, string> {
       // Pass through CTI_* so skill config is available
       if (k.startsWith('CTI_')) { out[k] = v; continue; }
     }
-    // Always pass through ANTHROPIC_* in claude/auto runtime —
-    // third-party API providers need these to reach the CLI subprocess.
-    const runtime = process.env.CTI_RUNTIME || 'claude';
-    if (runtime === 'claude' || runtime === 'auto') {
-      for (const [k, v] of Object.entries(process.env)) {
-        if (v !== undefined && k.startsWith('ANTHROPIC_')) out[k] = v;
-      }
-    }
-
-    // In codex/auto mode, pass through OPENAI_* / CODEX_* env vars
-    if (runtime === 'codex' || runtime === 'auto') {
-      for (const [k, v] of Object.entries(process.env)) {
-        if (v !== undefined && (k.startsWith('OPENAI_') || k.startsWith('CODEX_'))) out[k] = v;
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v === undefined) continue;
+      if (k.startsWith('ANTHROPIC_') || k.startsWith('OPENAI_') || k.startsWith('CODEX_')) {
+        out[k] = v;
       }
     }
   }
@@ -452,12 +443,12 @@ export class SDKLLMProvider implements LLMProvider {
               model = undefined;
             }
 
-            // Only pass model to CLI if explicitly configured via CTI_DEFAULT_MODEL.
+            // Only pass model to CLI if explicitly configured via CTI_CLAUDE_DEFAULT_MODEL.
             // Letting the CLI choose its own default avoids exit-code-1 failures
             // when a stored model is inaccessible on the current machine/plan.
-            const passModel = !!process.env.CTI_DEFAULT_MODEL;
+            const passModel = !!process.env.CTI_CLAUDE_DEFAULT_MODEL;
             if (model && !passModel) {
-              console.log(`[llm-provider] Skipping model "${model}", using CLI default (set CTI_DEFAULT_MODEL to override)`);
+              console.log(`[llm-provider] Skipping model "${model}", using CLI default (set CTI_CLAUDE_DEFAULT_MODEL to override)`);
               model = undefined;
             }
 
@@ -580,7 +571,7 @@ export class SDKLLMProvider implements LLMProvider {
                 '• Claude CLI version too old (need >= 2.x) — run: claude --version',
                 '• Missing ANTHROPIC_* env vars in daemon — check config.env',
                 '',
-                'Run `/claude-to-im doctor` to diagnose.',
+                'Run `/agents-to-im doctor` to diagnose.',
               );
               userMessage = lines.join('\n');
             } else {

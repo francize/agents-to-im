@@ -1,69 +1,93 @@
 # Troubleshooting
 
-## Bridge won't start
+## Bridge 无法启动
 
-**Symptoms**: `/claude-to-im start` fails or daemon exits immediately.
+症状：
+- `/agents-to-im start` 失败
+- daemon 启动后立即退出
 
-**Steps**:
+排查顺序：
+1. 运行 `/agents-to-im doctor`
+2. 确认 Node.js >= 20：`node --version`
+3. 确认 `~/.agents-to-im/config.env` 存在且包含 `CTI_FEISHU_APP_ID`、`CTI_FEISHU_APP_SECRET`
+4. 确认至少一个 runtime 可用：
+   - Claude：`claude --version`
+   - Codex：检查 `CTI_CODEX_API_KEY` 或 `OPENAI_API_KEY`
+5. 查看日志：`/agents-to-im logs 200`
 
-1. Run `/claude-to-im doctor` to identify the issue
-2. Check that Node.js >= 20 is installed: `node --version`
-3. Check that Claude Code CLI is available: `claude --version`
-4. Verify config exists: `ls -la ~/.claude-to-im/config.env`
-5. Check logs for startup errors: `/claude-to-im logs`
+常见原因：
+- Feishu 凭据缺失或填错
+- Claude CLI 不存在，但你尝试创建 Claude 会话
+- Codex 鉴权缺失，但你尝试创建 Codex 会话
 
-**Common causes**:
-- Missing or invalid config.env -- run `/claude-to-im setup`
-- Node.js not found or wrong version -- install Node.js >= 20
-- Port or resource conflict -- check if another instance is running with `/claude-to-im status`
+## Feishu 私聊没有响应
 
-## Messages not received
+症状：
+- 私聊 bot 后没有任何回复
 
-**Symptoms**: Bot is online but doesn't respond to messages.
+排查顺序：
+1. 确认应用已发布并已启用 Bot 能力
+2. 确认事件订阅方式为长连接
+3. 确认已订阅 `im.message.receive_v1`
+4. 确认 `CTI_FEISHU_ALLOWED_USERS` 没有把自己挡掉
+5. 查看 bridge 日志里是否有入站事件
 
-**Steps**:
+注意：
+- 私聊不是正式会话面，只接受 `/new:claude` 和 `/new:codex`
+- 其他私聊输入只会收到帮助提示，不会直接创建 session
 
-1. Verify the bot token is valid: `/claude-to-im doctor`
-2. Check allowed user IDs in config -- if set, only listed users can interact
-3. For Telegram: ensure you've sent `/start` to the bot first
-4. For Discord: verify the bot has been invited to the server with message read permissions
-5. For Feishu: confirm the app has been approved and event subscriptions are configured
-6. Check logs for incoming message events: `/claude-to-im logs 200`
+## `/new:claude` 或 `/new:codex` 建群失败
 
-## Permission timeout
+症状：
+- 私聊命令后返回“创建会话失败”
+- 新群已创建，但没有绑定成功
 
-**Symptoms**: Claude Code session starts but times out waiting for tool approval.
+排查顺序：
+1. 查看错误信息中是否包含权限缺失
+2. 确认应用已开通：
+   - 消息收发
+   - 群聊读取/更新
+   - CardKit
+   - message update / reactions
+3. 确认对应 runtime 可用
+4. 若 bridge 启动日志提示缺少 app scopes，先补权限再重新发布应用版本
 
-**Steps**:
+说明：
+- 创建群成功但初始化失败时，bridge 不会自动解散该群
+- 该群会保持未绑定状态，后续消息会提示你重新私聊 Bot 建会话
 
-1. The bridge runs Claude Code in non-interactive mode; ensure your Claude Code configuration allows the necessary tools
-2. Consider using `--allowedTools` in your configuration to pre-approve common tools
-3. Check network connectivity if the timeout occurs during API calls
+## 群里能回复，但不是流式卡片
 
-## High memory usage
+症状：
+- 回复退化成普通卡片或普通文本
 
-**Symptoms**: The daemon process consumes increasing memory over time.
+排查顺序：
+1. 确认应用已开通 `cardkit:card:write`、`cardkit:card:read`
+2. 确认已开通 `im:message:update`
+3. 查看日志中是否出现 CardKit create/update 失败
 
-**Steps**:
+说明：
+- bridge 会按 `CardKit -> im.message.patch -> 普通卡片/文本` 逐级降级
+- 只要最终消息能发出去，就不会再额外补发一条“完成消息”
 
-1. Check current memory usage: `/claude-to-im status`
-2. Restart the daemon to reset memory:
-   ```
-   /claude-to-im stop
-   /claude-to-im start
-   ```
-3. If the issue persists, check how many concurrent sessions are active -- each Claude Code session consumes memory
-4. Review logs for error loops that may cause memory leaks
+## 权限按钮点了没反应
 
-## Stale PID file
+症状：
+- 卡片里的 allow/deny 按钮没有生效
 
-**Symptoms**: Status shows "running" but the process doesn't exist, or start refuses because it thinks a daemon is already running.
+排查顺序：
+1. 确认事件回调里已经添加 `card.action.trigger`
+2. 确认该事件所在版本已经发布并通过审批
+3. 查看日志里是否收到 card action 事件
+4. 临时改用群内 `/perm allow|allow_session|deny <id>`
 
-The daemon management script (`daemon.sh`) handles stale PID files automatically. If you still encounter issues:
+## PID 状态异常
 
-1. Run `/claude-to-im stop` -- it will clean up the stale PID file
-2. If stop also fails, manually remove the PID file:
-   ```bash
-   rm ~/.claude-to-im/runtime/bridge.pid
-   ```
-3. Run `/claude-to-im start` to launch a fresh instance
+症状：
+- `/agents-to-im status` 显示运行中，但进程实际不存在
+- `start` 认为已经启动
+
+排查顺序：
+1. 先执行 `/agents-to-im stop`
+2. 仍异常时，删除 `~/.agents-to-im/runtime/bridge.pid`
+3. 重新执行 `/agents-to-im start`

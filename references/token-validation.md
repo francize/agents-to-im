@@ -1,44 +1,37 @@
-# Token Validation Commands
+# Feishu / Lark Credential Validation
 
-After writing config.env, validate each enabled platform's credentials to catch typos and configuration errors early.
+写完 `config.env` 后，先验证 Feishu/Lark 凭据，再启动 bridge。这样能尽早发现 App ID、App Secret 或域名填错的问题。
 
-## Telegram
-
-```bash
-curl -s "https://api.telegram.org/bot${TOKEN}/getMe"
-```
-Expected: response contains `"ok":true`. If not, the Bot Token is invalid — re-check with @BotFather.
-
-## Discord
-
-Verify token format matches: `[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`
-
-A format mismatch means the token was copied incorrectly from the Discord Developer Portal.
-
-## Feishu / Lark
+## 1. 校验租户访问令牌
 
 ```bash
-curl -s -X POST "${DOMAIN}/open-apis/auth/v3/tenant_access_token/internal" \
+curl -s -X POST "${DOMAIN:-https://open.feishu.cn}/open-apis/auth/v3/tenant_access_token/internal" \
   -H "Content-Type: application/json" \
-  -d '{"app_id":"...","app_secret":"..."}'
+  -d '{"app_id":"'"${CTI_FEISHU_APP_ID}"'","app_secret":"'"${CTI_FEISHU_APP_SECRET}"'"}'
 ```
-Expected: response contains `"code":0`. If not, check that App ID and App Secret match the Feishu Developer Console.
 
-## QQ
+预期结果：
+- 返回 JSON 中包含 `"code":0`
+- 返回体中包含 `tenant_access_token`
 
-Step 1 — Get access token:
+如果失败，优先检查：
+- `CTI_FEISHU_APP_ID`
+- `CTI_FEISHU_APP_SECRET`
+- `CTI_FEISHU_DOMAIN` 是否与应用所在区域匹配
+
+## 2. 可选：校验应用已开通的 app scopes
+
+只有在应用已开通 `application:application:self_manage` 时，这个检查才会成功；否则 bridge 会在启动时降级为动作级报错，不影响启动。
+
 ```bash
-curl -s -X POST "https://bots.qq.com/app/getAppAccessToken" \
-  -H "Content-Type: application/json" \
-  -d '{"appId":"...","clientSecret":"..."}'
+curl -s "${DOMAIN:-https://open.feishu.cn}/open-apis/application/v6/applications/me?lang=zh_cn" \
+  -H "Authorization: Bearer ${TENANT_ACCESS_TOKEN}"
 ```
-Expected: response contains `access_token`.
 
-Step 2 — Verify gateway connectivity:
-```bash
-curl -s "https://api.sgroup.qq.com/gateway" \
-  -H "Authorization: QQBot <access_token>"
-```
-Expected: response contains a gateway URL.
+预期结果：
+- 返回 JSON 中包含 `"code":0`
+- `data.app.scopes` 中至少能看到消息收发、群聊管理、CardKit 和 reaction 相关权限
 
-If either step fails, verify the App ID and App Secret from https://q.qq.com.
+如果这里失败但第 1 步成功，说明：
+- 核心凭据通常没问题
+- 但应用自检能力不足，bridge 的 scope 诊断只能退化为运行时 API 错误提示

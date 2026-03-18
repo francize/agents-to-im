@@ -29,7 +29,7 @@ describe('maskSecrets', () => {
     assert.ok(!result.includes('sk-abcdef123456'));
   });
 
-  it('masks Telegram bot token format', () => {
+  it('masks bot token-like format', () => {
     const input = 'Using bot token bot1234567890:ABCdefGHIjklMNOpqrSTUvwxYZ12345678a';
     const result = maskSecrets(input);
     assert.ok(!result.includes('bot1234567890:ABCdefGHIjklMNOpqrSTUvwxYZ12345678a'));

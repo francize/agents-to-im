@@ -2,7 +2,7 @@
  * JSON file-backed BridgeStore implementation.
  *
  * Uses in-memory Maps as cache with write-through persistence
- * to JSON files in ~/.claude-to-im/data/.
+ * to JSON files in the configured CTI_HOME data directory.
  */
 
 import fs from 'node:fs';
@@ -21,6 +21,7 @@ import type {
 } from 'claude-to-im/src/lib/bridge/host.js';
 import type { ChannelBinding, ChannelType } from 'claude-to-im/src/lib/bridge/types.js';
 import { CTI_HOME } from './config.js';
+import type { RuntimeName, SessionExt, SessionRecord, TitleStatus } from './runtime-types.js';
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
 const MESSAGES_DIR = path.join(DATA_DIR, 'messages');
@@ -70,7 +71,7 @@ interface LockEntry {
 
 export class JsonFileStore implements BridgeStore {
   private settings: Map<string, string>;
-  private sessions = new Map<string, BridgeSession>();
+  private sessions = new Map<string, SessionRecord>();
   private bindings = new Map<string, ChannelBinding>();
   private messages = new Map<string, BridgeMessage[]>();
   private permissionLinks = new Map<string, PermissionLinkRecord>();
@@ -90,13 +91,17 @@ export class JsonFileStore implements BridgeStore {
 
   private loadAll(): void {
     // Sessions
-    const sessions = readJson<Record<string, BridgeSession>>(
+    const sessions = readJson<Record<string, SessionRecord>>(
       path.join(DATA_DIR, 'sessions.json'),
       {},
     );
+    let sessionsChanged = false;
     for (const [id, s] of Object.entries(sessions)) {
-      this.sessions.set(id, s);
+      const normalized = this.normalizeSessionRecord(s);
+      if (normalized !== s) sessionsChanged = true;
+      this.sessions.set(id, normalized);
     }
+    if (sessionsChanged) this.persistSessions();
 
     // Bindings
     const bindings = readJson<Record<string, ChannelBinding>>(
@@ -200,6 +205,36 @@ export class JsonFileStore implements BridgeStore {
     return this.settings.get(key) ?? null;
   }
 
+  private normalizeSessionRecord(session: BridgeSession | SessionRecord): SessionRecord {
+    const record = session as SessionRecord & Record<string, unknown>;
+    const extPartial: Partial<SessionExt> = { ...(record.ext || {}) };
+    const legacyRuntime = typeof record.runtime === 'string' ? record.runtime : undefined;
+    const legacyTitle = typeof record.title === 'string' ? record.title : undefined;
+    const legacyTitleStatus = typeof record.title_status === 'string' ? record.title_status : undefined;
+    if (!extPartial.runtime) {
+      extPartial.runtime = (legacyRuntime as RuntimeName)
+        || (this.settings.get('bridge_default_runtime') as RuntimeName)
+        || 'claude';
+    }
+    if (!extPartial.title && legacyTitle) extPartial.title = legacyTitle;
+    if (!extPartial.titleStatus && legacyTitleStatus) extPartial.titleStatus = legacyTitleStatus as TitleStatus;
+    if (!extPartial.titleStatus) extPartial.titleStatus = 'pending';
+    const ext: SessionExt = {
+      runtime: extPartial.runtime || 'claude',
+      ...(extPartial.title ? { title: extPartial.title } : {}),
+      titleStatus: extPartial.titleStatus || 'pending',
+    };
+    return {
+      ...record,
+      ext,
+    };
+  }
+
+  private setSession(session: SessionRecord): void {
+    this.sessions.set(session.id, this.normalizeSessionRecord(session));
+    this.persistSessions();
+  }
+
   // ── Channel Bindings ──
 
   getChannelBinding(channelType: string, chatId: string): ChannelBinding | null {
@@ -268,14 +303,39 @@ export class JsonFileStore implements BridgeStore {
     cwd?: string,
     _mode?: string,
   ): BridgeSession {
-    const session: BridgeSession = {
+    const session: SessionRecord = {
       id: uuid(),
       working_directory: cwd || this.settings.get('bridge_default_work_dir') || process.cwd(),
       model,
       system_prompt: systemPrompt,
+      ext: {
+        runtime: (this.settings.get('bridge_default_runtime') as RuntimeName) || 'claude',
+        titleStatus: 'pending',
+      },
     };
-    this.sessions.set(session.id, session);
-    this.persistSessions();
+    this.setSession(session);
+    return session;
+  }
+
+  createRuntimeSession(params: {
+    runtime: RuntimeName;
+    model: string;
+    cwd?: string;
+    systemPrompt?: string;
+    titleStatus?: TitleStatus;
+  }): SessionRecord {
+    const session = this.createSession(
+      `Bridge: ${params.runtime}`,
+      params.model,
+      params.systemPrompt,
+      params.cwd,
+      this.settings.get('bridge_default_mode') || 'code',
+    ) as SessionRecord;
+    session.ext = {
+      runtime: params.runtime,
+      titleStatus: params.titleStatus || 'pending',
+    };
+    this.setSession(session);
     return session;
   }
 
@@ -342,8 +402,7 @@ export class JsonFileStore implements BridgeStore {
   updateSdkSessionId(sessionId: string, sdkSessionId: string): void {
     const s = this.sessions.get(sessionId);
     if (s) {
-      // Store sdkSessionId on the session object
-      (s as unknown as Record<string, unknown>)['sdk_session_id'] = sdkSessionId;
+      s.sdk_session_id = sdkSessionId;
       this.persistSessions();
     }
     // Also update any bindings that reference this session
@@ -361,6 +420,53 @@ export class JsonFileStore implements BridgeStore {
       s.model = model;
       this.persistSessions();
     }
+  }
+
+  getSessionExt(sessionId: string): SessionExt | null {
+    const session = this.sessions.get(sessionId);
+    return session?.ext ? { ...session.ext } : null;
+  }
+
+  updateSessionExt(sessionId: string, updates: Partial<SessionExt>): SessionExt | null {
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+    session.ext = {
+      ...(session.ext || {
+        runtime: (this.settings.get('bridge_default_runtime') as RuntimeName) || 'claude',
+        titleStatus: 'pending',
+      }),
+      ...updates,
+    };
+    this.persistSessions();
+    return { ...session.ext };
+  }
+
+  getSessionSdkSessionId(sessionId: string): string {
+    return this.sessions.get(sessionId)?.sdk_session_id || '';
+  }
+
+  migrateLegacySessions(defaultRuntime: RuntimeName): boolean {
+    let changed = false;
+    for (const session of this.sessions.values()) {
+      if (!session.ext?.runtime) {
+        session.ext = {
+          ...(session.ext || {}),
+          runtime: defaultRuntime,
+          titleStatus: session.ext?.titleStatus || 'pending',
+        };
+        changed = true;
+      }
+      if (!session.ext?.titleStatus) {
+        session.ext = {
+          ...(session.ext || {}),
+          runtime: session.ext?.runtime || defaultRuntime,
+          titleStatus: 'pending',
+        };
+        changed = true;
+      }
+    }
+    if (changed) this.persistSessions();
+    return changed;
   }
 
   syncSdkTasks(_sessionId: string, _todos: unknown): void {

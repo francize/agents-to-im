@@ -1,16 +1,17 @@
 {
-  "name": "claude-to-im-skill",
+  "name": "agents-to-im",
   "version": "0.1.0",
-  "description": "Claude Code Skill: Bridge IM platforms (Telegram, Discord, Feishu, QQ) to Claude Code sessions",
+  "description": "agents-to-im: Feishu/Lark bridge for Claude Code and Codex sessions",
   "type": "module",
   "scripts": {
     "build": "node scripts/build.js",
     "typecheck": "tsc --noEmit",
     "dev": "tsx src/main.ts",
-    "test": "CTI_HOME=$(mktemp -d) node --test --import tsx --test-timeout=15000 src/__tests__/*.test.ts"
+    "test": "CTI_HOME=$(mktemp -d) node --test --test-concurrency=1 --import tsx --test-timeout=15000 src/__tests__/*.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.62",
+    "@larksuiteoapi/node-sdk": "^1.59.0",
     "claude-to-im": "github:op7418/claude-to-im"
   },
   "optionalDependencies": {

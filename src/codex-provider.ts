@@ -50,9 +50,9 @@ function toApprovalPolicy(permissionMode?: string): string {
   }
 }
 
-/** Whether to forward bridge model to Codex CLI. Default: false (use Codex current/default model). */
+/** Whether to forward bridge model to Codex. Default: only when a Codex default model is configured. */
 function shouldPassModelToCodex(): boolean {
-  return process.env.CTI_CODEX_PASS_MODEL === 'true';
+  return !!process.env.CTI_CODEX_DEFAULT_MODEL;
 }
 
 function looksLikeClaudeModel(model?: string): boolean {
@@ -108,6 +108,10 @@ export class CodexProvider implements LLMProvider {
     });
 
     return { sdk: this.sdk, codex: this.codex };
+  }
+
+  async prepare(): Promise<void> {
+    await this.ensureSDK();
   }
 
   streamChat(params: StreamChatParams): ReadableStream<string> {

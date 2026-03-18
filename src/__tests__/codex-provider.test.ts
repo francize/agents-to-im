@@ -290,9 +290,9 @@ describe('CodexProvider', () => {
     assert.ok(!Object.prototype.hasOwnProperty.call(capturedStartOptions!, 'model'), 'Model should not be forwarded by default');
   });
 
-  it('passes model only when CTI_CODEX_PASS_MODEL=true', async () => {
-    const old = process.env.CTI_CODEX_PASS_MODEL;
-    process.env.CTI_CODEX_PASS_MODEL = 'true';
+  it('passes model only when CTI_CODEX_DEFAULT_MODEL is configured', async () => {
+    const old = process.env.CTI_CODEX_DEFAULT_MODEL;
+    process.env.CTI_CODEX_DEFAULT_MODEL = 'gpt-5-codex';
     try {
       const { CodexProvider } = await import('../codex-provider.js');
       const { PendingPermissions } = await import('../permission-gateway.js');
@@ -324,9 +324,9 @@ describe('CodexProvider', () => {
       assert.equal(capturedStartOptions?.model, 'gpt-5-codex');
     } finally {
       if (old === undefined) {
-        delete process.env.CTI_CODEX_PASS_MODEL;
+        delete process.env.CTI_CODEX_DEFAULT_MODEL;
       } else {
-        process.env.CTI_CODEX_PASS_MODEL = old;
+        process.env.CTI_CODEX_DEFAULT_MODEL = old;
       }
     }
   });

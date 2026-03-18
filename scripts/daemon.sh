@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-CTI_HOME="${CTI_HOME:-$HOME/.claude-to-im}"
+CTI_HOME="${CTI_HOME:-$HOME/.agents-to-im}"
 SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PID_FILE="$CTI_HOME/runtime/bridge.pid"
 STATUS_FILE="$CTI_HOME/runtime/status.json"
@@ -21,7 +21,7 @@ ensure_built() {
     if [ -n "$newest_src" ]; then
       need_build=1
     fi
-    # Also check if node_modules/claude-to-im was updated (npm update)
+    # Also check if the upstream bridge package was updated (npm update)
     # — its code is bundled into dist, so changes require a rebuild
     if [ "$need_build" = "0" ] && [ -d "$SKILL_DIR/node_modules/claude-to-im/src" ]; then
       local newest_dep
@@ -41,29 +41,12 @@ ensure_built() {
 clean_env() {
   unset CLAUDECODE 2>/dev/null || true
 
-  local runtime
-  runtime=$(grep "^CTI_RUNTIME=" "$CTI_HOME/config.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d "'" | tr -d '"' || true)
-  runtime="${runtime:-claude}"
-
   local mode="${CTI_ENV_ISOLATION:-inherit}"
   if [ "$mode" = "strict" ]; then
-    case "$runtime" in
-      codex)
-        while IFS='=' read -r name _; do
-          case "$name" in ANTHROPIC_*) unset "$name" 2>/dev/null || true ;; esac
-        done < <(env)
-        ;;
-      claude)
-        # Keep ANTHROPIC_* (from config.env) — needed for third-party API providers.
-        # Strip OPENAI_* to avoid cross-runtime leakage.
-        while IFS='=' read -r name _; do
-          case "$name" in OPENAI_*) unset "$name" 2>/dev/null || true ;; esac
-        done < <(env)
-        ;;
-      auto)
-        # Keep both ANTHROPIC_* and OPENAI_* for auto mode
-        ;;
-    esac
+    # Keep Claude and Codex auth variables available together. Runtime is
+    # selected per session inside the bridge, so there is no global backend
+    # mode to filter against here.
+    :
   fi
 }
 

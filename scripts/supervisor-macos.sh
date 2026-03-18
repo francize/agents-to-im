@@ -2,7 +2,7 @@
 # macOS supervisor — launchd-based process management.
 # Sourced by daemon.sh; expects CTI_HOME, SKILL_DIR, PID_FILE, STATUS_FILE, LOG_FILE.
 
-LAUNCHD_LABEL="com.claude-to-im.bridge"
+LAUNCHD_LABEL="com.agents-to-im.bridge"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST_FILE="$PLIST_DIR/$LAUNCHD_LABEL.plist"
 
@@ -28,31 +28,18 @@ build_env_dict() {
       ;; esac
   done < <(env)
 
-  # Forward runtime-specific API keys
-  local runtime
-  runtime=$(grep "^CTI_RUNTIME=" "$CTI_HOME/config.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d "'" | tr -d '"' || true)
-  runtime="${runtime:-claude}"
-
-  case "$runtime" in
-    codex|auto)
-      for var in OPENAI_API_KEY CODEX_API_KEY CTI_CODEX_API_KEY CTI_CODEX_BASE_URL; do
-        local val="${!var:-}"
-        [ -z "$val" ] && continue
-        dict+="${indent}<key>${var}</key>\n${indent}<string>${val}</string>\n"
-      done
-      ;;
-  esac
-  case "$runtime" in
-    claude|auto)
-      # Auto-forward all ANTHROPIC_* env vars (sourced from config.env by daemon.sh).
-      # Third-party API providers need these to reach the CLI subprocess.
-      while IFS='=' read -r name val; do
-        case "$name" in ANTHROPIC_*)
-          dict+="${indent}<key>${name}</key>\n${indent}<string>${val}</string>\n"
-          ;; esac
-      done < <(env)
-      ;;
-  esac
+  # Forward both Claude and Codex auth/config env vars. Runtime is selected
+  # per session inside the bridge, so there is no global backend switch here.
+  for var in OPENAI_API_KEY CODEX_API_KEY CTI_CODEX_API_KEY CTI_CODEX_BASE_URL; do
+    local val="${!var:-}"
+    [ -z "$val" ] && continue
+    dict+="${indent}<key>${var}</key>\n${indent}<string>${val}</string>\n"
+  done
+  while IFS='=' read -r name val; do
+    case "$name" in ANTHROPIC_*)
+      dict+="${indent}<key>${name}</key>\n${indent}<string>${val}</string>\n"
+      ;; esac
+  done < <(env)
 
   echo -e "$dict"
 }

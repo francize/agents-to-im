@@ -1,10 +1,10 @@
 {
-  "skill_name": "claude-to-im",
+  "skill_name": "agents-to-im",
   "evals": [
     {
       "id": 1,
-      "prompt": "帮我设置 Telegram 机器人，我想用手机给 Claude 发消息",
-      "expected_output": "Should trigger the skill, identify 'setup' subcommand, read setup-guides.md, and start the interactive Telegram setup wizard asking for Bot Token",
+      "prompt": "帮我配置飞书机器人，我想在私聊里用 /new:claude 开新会话",
+      "expected_output": "Should trigger the skill, identify 'setup' guidance, show the Feishu-only config flow, explain required env vars, long-connection events, and the DM-to-group session model",
       "files": []
     },
     {
