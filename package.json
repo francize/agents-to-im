@@ -12,7 +12,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.62",
     "@larksuiteoapi/node-sdk": "^1.59.0",
-    "claude-to-im": "github:op7418/claude-to-im"
+    "markdown-it": "^14.1.1"
   },
   "optionalDependencies": {
     "@openai/codex-sdk": "^0.110.0"

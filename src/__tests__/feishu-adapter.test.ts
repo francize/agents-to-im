@@ -3,11 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { initBridgeContext } from 'claude-to-im/src/lib/bridge/context.js';
+import { initBridgeContext } from '../bridge/context.js';
 
 import { CTI_HOME } from '../config.js';
 import { FeishuAdapter, findMissingAppScopes } from '../feishu/adapter.js';
-import { PendingPermissions } from '../permission-gateway.js';
 import { JsonFileStore } from '../store.js';
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
@@ -119,7 +118,7 @@ describe('FeishuAdapter', () => {
       },
     };
 
-    await adapter.handleResetCommand('group-1', 'reply-1');
+    await adapter.handleResetCommand({ channelType: 'feishu', chatId: 'group-1' }, 'reply-1');
 
     const updated = store.getChannelBinding('feishu', 'group-1');
     assert.ok(updated);
@@ -151,7 +150,7 @@ describe('FeishuAdapter', () => {
     let replyCalls = 0;
     let patchCalls = 0;
     const adapter = new FeishuAdapter() as any;
-    adapter.lastIncomingMessageId.set('group-2', 'incoming-1');
+    adapter.lastIncomingMessageId.set('group-2:main', 'incoming-1');
     adapter.restClient = {
       cardkit: {
         v1: {
@@ -179,7 +178,7 @@ describe('FeishuAdapter', () => {
       },
     };
 
-    const previewResult = await adapter.sendPreview('group-2', 'partial', 42);
+    const previewResult = await adapter.sendPreview({ channelType: 'feishu', chatId: 'group-2' }, 'partial', 42);
     const finalResult = await adapter.send({
       address: { channelType: 'feishu', chatId: 'group-2' },
       text: 'final answer',
@@ -191,6 +190,89 @@ describe('FeishuAdapter', () => {
     assert.equal(finalResult.messageId, 'preview-msg');
     assert.equal(replyCalls, 1);
     assert.equal(patchCalls, 2);
+  });
+
+  it('keeps threaded follow-up messages on the same route and replies in thread', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-thread',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5-codex',
+    });
+
+    const replyCalls: Array<{ replyInThread?: boolean }> = [];
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      cardkit: {
+        v1: {
+          card: {
+            create: async () => ({ code: 0, data: { card_id: 'card-1' } }),
+            update: async () => ({ code: 0, data: {} }),
+            settings: async () => ({ code: 0, data: {} }),
+          },
+          cardElement: {
+            content: async () => ({ code: 0, data: {} }),
+          },
+        },
+      },
+      im: {
+        message: {
+          reply: async (payload: { data?: { reply_in_thread?: boolean } }) => {
+            replyCalls.push({ replyInThread: payload.data?.reply_in_thread });
+            return { code: 0, data: { message_id: `msg-${replyCalls.length}` } };
+          },
+          create: async () => {
+            throw new Error('unexpected create');
+          },
+          patch: async () => ({ code: 0, data: {} }),
+        },
+      },
+    };
+
+    await adapter.handleIncomingEvent({
+      sender: {
+        sender_id: { open_id: 'ou_123' },
+        sender_type: 'user',
+      },
+      message: {
+        message_id: 'thread-msg-1',
+        chat_id: 'group-thread',
+        chat_type: 'group',
+        message_type: 'text',
+        content: JSON.stringify({ text: 'follow up' }),
+        create_time: String(Date.now()),
+        thread_id: 'omt-thread-1',
+        root_id: 'om-root-1',
+        parent_id: 'om-parent-1',
+      },
+    });
+
+    const queued = await adapter.consumeOne();
+    assert.equal(queued?.address.threadId, 'omt-thread-1');
+    assert.equal(adapter.lastIncomingMessageId.get('group-thread:thread:omt-thread-1'), 'thread-msg-1');
+
+    const previewResult = await adapter.sendPreview(
+      { channelType: 'feishu', chatId: 'group-thread', threadId: 'omt-thread-1' },
+      'partial',
+      7,
+    );
+    const finalResult = await adapter.send({
+      address: { channelType: 'feishu', chatId: 'group-thread', threadId: 'omt-thread-1' },
+      text: 'final threaded answer',
+      parseMode: 'Markdown',
+    });
+
+    assert.equal(previewResult, 'sent');
+    assert.equal(finalResult.ok, true);
+    assert.deepEqual(replyCalls, [{ replyInThread: true }]);
   });
 
   it('reports missing app scopes against the Feishu feature baseline', () => {

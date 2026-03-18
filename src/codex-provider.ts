@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import type { LLMProvider, StreamChatParams } from 'claude-to-im/src/lib/bridge/host.js';
+import type { LLMProvider, StreamChatParams } from './bridge/host.js';
 import type { PendingPermissions } from './permission-gateway.js';
 import { sseEvent } from './sse-utils.js';
 
@@ -68,14 +68,98 @@ function shouldRetryFreshThread(message: string): boolean {
   );
 }
 
+function resolveCodexHome(): string {
+  return process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+}
+
+function parseTomlStringLiteral(value: string): string | null {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      return JSON.parse(trimmed) as string;
+    } catch {
+      return trimmed.slice(1, -1);
+    }
+  }
+  if (trimmed.startsWith('\'') && trimmed.endsWith('\'')) {
+    return trimmed.slice(1, -1);
+  }
+  return null;
+}
+
+export function parseTrustedProjectsFromCodexConfig(content: string): string[] {
+  const trustedProjects: string[] = [];
+  let currentProject: string | null = null;
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const sectionMatch = trimmed.match(/^\[projects\.(.+)\]$/);
+    if (sectionMatch) {
+      currentProject = parseTomlStringLiteral(sectionMatch[1] || '');
+      continue;
+    }
+
+    if (!currentProject) continue;
+
+    const trustMatch = trimmed.match(/^trust_level\s*=\s*(.+)$/);
+    if (!trustMatch) continue;
+
+    if (parseTomlStringLiteral(trustMatch[1] || '') === 'trusted') {
+      trustedProjects.push(currentProject);
+    }
+  }
+
+  return trustedProjects;
+}
+
+function isPathWithin(root: string, target: string): boolean {
+  const normalizedRoot = path.resolve(root);
+  const normalizedTarget = path.resolve(target);
+  if (normalizedRoot === normalizedTarget) return true;
+  if (normalizedRoot === path.parse(normalizedRoot).root) {
+    return normalizedTarget.startsWith(normalizedRoot);
+  }
+  return normalizedTarget.startsWith(`${normalizedRoot}${path.sep}`);
+}
+
+export function isTrustedCodexWorkingDirectory(workingDirectory: string | undefined, trustedRoots: string[]): boolean {
+  if (!workingDirectory) return false;
+  return trustedRoots.some((root) => isPathWithin(root, workingDirectory));
+}
+
+function loadTrustedCodexProjects(): string[] {
+  const configPath = path.join(resolveCodexHome(), 'config.toml');
+  try {
+    return parseTrustedProjectsFromCodexConfig(fs.readFileSync(configPath, 'utf-8'));
+  } catch {
+    return [];
+  }
+}
+
 export class CodexProvider implements LLMProvider {
   private sdk: CodexModule | null = null;
   private codex: CodexInstance | null = null;
+  private trustedCodexProjects: string[] | null = null;
+  private codexConfigPresent: boolean | null = null;
 
   /** Maps session IDs to Codex thread IDs for resume. */
   private threadIds = new Map<string, string>();
 
   constructor(private pendingPerms: PendingPermissions) {}
+
+  private hasLocalCodexConfig(): boolean {
+    if (this.codexConfigPresent !== null) return this.codexConfigPresent;
+    this.codexConfigPresent = fs.existsSync(path.join(resolveCodexHome(), 'config.toml'));
+    return this.codexConfigPresent;
+  }
+
+  private getTrustedCodexProjects(): string[] {
+    if (this.trustedCodexProjects) return this.trustedCodexProjects;
+    this.trustedCodexProjects = loadTrustedCodexProjects();
+    return this.trustedCodexProjects;
+  }
 
   /**
    * Lazily load the Codex SDK. Throws a clear error if not installed.
@@ -105,6 +189,13 @@ export class CodexProvider implements LLMProvider {
     this.codex = new CodexClass({
       ...(apiKey ? { apiKey } : {}),
       ...(baseUrl ? { baseUrl } : {}),
+      env: {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+        ),
+        HOME: os.homedir(),
+        CODEX_HOME: resolveCodexHome(),
+      },
     });
 
     return { sdk: this.sdk, codex: this.codex };
@@ -137,14 +228,24 @@ export class CodexProvider implements LLMProvider {
               savedThreadId = undefined;
             }
 
-            const approvalPolicy = toApprovalPolicy(params.permissionMode);
             const passModel = shouldPassModelToCodex();
+            const trustedProjects = self.getTrustedCodexProjects();
+            const trustedWorkingDirectory = isTrustedCodexWorkingDirectory(
+              params.workingDirectory,
+              trustedProjects,
+            );
+            const forceSkipGitRepoCheck = process.env.CTI_CODEX_SKIP_GIT_REPO_CHECK === 'true';
 
             const threadOptions: Record<string, unknown> = {
               ...(passModel && params.model ? { model: params.model } : {}),
               ...(params.workingDirectory ? { workingDirectory: params.workingDirectory } : {}),
-              approvalPolicy,
+              ...(trustedWorkingDirectory || forceSkipGitRepoCheck ? { skipGitRepoCheck: true } : {}),
             };
+
+            // Let the local Codex CLI config drive approval behavior when available.
+            if (!self.hasLocalCodexConfig()) {
+              threadOptions.approvalPolicy = toApprovalPolicy(params.permissionMode);
+            }
 
             // Build input: Codex SDK UserInput supports { type: "text" } and
             // { type: "local_image", path: string }. We write base64 data to

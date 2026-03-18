@@ -72,6 +72,8 @@ Main variables:
 - `CTI_CODEX_BASE_URL`
 - `CTI_AUTO_APPROVE`
 
+Codex sessions reuse the user's local `~/.codex/config.toml` for trusted directories, sandbox, approval policy, and default model behavior. `CTI_CODEX_*` values are bridge-side overrides, not the primary config source.
+
 ## Quick Start
 
 1. Configure the Feishu app and publish it.

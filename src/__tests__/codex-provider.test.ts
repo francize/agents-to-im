@@ -331,6 +331,84 @@ describe('CodexProvider', () => {
     }
   });
 
+  it('reuses local Codex config and skips git repo check for trusted directories', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    let capturedStartOptions: Record<string, unknown> | undefined;
+    const mockThread = {
+      runStreamed: () => ({
+        events: (async function* () {
+          yield { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } };
+        })(),
+      }),
+    };
+
+    (provider as any).sdk = { Codex: class { constructor() {} } };
+    (provider as any).codex = {
+      startThread: (opts: Record<string, unknown>) => {
+        capturedStartOptions = opts;
+        return mockThread;
+      },
+    };
+    (provider as any).codexConfigPresent = true;
+    (provider as any).trustedCodexProjects = ['/Users/shesong/codes', '/'];
+
+    const stream = provider.streamChat({
+      prompt: 'hello',
+      sessionId: 'trusted-dir-session',
+      workingDirectory: '/Users/shesong/codes',
+      permissionMode: 'acceptEdits',
+    });
+    await collectStream(stream);
+
+    assert.equal(capturedStartOptions?.workingDirectory, '/Users/shesong/codes');
+    assert.equal(capturedStartOptions?.skipGitRepoCheck, true);
+    assert.ok(
+      !Object.prototype.hasOwnProperty.call(capturedStartOptions!, 'approvalPolicy'),
+      'Local ~/.codex/config.toml should own approval policy',
+    );
+  });
+
+  it('falls back to bridge approval policy when no local Codex config exists', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    let capturedStartOptions: Record<string, unknown> | undefined;
+    const mockThread = {
+      runStreamed: () => ({
+        events: (async function* () {
+          yield { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } };
+        })(),
+      }),
+    };
+
+    (provider as any).sdk = { Codex: class { constructor() {} } };
+    (provider as any).codex = {
+      startThread: (opts: Record<string, unknown>) => {
+        capturedStartOptions = opts;
+        return mockThread;
+      },
+    };
+    (provider as any).codexConfigPresent = false;
+    (provider as any).trustedCodexProjects = [];
+
+    const stream = provider.streamChat({
+      prompt: 'hello',
+      sessionId: 'no-config-session',
+      permissionMode: 'plan',
+    });
+    await collectStream(stream);
+
+    assert.equal(capturedStartOptions?.approvalPolicy, 'on-request');
+    assert.ok(
+      !Object.prototype.hasOwnProperty.call(capturedStartOptions!, 'skipGitRepoCheck'),
+      'skipGitRepoCheck should not be forced without trusted local config',
+    );
+  });
+
   it('retries with fresh thread when resume fails before any events', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
     const { PendingPermissions } = await import('../permission-gateway.js');
@@ -379,6 +457,28 @@ describe('CodexProvider', () => {
     assert.equal(startCalls, 1, 'Should fall back to a fresh thread');
     assert.ok(!errorEvent, 'Retry success should not emit error');
     assert.ok(resultEvent, 'Retry success should emit result');
+  });
+});
+
+describe('Codex config helpers', () => {
+  it('parses trusted project roots from ~/.codex/config.toml content', async () => {
+    const { parseTrustedProjectsFromCodexConfig, isTrustedCodexWorkingDirectory } = await import('../codex-provider.js');
+    const trusted = parseTrustedProjectsFromCodexConfig(`
+model = "gpt-5.4"
+
+[projects."/Users/shesong/codes"]
+trust_level = "trusted"
+
+[projects."/tmp/demo"]
+trust_level = "untrusted"
+
+[projects."/"]
+trust_level = "trusted"
+`);
+
+    assert.deepEqual(trusted, ['/Users/shesong/codes', '/']);
+    assert.equal(isTrustedCodexWorkingDirectory('/Users/shesong/codes/agents-to-im', trusted), true);
+    assert.equal(isTrustedCodexWorkingDirectory('/private/tmp/demo', trusted), true);
   });
 });
 

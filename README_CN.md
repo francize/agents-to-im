@@ -72,6 +72,8 @@
 - `CTI_CODEX_BASE_URL`
 - `CTI_AUTO_APPROVE`
 
+Codex 会话默认直接复用用户本地 `~/.codex/config.toml` 的 trusted 目录、sandbox、approval policy 和默认模型行为；`CTI_CODEX_*` 只是 bridge 侧补充覆盖，不是主配置源。
+
 ## 快速开始
 
 1. 在飞书开放平台完成应用配置并发布版本。

@@ -8,8 +8,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-import { initBridgeContext } from 'claude-to-im/src/lib/bridge/context.js';
-import * as bridgeManager from 'claude-to-im/src/lib/bridge/bridge-manager.js';
+import { initBridgeContext } from './bridge/context.js';
+import * as bridgeManager from './bridge/bridge-manager.js';
 
 import { loadConfig, configToSettings, CTI_HOME } from './config.js';
 import './feishu/adapter.js';
