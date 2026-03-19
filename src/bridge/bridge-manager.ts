@@ -57,6 +57,10 @@ function getStreamConfig(channelType = 'telegram'): StreamConfig {
   return { intervalMs, minDeltaChars, maxChars };
 }
 
+function getPlanWorkflowMeta(msg: InboundMessage): NonNullable<InboundMessage['bridgeMeta']>['planWorkflow'] | null {
+  return msg.bridgeMeta?.planWorkflow || null;
+}
+
 /**
  * Check if a message looks like a numeric permission shortcut (1/2/3) for
  * feishu/qq channels WITH at least one pending permission in that chat.
@@ -471,6 +475,7 @@ async function handleMessage(
 
   const rawText = msg.text.trim();
   const hasAttachments = msg.attachments && msg.attachments.length > 0;
+  const planWorkflowMeta = getPlanWorkflowMeta(msg);
 
   // Handle image-only download failures — surface error to user instead of silently dropping
   if (!rawText && !hasAttachments) {
@@ -642,7 +647,8 @@ async function handleMessage(
     // Pass permission callback so requests are forwarded to IM immediately
     // during streaming (the stream blocks until permission is resolved).
     // Use text or empty string for image-only messages (prompt is still required by streamClaude)
-    const promptText = text || (hasAttachments ? 'Describe this image.' : '');
+    const promptText = planWorkflowMeta?.promptText || text || (hasAttachments ? 'Describe this image.' : '');
+    const storedUserText = planWorkflowMeta?.storedUserText || text || (hasAttachments ? 'Describe this image.' : '');
 
     const result = await engine.processMessage(binding, promptText, async (perm) => {
       await broker.forwardPermissionRequest(
@@ -655,11 +661,15 @@ async function handleMessage(
         perm.suggestions,
         msg.messageId,
       );
-    }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText);
+    }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText, {
+      storedUserText,
+      permissionModeOverride: planWorkflowMeta?.permissionMode,
+    });
 
     // Send response text — render via channel-appropriate format
+    let responseDelivery: SendResult | null = null;
     if (result.responseText) {
-      await deliverResponse(adapter, msg.address, result.responseText, binding.codepilotSessionId, msg.messageId);
+      responseDelivery = await deliverResponse(adapter, msg.address, result.responseText, binding.codepilotSessionId, msg.messageId);
     } else if (result.hasError) {
       const errorResponse: OutboundMessage = {
         address: msg.address,
@@ -668,6 +678,53 @@ async function handleMessage(
         replyToMessageId: msg.messageId,
       };
       await deliver(adapter, errorResponse);
+    }
+
+    if (planWorkflowMeta?.kind === 'plan_request') {
+      const workflow = store.getPlanWorkflow(planWorkflowMeta.workflowId);
+      if (workflow) {
+        if (result.responseText) {
+          const actionCard = await deliver(adapter, {
+            address: msg.address,
+            text: '计划已经准备好。选择下一步操作。',
+            parseMode: 'Markdown',
+            inlineButtons: [[
+              { text: '执行', callbackData: `plan:execute:${workflow.workflowId}` },
+              { text: '继续', callbackData: `plan:continue:${workflow.workflowId}` },
+              { text: '取消', callbackData: `plan:cancel:${workflow.workflowId}` },
+            ]],
+            replyToMessageId: responseDelivery?.messageId || msg.messageId,
+            cardHeader: {
+              title: '计划已生成',
+              template: 'blue',
+            },
+          }, { sessionId: binding.codepilotSessionId });
+          if (actionCard.ok) {
+            store.updatePlanWorkflow(workflow.workflowId, {
+              status: 'awaiting_confirmation',
+              planMessageId: responseDelivery?.messageId || '',
+              actionCardMessageId: actionCard.messageId || '',
+              resolved: false,
+            });
+          } else {
+            store.updatePlanWorkflow(workflow.workflowId, {
+              status: 'awaiting_input',
+              resolved: true,
+            });
+            await deliver(adapter, {
+              address: msg.address,
+              text: '计划已生成，但操作卡片发送失败。请直接继续发送需求，或重新执行 `/plan`。',
+              parseMode: 'Markdown',
+              replyToMessageId: responseDelivery?.messageId || msg.messageId,
+            }, { sessionId: binding.codepilotSessionId });
+          }
+        } else {
+          store.updatePlanWorkflow(workflow.workflowId, {
+            status: 'awaiting_input',
+            resolved: true,
+          });
+        }
+      }
     }
 
     // Persist the actual SDK session ID for future resume.

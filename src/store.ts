@@ -16,6 +16,8 @@ import type {
   AuditLogInput,
   PermissionLinkInput,
   PermissionLinkRecord,
+  PlanWorkflowInput,
+  PlanWorkflowRecord,
   OutboundRefInput,
   UpsertChannelBindingInput,
 } from './bridge/host.js';
@@ -75,6 +77,7 @@ export class JsonFileStore implements BridgeStore {
   private bindings = new Map<string, ChannelBinding>();
   private messages = new Map<string, BridgeMessage[]>();
   private permissionLinks = new Map<string, PermissionLinkRecord>();
+  private planWorkflows = new Map<string, PlanWorkflowRecord>();
   private offsets = new Map<string, string>();
   private dedupKeys = new Map<string, number>();
   private locks = new Map<string, LockEntry>();
@@ -121,6 +124,14 @@ export class JsonFileStore implements BridgeStore {
       this.permissionLinks.set(id, p);
     }
 
+    const workflows = readJson<Record<string, PlanWorkflowRecord>>(
+      path.join(DATA_DIR, 'plan-workflows.json'),
+      {},
+    );
+    for (const [id, workflow] of Object.entries(workflows)) {
+      this.planWorkflows.set(id, workflow);
+    }
+
     // Offsets
     const offsets = readJson<Record<string, string>>(
       path.join(DATA_DIR, 'offsets.json'),
@@ -161,6 +172,13 @@ export class JsonFileStore implements BridgeStore {
     writeJson(
       path.join(DATA_DIR, 'permissions.json'),
       Object.fromEntries(this.permissionLinks),
+    );
+  }
+
+  private persistPlanWorkflows(): void {
+    writeJson(
+      path.join(DATA_DIR, 'plan-workflows.json'),
+      Object.fromEntries(this.planWorkflows),
     );
   }
 
@@ -564,6 +582,85 @@ export class JsonFileStore implements BridgeStore {
       }
     }
     return result;
+  }
+
+  upsertPlanWorkflow(workflow: PlanWorkflowInput): PlanWorkflowRecord {
+    const existing = workflow.workflowId ? this.planWorkflows.get(workflow.workflowId) : undefined;
+    const record: PlanWorkflowRecord = {
+      workflowId: existing?.workflowId || workflow.workflowId || uuid(),
+      bindingId: workflow.bindingId,
+      channelType: workflow.channelType,
+      chatId: workflow.chatId,
+      codepilotSessionId: workflow.codepilotSessionId,
+      status: workflow.status,
+      previousMode: workflow.previousMode,
+      requestText: workflow.requestText,
+      address: workflow.address,
+      routeKey: workflow.routeKey,
+      ...(workflow.requestMessageId ? { requestMessageId: workflow.requestMessageId } : {}),
+      ...(workflow.planMessageId ? { planMessageId: workflow.planMessageId } : {}),
+      ...(workflow.actionCardMessageId ? { actionCardMessageId: workflow.actionCardMessageId } : {}),
+      resolved: workflow.resolved ?? existing?.resolved ?? false,
+      createdAt: existing?.createdAt || now(),
+      updatedAt: now(),
+    };
+    this.planWorkflows.set(record.workflowId, record);
+    this.persistPlanWorkflows();
+    return { ...record };
+  }
+
+  getPlanWorkflow(workflowId: string): PlanWorkflowRecord | null {
+    const record = this.planWorkflows.get(workflowId);
+    return record ? { ...record } : null;
+  }
+
+  getActivePlanWorkflowByBinding(bindingId: string): PlanWorkflowRecord | null {
+    for (const workflow of this.planWorkflows.values()) {
+      if (workflow.bindingId === bindingId) {
+        return { ...workflow };
+      }
+    }
+    return null;
+  }
+
+  getActivePlanWorkflowByChat(channelType: string, chatId: string): PlanWorkflowRecord | null {
+    for (const workflow of this.planWorkflows.values()) {
+      if (workflow.channelType === channelType && workflow.chatId === chatId) {
+        return { ...workflow };
+      }
+    }
+    return null;
+  }
+
+  updatePlanWorkflow(
+    workflowId: string,
+    updates: Partial<Omit<PlanWorkflowRecord, 'workflowId' | 'bindingId' | 'channelType' | 'chatId' | 'codepilotSessionId' | 'createdAt'>>,
+  ): PlanWorkflowRecord | null {
+    const record = this.planWorkflows.get(workflowId);
+    if (!record) return null;
+    const next: PlanWorkflowRecord = {
+      ...record,
+      ...updates,
+      updatedAt: now(),
+    };
+    this.planWorkflows.set(workflowId, next);
+    this.persistPlanWorkflows();
+    return { ...next };
+  }
+
+  markPlanWorkflowResolved(workflowId: string): boolean {
+    const workflow = this.planWorkflows.get(workflowId);
+    if (!workflow || workflow.resolved) return false;
+    workflow.resolved = true;
+    workflow.updatedAt = now();
+    this.persistPlanWorkflows();
+    return true;
+  }
+
+  deletePlanWorkflow(workflowId: string): boolean {
+    const deleted = this.planWorkflows.delete(workflowId);
+    if (deleted) this.persistPlanWorkflows();
+    return deleted;
   }
 
   // ── Channel Offsets ──

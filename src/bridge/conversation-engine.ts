@@ -50,6 +50,11 @@ export interface ConversationResult {
   sdkSessionId: string | null;
 }
 
+export interface ProcessMessageOptions {
+  storedUserText?: string;
+  permissionModeOverride?: string;
+}
+
 /**
  * Process an inbound message: send to Claude, consume the response stream,
  * save to DB, and return the result.
@@ -61,6 +66,7 @@ export async function processMessage(
   abortSignal?: AbortSignal,
   files?: FileAttachment[],
   onPartialText?: OnPartialText,
+  options?: ProcessMessageOptions,
 ): Promise<ConversationResult> {
   const { store, llm } = getBridgeContext();
   const sessionId = binding.codepilotSessionId;
@@ -92,7 +98,8 @@ export async function processMessage(
 
     // Save user message — persist file attachments to disk using the same
     // <!--files:JSON--> format as the desktop chat route, so the UI can render them.
-    let savedContent = text;
+    const storedUserText = options?.storedUserText ?? text;
+    let savedContent = storedUserText;
     if (files && files.length > 0) {
       const workDir = binding.workingDirectory || session?.working_directory || '';
       if (workDir) {
@@ -108,13 +115,13 @@ export async function processMessage(
             fs.writeFileSync(filePath, buffer);
             return { id: f.id, name: f.name, type: f.type, size: buffer.length, filePath };
           });
-          savedContent = `<!--files:${JSON.stringify(fileMeta)}-->${text}`;
+          savedContent = `<!--files:${JSON.stringify(fileMeta)}-->${storedUserText}`;
         } catch (err) {
           console.warn('[conversation-engine] Failed to persist file attachments:', err instanceof Error ? err.message : err);
-          savedContent = `[${files.length} image(s) attached] ${text}`;
+          savedContent = `[${files.length} image(s) attached] ${storedUserText}`;
         }
       } else {
-        savedContent = `[${files.length} image(s) attached] ${text}`;
+        savedContent = `[${files.length} image(s) attached] ${storedUserText}`;
       }
     }
     store.addMessage(sessionId, 'user', savedContent);
@@ -134,11 +141,13 @@ export async function processMessage(
     const effectiveModel = binding.model || session?.model || store.getSetting('default_model') || undefined;
 
     // Permission mode from binding mode
-    let permissionMode: string;
-    switch (binding.mode) {
-      case 'plan': permissionMode = 'plan'; break;
-      case 'ask': permissionMode = 'default'; break;
-      default: permissionMode = 'acceptEdits'; break;
+    let permissionMode = options?.permissionModeOverride;
+    if (!permissionMode) {
+      switch (binding.mode) {
+        case 'plan': permissionMode = 'plan'; break;
+        case 'ask': permissionMode = 'default'; break;
+        default: permissionMode = 'acceptEdits'; break;
+      }
     }
 
     // Load conversation history for context

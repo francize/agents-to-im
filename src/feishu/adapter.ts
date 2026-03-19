@@ -11,6 +11,7 @@ import type {
 import { BaseChannelAdapter, registerAdapterFactory } from '../bridge/channel-adapter.js';
 import { getBridgeContext } from '../bridge/context.js';
 import { handlePermissionCallback } from '../bridge/permission-broker.js';
+import { validateMode } from '../bridge/security/validators.js';
 import {
   buildCardContent,
   buildPostContent,
@@ -25,6 +26,7 @@ import { JsonFileStore } from '../store.js';
 
 const STREAM_ELEMENT_ID = 'stream_content';
 const TYPING_EMOJI = 'Typing';
+const PLAN_SUFFIX = ' [PLAN]';
 export const FEISHU_REQUIRED_APP_SCOPES = [
   'im:message:send_as_bot',
   'im:message:readonly',
@@ -98,6 +100,14 @@ function sanitizeTitleFallback(text: string): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, 30) || '新会话';
 }
 
+function stripPlanSuffix(text: string): string {
+  return text.replace(/\s*\[PLAN\]$/, '').trim();
+}
+
+function defaultChatName(runtime: RuntimeName): string {
+  return runtime === 'codex' ? 'Codex 新会话' : 'Claude 新会话';
+}
+
 function buildSimpleCard(text: string): Record<string, unknown> {
   return {
     schema: '2.0',
@@ -143,7 +153,12 @@ function buildStreamingCardSkeleton(): Record<string, unknown> {
   };
 }
 
-function buildPermissionCard(text: string, buttons: NonNullable<OutboundMessage['inlineButtons']>): lark.InteractiveCard {
+function buildActionCard(
+  title: string,
+  text: string,
+  buttons: NonNullable<OutboundMessage['inlineButtons']>,
+  template: NonNullable<lark.InteractiveCard['header']>['template'] = 'orange',
+): lark.InteractiveCard {
   const actions = buttons.flat().map((button) => {
     const lower = button.text.toLowerCase();
     const type: 'default' | 'danger' | 'primary' =
@@ -168,9 +183,9 @@ function buildPermissionCard(text: string, buttons: NonNullable<OutboundMessage[
     header: {
       title: {
         tag: 'plain_text',
-        content: 'Permission Required',
+        content: title,
       },
-      template: 'orange',
+      template,
     },
     elements: [
       {
@@ -183,6 +198,10 @@ function buildPermissionCard(text: string, buttons: NonNullable<OutboundMessage[
       },
     ],
   };
+}
+
+function buildPermissionCard(text: string, buttons: NonNullable<OutboundMessage['inlineButtons']>): lark.InteractiveCard {
+  return buildActionCard('Permission Required', text, buttons, 'orange');
 }
 
 function collectTextFragments(value: unknown): string[] {
@@ -221,6 +240,27 @@ function normalizeMarkdown(message: OutboundMessage): string {
     text = preprocessFeishuMarkdown(text);
   }
   return text;
+}
+
+function buildPlanningPrompt(requestText: string): string {
+  return [
+    '你现在处于 PLAN 阶段。',
+    '只输出计划，不要执行，不要调用工具，不要修改文件，也不要声称已经完成。',
+    '请给出简洁、可执行的步骤、前置条件和主要风险。',
+    '',
+    '需求如下：',
+    requestText,
+  ].join('\n');
+}
+
+function buildPlanExecutionPrompt(requestText: string): string {
+  return [
+    '用户已经确认上一轮计划，现在开始实施。',
+    '不要重复输出完整计划，直接执行当前需求；必要时只保留简短进度说明。',
+    '',
+    '原始需求如下：',
+    requestText,
+  ].join('\n');
 }
 
 function assertLarkOk(response: { code?: number; msg?: string }, context: string): void {
@@ -453,7 +493,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
 
     if (message.inlineButtons && message.inlineButtons.length > 0) {
-      return this.sendPermissionCard(message.address, normalizeMarkdown(message), message.inlineButtons, message.replyToMessageId);
+      return this.sendPermissionCard(
+        message.address,
+        normalizeMarkdown(message),
+        message.inlineButtons,
+        message.replyToMessageId,
+        message.cardHeader,
+      );
     }
 
     const activePreviewKey = this.activePreviewByRoute.get(routeKeyForAddress(message.address));
@@ -575,13 +621,19 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!callbackData) {
       return { toast: { type: 'warning', content: 'Unsupported action' } };
     }
-    const store = this.getStore();
-    const permissionRequestId = callbackData.split(':').slice(2).join(':');
-    const link = store.getPermissionLink(permissionRequestId);
-    if (link && handlePermissionCallback(callbackData, link.chatId)) {
-      return { toast: { type: 'success', content: 'Permission updated' } };
+    if (callbackData.startsWith('perm:')) {
+      const store = this.getStore();
+      const permissionRequestId = callbackData.split(':').slice(2).join(':');
+      const link = store.getPermissionLink(permissionRequestId);
+      if (link && handlePermissionCallback(callbackData, link.chatId, event.open_message_id)) {
+        return { toast: { type: 'success', content: 'Permission updated' } };
+      }
+      return { toast: { type: 'warning', content: 'Permission already handled' } };
     }
-    return { toast: { type: 'warning', content: 'Permission already handled' } };
+    if (callbackData.startsWith('plan:')) {
+      return this.handlePlanCardAction(event, callbackData);
+    }
+    return { toast: { type: 'warning', content: 'Unsupported action' } };
   }
 
   private async handleDirectMessage(sender: SenderIdentity, inbound: InboundMessage): Promise<void> {
@@ -598,8 +650,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
   }
 
   private async handleGroupMessage(_sender: SenderIdentity, inbound: InboundMessage): Promise<void> {
+    const store = this.getStore();
     const text = inbound.text.trim();
     const lower = text.toLowerCase();
+    const binding = store.getChannelBinding(this.channelType, inbound.address.chatId);
+    const workflow = binding ? store.getActivePlanWorkflowByBinding(binding.id) : null;
+
     if (lower.startsWith('/perm ')) {
       const handled = this.handlePermissionCommand(inbound.address.chatId, text, inbound.messageId);
       if (!handled) {
@@ -611,19 +667,38 @@ export class FeishuAdapter extends BaseChannelAdapter {
       await this.handleResetCommand(inbound.address, inbound.messageId);
       return;
     }
+    if (lower.startsWith('/mode')) {
+      if (!binding) {
+        await this.sendAsPost(inbound.address, '当前群尚未绑定会话。请先私聊 Bot 发送 `/new:claude` 或 `/new:codex`。', inbound.messageId);
+        return;
+      }
+      await this.handleModeCommand(binding.id, text, inbound.address, inbound.messageId);
+      return;
+    }
+    if (lower === '/plan' || lower.startsWith('/plan ')) {
+      if (!binding) {
+        await this.sendAsPost(inbound.address, '当前群尚未绑定会话。请先私聊 Bot 发送 `/new:claude` 或 `/new:codex`。', inbound.messageId);
+        return;
+      }
+      await this.handlePlanCommand(binding.id, inbound);
+      return;
+    }
     if (lower.startsWith('/new')) {
       await this.sendAsPost(inbound.address, '请先私聊 Bot 使用 `/new:claude` 或 `/new:codex` 创建新会话。', inbound.messageId);
       return;
     }
     if (lower.startsWith('/')) {
-      await this.sendAsPost(inbound.address, '该群仅支持普通对话、`/reset` 与 `/perm ...`。如需新会话，请私聊 Bot。', inbound.messageId);
+      await this.sendAsPost(inbound.address, '该群仅支持普通对话、`/plan`、`/mode`、`/reset` 与 `/perm ...`。如需新会话，请私聊 Bot。', inbound.messageId);
       return;
     }
 
-    const binding = this.getStore().getChannelBinding(this.channelType, inbound.address.chatId);
     if (!binding) {
       await this.sendAsPost(inbound.address, '当前群尚未绑定会话。请先私聊 Bot 发送 `/new:claude` 或 `/new:codex`。', inbound.messageId);
       return;
+    }
+    if (workflow) {
+      const consumed = await this.handlePlanWorkflowMessage(binding.id, workflow.workflowId, inbound);
+      if (consumed) return;
     }
     this.enqueue(inbound);
   }
@@ -662,6 +737,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         workingDirectory: session.working_directory,
         model: session.model,
       });
+      await this.syncChatName(chatId);
       await this.sendAsPost({ channelType: this.channelType, chatId }, `已创建 ${runtime} 会话。后续请直接在本群继续对话。`);
       await this.sendAsPost(inbound.address, `已创建新群并绑定 ${runtime} 会话。`, inbound.messageId);
     } catch (error) {
@@ -681,6 +757,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
       await this.sendAsPost(address, '当前群尚未绑定会话，请先私聊 Bot 使用 `/new:claude` 或 `/new:codex`。', replyToMessageId);
       return;
     }
+    const workflow = store.getActivePlanWorkflowByBinding(binding.id);
+    if (workflow) {
+      store.deletePlanWorkflow(workflow.workflowId);
+    }
     const ext = store.getSessionExt(binding.codepilotSessionId);
     const runtime = ext?.runtime || 'claude';
     const session = store.createRuntimeSession({
@@ -699,6 +779,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (updated) {
       store.updateChannelBinding(updated.id, { mode: binding.mode, sdkSessionId: '' });
     }
+    await this.syncChatName(address.chatId);
     await this.sendAsPost(address, `已重置当前群会话，runtime 保持为 ${runtime}。`, replyToMessageId);
   }
 
@@ -711,6 +792,204 @@ export class FeishuAdapter extends BaseChannelAdapter {
     return handlePermissionCallback(`perm:${action}:${permissionRequestId}`, chatId, messageId);
   }
 
+  private async handleModeCommand(bindingId: string, text: string, address: ChannelAddress, replyToMessageId?: string): Promise<void> {
+    const parts = text.trim().split(/\s+/);
+    const mode = parts[1]?.toLowerCase() || '';
+    if (!validateMode(mode)) {
+      await this.sendAsPost(address, '用法：`/mode plan|code|ask`。', replyToMessageId);
+      return;
+    }
+    const store = this.getStore();
+    const binding = Array.from(store.listChannelBindings(this.channelType)).find((item) => item.id === bindingId);
+    if (!binding) {
+      await this.sendAsPost(address, '当前群尚未绑定会话。', replyToMessageId);
+      return;
+    }
+    const workflow = store.getActivePlanWorkflowByBinding(bindingId);
+    if (workflow) {
+      store.deletePlanWorkflow(workflow.workflowId);
+    }
+    store.updateChannelBinding(bindingId, { mode });
+    await this.syncChatName(address.chatId);
+    await this.sendAsPost(address, `已切换到 ${mode} 模式。`, replyToMessageId);
+  }
+
+  private async handlePlanCommand(bindingId: string, inbound: InboundMessage): Promise<void> {
+    const store = this.getStore();
+    const binding = Array.from(store.listChannelBindings(this.channelType)).find((item) => item.id === bindingId);
+    if (!binding) {
+      await this.sendAsPost(inbound.address, '当前群尚未绑定会话。', inbound.messageId);
+      return;
+    }
+    const existing = store.getActivePlanWorkflowByBinding(bindingId);
+    if (existing) {
+      await this.sendAsPost(
+        inbound.address,
+        '当前群已有进行中的 PLAN 流程。请先点击上一张计划卡片中的“执行 / 继续 / 取消”，或使用 `/mode ...` / `/reset` 覆盖。',
+        inbound.messageId,
+      );
+      return;
+    }
+
+    const requestText = inbound.text.trim().slice('/plan'.length).trim();
+    const workflow = store.upsertPlanWorkflow({
+      bindingId,
+      channelType: this.channelType,
+      chatId: inbound.address.chatId,
+      codepilotSessionId: binding.codepilotSessionId,
+      status: requestText ? 'planning' : 'awaiting_input',
+      previousMode: binding.mode,
+      requestText,
+      address: inbound.address,
+      routeKey: routeKeyForAddress(inbound.address),
+      requestMessageId: inbound.messageId,
+      resolved: true,
+    });
+    await this.syncChatName(inbound.address.chatId);
+
+    if (!requestText) {
+      await this.sendAsPost(inbound.address, '已进入 PLAN 流程。下一条非命令消息将作为规划需求。', inbound.messageId);
+      return;
+    }
+
+    this.enqueue(this.buildPlanRequestInbound(inbound.address, inbound.messageId, workflow.workflowId, requestText));
+  }
+
+  private async handlePlanWorkflowMessage(bindingId: string, workflowId: string, inbound: InboundMessage): Promise<boolean> {
+    const store = this.getStore();
+    const workflow = store.getPlanWorkflow(workflowId);
+    if (!workflow) return false;
+    const routeKey = routeKeyForAddress(inbound.address);
+    if (workflow.routeKey !== routeKey) {
+      await this.sendAsPost(
+        inbound.address,
+        '当前 PLAN 流程已在另一条线程中进行，请回原线程继续或先取消。',
+        inbound.messageId,
+      );
+      return true;
+    }
+    if (workflow.bindingId !== bindingId) return false;
+
+    switch (workflow.status) {
+      case 'awaiting_input':
+        store.updatePlanWorkflow(workflow.workflowId, {
+          status: 'planning',
+          requestText: inbound.text.trim(),
+          address: inbound.address,
+          routeKey,
+          requestMessageId: inbound.messageId,
+          planMessageId: '',
+          actionCardMessageId: '',
+          resolved: true,
+        });
+        this.enqueue(this.buildPlanRequestInbound(inbound.address, inbound.messageId, workflow.workflowId, inbound.text.trim()));
+        return true;
+      case 'planning':
+        await this.sendAsPost(inbound.address, '当前 PLAN 请求正在处理中，请等待本轮计划完成。', inbound.messageId);
+        return true;
+      case 'awaiting_confirmation':
+        await this.sendAsPost(inbound.address, '请先点击上一张计划卡片中的“执行 / 继续 / 取消”。', inbound.messageId);
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  private buildPlanRequestInbound(address: ChannelAddress, messageId: string, workflowId: string, requestText: string): InboundMessage {
+    return {
+      messageId,
+      address,
+      text: requestText,
+      timestamp: Date.now(),
+      bridgeMeta: {
+        planWorkflow: {
+          kind: 'plan_request',
+          workflowId,
+          promptText: buildPlanningPrompt(requestText),
+          storedUserText: requestText,
+          permissionMode: 'plan',
+        },
+      },
+    };
+  }
+
+  private buildPlanExecutionInbound(address: ChannelAddress, messageId: string, workflowId: string, requestText: string): InboundMessage {
+    const storedUserText = `执行已确认计划：${requestText}`;
+    return {
+      messageId,
+      address,
+      text: storedUserText,
+      timestamp: Date.now(),
+      bridgeMeta: {
+        planWorkflow: {
+          kind: 'plan_execute',
+          workflowId,
+          promptText: buildPlanExecutionPrompt(requestText),
+          storedUserText,
+          permissionMode: 'acceptEdits',
+        },
+      },
+    };
+  }
+
+  private async handlePlanCardAction(
+    event: lark.InteractiveCardActionEvent,
+    callbackData: string,
+  ): Promise<{ toast: { type: string; content: string } }> {
+    const [, action, workflowId] = callbackData.split(':');
+    if (!workflowId || !action) {
+      return { toast: { type: 'warning', content: 'Unsupported action' } };
+    }
+    const store = this.getStore();
+    const workflow = store.getPlanWorkflow(workflowId);
+    if (!workflow) {
+      return { toast: { type: 'warning', content: 'PLAN workflow not found' } };
+    }
+    if (workflow.actionCardMessageId && workflow.actionCardMessageId !== event.open_message_id) {
+      return { toast: { type: 'warning', content: 'PLAN card is stale' } };
+    }
+    if (workflow.status !== 'awaiting_confirmation') {
+      return { toast: { type: 'warning', content: 'PLAN workflow is no longer waiting for confirmation' } };
+    }
+    if (!store.markPlanWorkflowResolved(workflowId)) {
+      return { toast: { type: 'warning', content: 'PLAN action already handled' } };
+    }
+
+    const binding = store.getChannelBinding(this.channelType, workflow.chatId);
+    switch (action) {
+      case 'execute':
+        if (binding) {
+          store.updateChannelBinding(binding.id, { mode: 'code' });
+        }
+        store.deletePlanWorkflow(workflowId);
+        await this.syncChatName(workflow.chatId);
+        this.enqueue(this.buildPlanExecutionInbound(
+          workflow.address,
+          workflow.requestMessageId || workflow.planMessageId || workflow.actionCardMessageId || workflow.workflowId,
+          workflowId,
+          workflow.requestText,
+        ));
+        return { toast: { type: 'success', content: '开始执行已确认计划' } };
+      case 'continue':
+        store.updatePlanWorkflow(workflowId, {
+          status: 'awaiting_input',
+          resolved: true,
+        });
+        await this.syncChatName(workflow.chatId);
+        return { toast: { type: 'success', content: '继续保持 PLAN 模式' } };
+      case 'cancel':
+        if (binding) {
+          store.updateChannelBinding(binding.id, { mode: workflow.previousMode });
+        }
+        store.deletePlanWorkflow(workflowId);
+        await this.syncChatName(workflow.chatId);
+        return { toast: { type: 'success', content: '已取消 PLAN 流程' } };
+      default:
+        store.updatePlanWorkflow(workflowId, { resolved: false });
+        return { toast: { type: 'warning', content: 'Unsupported action' } };
+    }
+  }
+
   private async createSessionGroup(runtime: RuntimeName, sender: SenderIdentity): Promise<string> {
     if (!this.restClient) throw new Error('Feishu client not initialized');
     const response = await this.restClient.im.chat.create({
@@ -719,7 +998,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         set_bot_manager: true,
       },
       data: {
-        name: runtime === 'codex' ? 'Codex 新会话' : 'Claude 新会话',
+        name: defaultChatName(runtime),
         chat_mode: 'group',
         chat_type: 'private',
         group_message_type: 'chat',
@@ -755,23 +1034,55 @@ export class FeishuAdapter extends BaseChannelAdapter {
     try {
       const generated = await llm.generateTitle?.(binding.codepilotSessionId, firstUser.content, firstAssistant.content);
       const title = generated || fallbackTitle;
-      const response = await this.restClient.im.chat.update({
-        path: { chat_id: chatId },
-        data: { name: title },
-      });
-      assertLarkOk(response, 'im.chat.update');
       store.updateSessionExt(binding.codepilotSessionId, {
         title,
         titleStatus: 'done',
       });
+      await this.syncChatName(chatId);
     } catch (error) {
       console.warn('[feishu-adapter] Failed to rename chat:', error);
       store.updateSessionExt(binding.codepilotSessionId, {
         title: fallbackTitle,
         titleStatus: 'failed',
       });
+      await this.syncChatName(chatId);
     } finally {
       this.pendingTitles.delete(chatId);
+    }
+  }
+
+  private shouldDecoratePlan(bindingId: string, mode: 'code' | 'plan' | 'ask'): boolean {
+    if (mode === 'plan') return true;
+    return !!this.getStore().getActivePlanWorkflowByBinding(bindingId);
+  }
+
+  private computeChatDisplayName(chatId: string): string | null {
+    const store = this.getStore();
+    const binding = store.getChannelBinding(this.channelType, chatId);
+    if (!binding) return null;
+    const ext = store.getSessionExt(binding.codepilotSessionId);
+    const runtime = ext?.runtime || 'claude';
+    const baseName = stripPlanSuffix(ext?.title || defaultChatName(runtime));
+    if (!this.shouldDecoratePlan(binding.id, binding.mode)) {
+      return baseName;
+    }
+    return `${baseName}${PLAN_SUFFIX}`;
+  }
+
+  private async syncChatName(chatId: string): Promise<void> {
+    if (!this.restClient) return;
+    const chatApi = this.restClient.im?.chat;
+    if (!chatApi?.update) return;
+    const name = this.computeChatDisplayName(chatId);
+    if (!name) return;
+    try {
+      const response = await chatApi.update({
+        path: { chat_id: chatId },
+        data: { name },
+      });
+      assertLarkOk(response, 'im.chat.update');
+    } catch (error) {
+      console.warn('[feishu-adapter] Failed to sync chat name:', error);
     }
   }
 
@@ -884,8 +1195,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
     text: string,
     buttons: NonNullable<OutboundMessage['inlineButtons']>,
     replyToMessageId?: string,
+    cardHeader?: OutboundMessage['cardHeader'],
   ): Promise<SendResult> {
-    const result = await this.sendInteractiveCard(address, buildPermissionCard(text, buttons), replyToMessageId);
+    const card = cardHeader
+      ? buildActionCard(cardHeader.title, text, buttons, cardHeader.template || 'blue')
+      : buildPermissionCard(text, buttons);
+    const result = await this.sendInteractiveCard(address, card, replyToMessageId);
     return {
       ok: true,
       messageId: result.messageId,

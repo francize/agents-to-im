@@ -292,4 +292,250 @@ describe('FeishuAdapter', () => {
 
     assert.deepEqual(missing, ['im:chat:update']);
   });
+
+  it('supports /mode in group chat, clears active plan workflow, and syncs PLAN suffix', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-mode',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5-codex',
+    });
+    store.upsertPlanWorkflow({
+      bindingId: binding.id,
+      channelType: 'feishu',
+      chatId: 'group-mode',
+      codepilotSessionId: session.id,
+      status: 'awaiting_input',
+      previousMode: 'code',
+      requestText: '',
+      address: { channelType: 'feishu', chatId: 'group-mode' },
+      routeKey: 'group-mode:main',
+      requestMessageId: 'msg-1',
+      resolved: true,
+    });
+
+    const updatedNames: string[] = [];
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        chat: {
+          update: async (payload: { data: { name: string } }) => {
+            updatedNames.push(payload.data.name);
+            return { code: 0, data: {} };
+          },
+        },
+        message: {
+          create: async () => ({ code: 0, data: { message_id: 'msg-1' } }),
+          reply: async () => ({ code: 0, data: { message_id: 'msg-1' } }),
+        },
+      },
+    };
+
+    await adapter.handleModeCommand(
+      binding.id,
+      '/mode plan',
+      { channelType: 'feishu', chatId: 'group-mode' },
+      'reply-1',
+    );
+
+    assert.equal(store.getChannelBinding('feishu', 'group-mode')?.mode, 'plan');
+    assert.equal(store.getActivePlanWorkflowByBinding(binding.id), null);
+    assert.equal(updatedNames.at(-1), 'Codex 新会话 [PLAN]');
+  });
+
+  it('enters awaiting_input on bare /plan and converts the next same-thread message into a planning request', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-plan',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+
+    const replies: string[] = [];
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        chat: {
+          update: async () => ({ code: 0, data: {} }),
+        },
+        message: {
+          create: async (payload: { data: { content: string } }) => {
+            replies.push(payload.data.content);
+            return { code: 0, data: { message_id: `msg-${replies.length}` } };
+          },
+          reply: async (payload: { data: { content: string } }) => {
+            replies.push(payload.data.content);
+            return { code: 0, data: { message_id: `msg-${replies.length}` } };
+          },
+        },
+      },
+    };
+
+    await adapter.handleGroupMessage(
+      { id: 'ou_123', type: 'open_id' },
+      {
+        messageId: 'cmd-1',
+        address: { channelType: 'feishu', chatId: 'group-plan', threadId: 'thread-1' },
+        text: '/plan',
+        timestamp: Date.now(),
+      },
+    );
+
+    const waiting = store.getActivePlanWorkflowByBinding(binding.id);
+    assert.ok(waiting);
+    assert.equal(waiting?.status, 'awaiting_input');
+
+    await adapter.handleGroupMessage(
+      { id: 'ou_123', type: 'open_id' },
+      {
+        messageId: 'user-2',
+        address: { channelType: 'feishu', chatId: 'group-plan', threadId: 'thread-1' },
+        text: '请先做一个实现计划',
+        timestamp: Date.now(),
+      },
+    );
+
+    const queued = (adapter as any).queue[0];
+    assert.equal(queued.bridgeMeta.planWorkflow.kind, 'plan_request');
+    assert.equal(queued.bridgeMeta.planWorkflow.storedUserText, '请先做一个实现计划');
+    assert.match(queued.bridgeMeta.planWorkflow.promptText, /只输出计划/);
+    assert.equal(store.getPlanWorkflow(waiting!.workflowId)?.status, 'planning');
+  });
+
+  it('rejects cross-thread messages while a PLAN workflow is waiting for input', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-conflict',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+    store.upsertPlanWorkflow({
+      bindingId: binding.id,
+      channelType: 'feishu',
+      chatId: 'group-conflict',
+      codepilotSessionId: session.id,
+      status: 'awaiting_input',
+      previousMode: 'code',
+      requestText: '',
+      address: { channelType: 'feishu', chatId: 'group-conflict', threadId: 'thread-1' },
+      routeKey: 'group-conflict:thread:thread-1',
+      requestMessageId: 'cmd-1',
+      resolved: true,
+    });
+
+    const replies: string[] = [];
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        message: {
+          create: async () => ({ code: 0, data: { message_id: 'msg-1' } }),
+          reply: async (payload: { data: { content: string } }) => {
+            replies.push(payload.data.content);
+            return { code: 0, data: { message_id: 'msg-1' } };
+          },
+        },
+      },
+    };
+
+    await adapter.handleGroupMessage(
+      { id: 'ou_123', type: 'open_id' },
+      {
+        messageId: 'user-2',
+        address: { channelType: 'feishu', chatId: 'group-conflict', threadId: 'thread-2' },
+        text: '别的线程消息',
+        timestamp: Date.now(),
+      },
+    );
+
+    assert.equal((adapter as any).queue.length, 0);
+    assert.match(replies[0], /另一条线程/);
+  });
+
+  it('executes confirmed plan cards by switching back to code and queueing a synthetic execution request', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-execute',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5-codex',
+    });
+    store.updateChannelBinding(binding.id, { mode: 'ask' });
+    const workflow = store.upsertPlanWorkflow({
+      workflowId: 'wf-1',
+      bindingId: binding.id,
+      channelType: 'feishu',
+      chatId: 'group-execute',
+      codepilotSessionId: session.id,
+      status: 'awaiting_confirmation',
+      previousMode: 'ask',
+      requestText: '修复这个问题',
+      address: { channelType: 'feishu', chatId: 'group-execute', threadId: 'thread-1' },
+      routeKey: 'group-execute:thread:thread-1',
+      requestMessageId: 'user-1',
+      planMessageId: 'plan-msg-1',
+      actionCardMessageId: 'card-msg-1',
+      resolved: false,
+    });
+
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        chat: {
+          update: async () => ({ code: 0, data: {} }),
+        },
+      },
+    };
+
+    const result = await adapter.handlePlanCardAction(
+      {
+        open_id: 'ou_123',
+        tenant_key: 'tenant',
+        token: 'token',
+        open_message_id: 'card-msg-1',
+        action: {
+          value: { callback_data: 'plan:execute:wf-1' },
+          tag: 'button',
+        },
+      },
+      'plan:execute:wf-1',
+    );
+
+    assert.equal(result.toast.type, 'success');
+    assert.equal(store.getChannelBinding('feishu', 'group-execute')?.mode, 'code');
+    assert.equal(store.getPlanWorkflow(workflow.workflowId), null);
+    assert.equal((adapter as any).queue.length, 1);
+    assert.equal((adapter as any).queue[0].bridgeMeta.planWorkflow.kind, 'plan_execute');
+    assert.match((adapter as any).queue[0].bridgeMeta.planWorkflow.promptText, /开始实施/);
+  });
 });

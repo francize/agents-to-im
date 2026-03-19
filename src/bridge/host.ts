@@ -6,7 +6,7 @@
  * interfaces to use the bridge.
  */
 
-import type { ChannelBinding, ChannelType } from './types.js';
+import type { ChannelAddress, ChannelBinding, ChannelType } from './types.js';
 
 // ── Bridge-local types (replacing @/types imports) ────────────
 
@@ -116,6 +116,32 @@ export interface PermissionLinkRecord {
   suggestions: string;
 }
 
+export type PlanWorkflowStatus = 'awaiting_input' | 'planning' | 'awaiting_confirmation';
+
+export interface PlanWorkflowInput {
+  workflowId?: string;
+  bindingId: string;
+  channelType: string;
+  chatId: string;
+  codepilotSessionId: string;
+  status: PlanWorkflowStatus;
+  previousMode: 'code' | 'plan' | 'ask';
+  requestText: string;
+  address: ChannelAddress;
+  routeKey: string;
+  requestMessageId?: string;
+  planMessageId?: string;
+  actionCardMessageId?: string;
+  resolved?: boolean;
+}
+
+export interface PlanWorkflowRecord extends Omit<PlanWorkflowInput, 'workflowId'> {
+  workflowId: string;
+  resolved: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /** Input for inserting an outbound reference. */
 export interface OutboundRefInput {
   channelType: string;
@@ -191,6 +217,15 @@ export interface BridgeStore {
   markPermissionLinkResolved(permissionRequestId: string): boolean;
   /** List unresolved permission links for a given chat. */
   listPendingPermissionLinksByChat(chatId: string): PermissionLinkRecord[];
+
+  // ── Plan workflows ──
+  upsertPlanWorkflow(workflow: PlanWorkflowInput): PlanWorkflowRecord;
+  getPlanWorkflow(workflowId: string): PlanWorkflowRecord | null;
+  getActivePlanWorkflowByBinding(bindingId: string): PlanWorkflowRecord | null;
+  getActivePlanWorkflowByChat(channelType: string, chatId: string): PlanWorkflowRecord | null;
+  updatePlanWorkflow(workflowId: string, updates: Partial<Omit<PlanWorkflowRecord, 'workflowId' | 'bindingId' | 'channelType' | 'chatId' | 'codepilotSessionId' | 'createdAt'>>): PlanWorkflowRecord | null;
+  markPlanWorkflowResolved(workflowId: string): boolean;
+  deletePlanWorkflow(workflowId: string): boolean;
 
   // ── Channel offsets (adapter watermarks) ──
   getChannelOffset(key: string): string;

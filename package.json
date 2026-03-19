@@ -3,8 +3,13 @@
   "version": "0.1.0",
   "description": "agents-to-im: Feishu/Lark bridge for Claude Code and Codex sessions",
   "type": "module",
+  "bin": {
+    "agents-to-im": "dist/cli-bin.mjs"
+  },
   "scripts": {
     "build": "node scripts/build.js",
+    "build:cli": "node scripts/build-cli.js",
+    "build:all": "node scripts/build.js && node scripts/build-cli.js",
     "typecheck": "tsc --noEmit",
     "dev": "tsx src/main.ts",
     "test": "CTI_HOME=$(mktemp -d) node --test --test-concurrency=1 --import tsx --test-timeout=15000 src/__tests__/*.test.ts"

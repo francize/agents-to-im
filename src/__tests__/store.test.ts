@@ -280,6 +280,51 @@ describe('JsonFileStore', () => {
     assert.equal(store.listPendingPermissionLinksByChat('chat-unknown').length, 0);
   });
 
+  it('persists active plan workflows and can find them by binding/chat', () => {
+    const store = new JsonFileStore(makeSettings());
+    const workflow = store.upsertPlanWorkflow({
+      bindingId: 'binding-1',
+      channelType: 'feishu',
+      chatId: 'chat-1',
+      codepilotSessionId: 'session-1',
+      status: 'awaiting_input',
+      previousMode: 'code',
+      requestText: '',
+      address: { channelType: 'feishu', chatId: 'chat-1', threadId: 'thread-1' },
+      routeKey: 'chat-1:thread:thread-1',
+      requestMessageId: 'msg-1',
+      resolved: true,
+    });
+
+    const reloaded = new JsonFileStore(makeSettings());
+    assert.equal(reloaded.getPlanWorkflow(workflow.workflowId)?.bindingId, 'binding-1');
+    assert.equal(reloaded.getActivePlanWorkflowByBinding('binding-1')?.workflowId, workflow.workflowId);
+    assert.equal(reloaded.getActivePlanWorkflowByChat('feishu', 'chat-1')?.workflowId, workflow.workflowId);
+  });
+
+  it('markPlanWorkflowResolved is atomic and deletePlanWorkflow removes it', () => {
+    const store = new JsonFileStore(makeSettings());
+    const workflow = store.upsertPlanWorkflow({
+      bindingId: 'binding-2',
+      channelType: 'feishu',
+      chatId: 'chat-2',
+      codepilotSessionId: 'session-2',
+      status: 'awaiting_confirmation',
+      previousMode: 'ask',
+      requestText: 'do something',
+      address: { channelType: 'feishu', chatId: 'chat-2' },
+      routeKey: 'chat-2:main',
+      actionCardMessageId: 'card-1',
+      resolved: false,
+    });
+
+    assert.equal(store.markPlanWorkflowResolved(workflow.workflowId), true);
+    assert.equal(store.markPlanWorkflowResolved(workflow.workflowId), false);
+    assert.equal(store.deletePlanWorkflow(workflow.workflowId), true);
+    assert.equal(store.getPlanWorkflow(workflow.workflowId), null);
+    assert.equal(store.getActivePlanWorkflowByChat('feishu', 'chat-2'), null);
+  });
+
   // ── Dedup ──
 
   it('dedup insert and check within window', () => {

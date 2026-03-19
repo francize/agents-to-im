@@ -55,6 +55,8 @@ export interface InboundMessage {
   updateId?: number;
   /** File attachments (images, documents) from the IM channel */
   attachments?: import('./host.js').FileAttachment[];
+  /** Bridge-internal routing metadata */
+  bridgeMeta?: BridgeMessageMeta;
 }
 
 /** Outbound message to send to an IM channel */
@@ -69,12 +71,29 @@ export interface OutboundMessage {
   inlineButtons?: InlineButton[][];
   /** If replying to a specific message */
   replyToMessageId?: string;
+  /** Optional card header metadata for adapters that support interactive cards */
+  cardHeader?: CardHeader;
 }
 
 /** Inline keyboard button for permission prompts */
 export interface InlineButton {
   text: string;
   callbackData: string;
+}
+
+export interface CardHeader {
+  title: string;
+  template?: 'blue' | 'wathet' | 'turquoise' | 'green' | 'yellow' | 'orange' | 'red' | 'carmine' | 'violet' | 'purple' | 'indigo' | 'grey';
+}
+
+export interface BridgeMessageMeta {
+  planWorkflow?: {
+    kind: 'plan_request' | 'plan_execute';
+    workflowId: string;
+    promptText: string;
+    storedUserText?: string;
+    permissionMode?: 'plan' | 'default' | 'acceptEdits';
+  };
 }
 
 /** Result of sending a message via an adapter */

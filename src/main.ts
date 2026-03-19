@@ -17,6 +17,7 @@ import { MultiplexLLMProvider } from './multiplex-llm-provider.js';
 import { JsonFileStore } from './store.js';
 import { PendingPermissions } from './permission-gateway.js';
 import { setupLogger } from './logger.js';
+import { startDashboard, stopDashboard } from './dashboard.js';
 
 const RUNTIME_DIR = path.join(CTI_HOME, 'runtime');
 const STATUS_FILE = path.join(RUNTIME_DIR, 'status.json');
@@ -66,6 +67,7 @@ async function main(): Promise<void> {
   applyConfigToEnv(config);
 
   const runId = crypto.randomUUID();
+  const startTime = Date.now();
   console.log(`[agents-to-im] Starting bridge (run_id: ${runId})`);
 
   const settings = configToSettings(config);
@@ -110,6 +112,17 @@ async function main(): Promise<void> {
 
   await bridgeManager.start();
 
+  // Start the dashboard status panel
+  try {
+    startDashboard({
+      store,
+      getUptime: () => (Date.now() - startTime) / 1000,
+      getBridgeStatus: bridgeManager.getStatus,
+    });
+  } catch (err) {
+    console.warn('[agents-to-im] Dashboard failed to start:', err instanceof Error ? err.message : err);
+  }
+
   // Graceful shutdown
   let shuttingDown = false;
   const shutdown = async (signal?: string) => {
@@ -118,6 +131,7 @@ async function main(): Promise<void> {
     const reason = signal ? `signal: ${signal}` : 'shutdown requested';
     console.log(`[agents-to-im] Shutting down (${reason})...`);
     pendingPerms.denyAll();
+    stopDashboard();
     await bridgeManager.stop();
     writeStatus({ running: false, lastExitReason: reason });
     process.exit(0);
