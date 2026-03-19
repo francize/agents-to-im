@@ -192,6 +192,43 @@ describe('FeishuAdapter', () => {
     assert.equal(patchCalls, 2);
   });
 
+  it('sends permission cards as schema 2.0 without deprecated action tags', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+
+    let payloadContent = '';
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        message: {
+          reply: async (payload: { data: { content: string } }) => {
+            payloadContent = payload.data.content;
+            return { code: 0, data: { message_id: 'perm-msg-1' } };
+          },
+        },
+      },
+    };
+
+    const result = await adapter.send({
+      address: { channelType: 'feishu', chatId: 'group-perm' },
+      text: '需要你的确认。',
+      parseMode: 'Markdown',
+      replyToMessageId: 'incoming-1',
+      inlineButtons: [[
+        { text: 'Allow', callbackData: 'perm:allow:req-1' },
+        { text: 'Deny', callbackData: 'perm:deny:req-1' },
+      ]],
+    });
+
+    const card = JSON.parse(payloadContent);
+    assert.equal(result.ok, true);
+    assert.equal(card.schema, '2.0');
+    assert.equal(card.body.elements[1].tag, 'column_set');
+    assert.equal(card.body.elements[1].columns[0].elements[0].tag, 'button');
+    assert.equal(card.body.elements[1].columns[0].elements[0].behaviors[0].value.callback_data, 'perm:allow:req-1');
+    assert.equal(card.body.elements[1].columns[1].elements[0].behaviors[0].value.callback_data, 'perm:deny:req-1');
+  });
+
   it('keeps threaded follow-up messages on the same route and replies in thread', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});
@@ -484,7 +521,7 @@ describe('FeishuAdapter', () => {
     assert.equal(updatedNames.at(-1), 'Codex 新会话 [PLAN]');
   });
 
-  it('sends structured input cards with select menus inside action rows', async () => {
+  it('sends structured input cards as schema 2.0 forms without deprecated note tags', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});
     const adapter = new FeishuAdapter() as any;
@@ -526,42 +563,28 @@ describe('FeishuAdapter', () => {
     const card = JSON.parse(payloadContent);
     assert.equal(result.ok, true);
     assert.equal(card.header.title.content, '补充信息');
-    assert.equal(card.elements[2].tag, 'action');
-    assert.equal(card.elements[2].actions[0].tag, 'select_static');
-    assert.equal(card.elements[2].actions[0].value.callback_data, 'input:field:req-1:q1');
-    assert.equal(card.elements[2].actions[0].options[0].value, '根目录 about-codex.html');
-    assert.equal(card.elements.at(-1).tag, 'action');
-    assert.equal(card.elements.at(-1).actions[0].tag, 'button');
-    assert.equal(card.elements.at(-1).actions[0].value.callback_data, 'input:submit:req-1');
+    assert.equal(card.schema, '2.0');
+    assert.equal(card.body.elements[0].tag, 'form');
+    assert.equal(card.body.elements[0].name, 'form_req_1');
+    assert.equal(card.body.elements[0].elements[2].tag, 'select_static');
+    assert.equal(card.body.elements[0].elements[2].name, 'structured-input_req_1_answer_q1');
+    assert.equal(card.body.elements[0].elements[2].options[0].value, '根目录 about-codex.html');
+    assert.equal(card.body.elements[0].elements[3].tag, 'input');
+    assert.equal(card.body.elements[0].elements[3].name, 'structured-input_req_1_other_q1');
+    assert.equal(card.body.elements[0].elements[4].tag, 'markdown');
+    assert.match(card.body.elements[0].elements[4].content, /可填写上面的自定义输入框/);
+    assert.equal(card.body.elements[0].elements.at(-1).tag, 'column_set');
+    assert.equal(card.body.elements[0].elements.at(-1).columns[0].elements[0].tag, 'button');
+    assert.equal(card.body.elements[0].elements.at(-1).columns[0].elements[0].form_action_type, 'submit');
+    assert.equal(
+      card.body.elements[0].elements.at(-1).columns[0].elements[0].behaviors[0].value.callback_data,
+      'input:submit:req-1',
+    );
   });
 
-  it('stores structured input field interactions before submit instead of timing out', async () => {
+  it('acknowledges structured input field interactions without blocking on callbacks', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});
-    store.upsertStructuredInputRequest({
-      requestId: 'req-1',
-      channelType: 'feishu',
-      chatId: 'group-input',
-      codepilotSessionId: 'session-1',
-      address: { channelType: 'feishu', chatId: 'group-input', threadId: 'thread-1' },
-      routeKey: 'group-input:thread:thread-1',
-      threadId: 'thread-1',
-      turnId: 'turn-1',
-      itemId: 'item-1',
-      questions: [
-        {
-          id: 'q1',
-          header: '页面风格',
-          question: '选一个风格',
-          isOther: true,
-          isSecret: false,
-          options: [{ label: '偏科技感', description: '推荐' }],
-        },
-      ],
-      messageId: 'msg-input-1',
-      openMessageId: 'open-input-1',
-      resolved: false,
-    });
     const adapter = new FeishuAdapter() as any;
 
     const result = await adapter.handleCardAction({
@@ -571,20 +594,13 @@ describe('FeishuAdapter', () => {
       open_message_id: 'open-input-1',
       action: {
         tag: 'select_static',
-        value: {
-          callback_data: 'input:field:req-1:q1',
-        },
+        value: {},
         option: '偏科技感',
       },
     });
 
     assert.equal(result.toast.type, 'success');
     assert.match(result.toast.content, /已记录选择/);
-    assert.deepEqual(store.getStructuredInputRequest('req-1')?.draftAnswers, {
-      q1: {
-        answers: ['偏科技感'],
-      },
-    });
   });
 
   it('submits structured input answers from interactive card actions', async () => {
@@ -640,20 +656,6 @@ describe('FeishuAdapter', () => {
       },
     };
 
-    const fieldResult = await adapter.handleCardAction({
-      open_id: 'ou_123',
-      tenant_key: 'tenant',
-      token: 'token',
-      open_message_id: 'open-submit-1',
-      action: {
-        tag: 'select_static',
-        option: '极简',
-        value: {
-          callback_data: 'input:field:req-submit:q1',
-        },
-      },
-    });
-
     const result = await adapter.handleCardAction({
       open_id: 'ou_123',
       tenant_key: 'tenant',
@@ -664,11 +666,14 @@ describe('FeishuAdapter', () => {
         value: {
           callback_data: 'input:submit:req-submit',
         },
+        form_value: {
+          'structured-input_req_submit_answer_q1': '极简',
+        },
       },
     });
 
-    assert.equal(fieldResult.toast.type, 'success');
     assert.equal(result.toast.type, 'success');
+    await new Promise((resolve) => setImmediate(resolve));
     assert.equal(patchCalls, 1);
     assert.deepEqual(resolvedPayload, {
       answers: {
@@ -840,5 +845,6 @@ describe('FeishuAdapter', () => {
     assert.equal((adapter as any).queue.length, 1);
     assert.equal((adapter as any).queue[0].bridgeMeta.planWorkflow.kind, 'plan_execute');
     assert.match((adapter as any).queue[0].bridgeMeta.planWorkflow.promptText, /开始实施/);
+    assert.equal((adapter as any).queue[0].bridgeMeta.planWorkflow.collaborationMode, 'default');
   });
 });

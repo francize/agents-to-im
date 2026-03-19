@@ -196,6 +196,202 @@ describe('bridge-manager plan workflow', () => {
     assert.equal(store.getPlanWorkflow('wf-1')?.actionCardMessageId, 'sent-2');
   });
 
+  it('turns a native_plan_request synthetic message into a native plan reply plus a confirmation card', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const llmCalls: Array<Record<string, unknown>> = [];
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: (params: Record<string, unknown>) => {
+          llmCalls.push(params);
+          return new ReadableStream<string>({
+            start(controller) {
+              controller.enqueue(`data: ${JSON.stringify({ type: 'text', data: '# 原生计划\\n\\n1. 先确认范围\\n2. 再开始实施' })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-native-1' }) })}\n`);
+              controller.close();
+            },
+          });
+        },
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-native',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+    store.upsertPlanWorkflow({
+      workflowId: 'wf-native',
+      bindingId: binding.id,
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-native',
+      codepilotSessionId: session.id,
+      status: 'planning',
+      previousMode: 'code',
+      requestText: '先给我方案再实施',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-native', threadId: 'thread-1' },
+      routeKey: 'chat-native:thread:thread-1',
+      requestMessageId: 'msg-native-1',
+      resolved: true,
+    });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-native-1',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-native', threadId: 'thread-1' },
+      text: '先给我方案再实施',
+      timestamp: Date.now(),
+      bridgeMeta: {
+        planWorkflow: {
+          kind: 'native_plan_request',
+          workflowId: 'wf-native',
+          promptText: 'NATIVE PLAN PROMPT',
+          storedUserText: '先给我方案再实施',
+          permissionMode: 'plan',
+        },
+      },
+    });
+
+    await waitFor(() => adapter.sent.length === 2);
+
+    assert.equal(llmCalls[0].prompt, 'NATIVE PLAN PROMPT');
+    assert.equal(llmCalls[0].permissionMode, 'plan');
+    assert.equal(llmCalls[0].collaborationMode, 'plan');
+    assert.match(adapter.sent[0].text, /原生计划/);
+    assert.match(adapter.sent[0].text, /先确认范围/);
+    assert.match(adapter.sent[0].text, /再开始实施/);
+    assert.equal(adapter.sent[1].cardHeader?.title, '原生计划已生成');
+    assert.deepEqual(
+      adapter.sent[1].inlineButtons?.[0].map((button) => button.callbackData),
+      ['plan:execute:wf-native', 'plan:continue:wf-native', 'plan:cancel:wf-native'],
+    );
+    assert.equal(store.getPlanWorkflow('wf-native')?.status, 'awaiting_confirmation');
+    assert.equal(store.getPlanWorkflow('wf-native')?.actionCardMessageId, 'sent-2');
+  });
+
+  it('sends explicit collaborationMode=default for codex code-mode turns', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const llmCalls: Array<Record<string, unknown>> = [];
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: (params: Record<string, unknown>) => {
+          llmCalls.push(params);
+          return new ReadableStream<string>({
+            start(controller) {
+              controller.enqueue(`data: ${JSON.stringify({ type: 'text', data: '开始执行。' })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-code-1' }) })}\n`);
+              controller.close();
+            },
+          });
+        },
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-code',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-code-1',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-code', threadId: 'thread-1' },
+      text: '开始按方案实现',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length === 1);
+
+    assert.equal(llmCalls[0].collaborationMode, 'default');
+    assert.equal(adapter.sent[0].text, '开始执行。');
+  });
+
+  it('sends explicit collaborationMode=default for plan_execute follow-up turns', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const llmCalls: Array<Record<string, unknown>> = [];
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: (params: Record<string, unknown>) => {
+          llmCalls.push(params);
+          return new ReadableStream<string>({
+            start(controller) {
+              controller.enqueue(`data: ${JSON.stringify({ type: 'text', data: '开始按确认方案实施。' })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-execute-1' }) })}\n`);
+              controller.close();
+            },
+          });
+        },
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-execute',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-execute-1',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-execute', threadId: 'thread-1' },
+      text: '执行已确认计划：生成单文件页面',
+      timestamp: Date.now(),
+      bridgeMeta: {
+        planWorkflow: {
+          kind: 'plan_execute',
+          workflowId: 'wf-execute',
+          promptText: '按已确认计划开始实施，不要重复输出计划。',
+          storedUserText: '执行已确认计划：生成单文件页面',
+          permissionMode: 'acceptEdits',
+          collaborationMode: 'default',
+        },
+      },
+    });
+
+    await waitFor(() => adapter.sent.length === 1);
+
+    assert.equal(llmCalls[0].prompt, '按已确认计划开始实施，不要重复输出计划。');
+    assert.equal(llmCalls[0].permissionMode, 'acceptEdits');
+    assert.equal(llmCalls[0].collaborationMode, 'default');
+    assert.equal(adapter.sent[0].text, '开始按确认方案实施。');
+  });
+
   it('falls back to a plain text prompt when structured input card delivery fails', async () => {
     const store = new JsonFileStore(makeSettings());
     initBridgeContext({

@@ -67,6 +67,31 @@ function isCodexRuntime(sessionId: string): boolean {
   return store.getSessionExt(sessionId)?.runtime === 'codex';
 }
 
+function isApprovalRequest(perm: engine.PermissionRequestInfo): boolean {
+  return typeof perm.method === 'string'
+    && perm.method.trim().replace(/[_-]/g, '').toLowerCase().endsWith('requestapproval');
+}
+
+function resolveCodexCollaborationMode(
+  binding: import('./types.js').ChannelBinding,
+  planWorkflowMeta: NonNullable<InboundMessage['bridgeMeta']>['planWorkflow'] | null,
+): 'plan' | 'default' | undefined {
+  if (!isCodexRuntime(binding.codepilotSessionId)) return undefined;
+  if (planWorkflowMeta?.collaborationMode) {
+    return planWorkflowMeta.collaborationMode;
+  }
+  if (planWorkflowMeta?.kind === 'native_plan_request') {
+    return 'plan';
+  }
+  if (binding.mode === 'plan') {
+    return 'plan';
+  }
+  if (binding.mode === 'code') {
+    return 'default';
+  }
+  return undefined;
+}
+
 /**
  * Check if a message looks like a numeric permission shortcut (1/2/3) for
  * feishu/qq channels WITH at least one pending permission in that chat.
@@ -709,10 +734,7 @@ async function handleMessage(
     }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText, {
       storedUserText,
       permissionModeOverride: planWorkflowMeta?.permissionMode,
-      collaborationModeOverride: isCodexRuntime(binding.codepilotSessionId)
-        && (binding.mode === 'plan' || planWorkflowMeta?.kind === 'native_plan_request')
-        ? 'plan'
-        : undefined,
+      collaborationModeOverride: resolveCodexCollaborationMode(binding, planWorkflowMeta),
     }, async (request: StructuredInputRequestInfo) => {
       if (adapter.sendStructuredInputRequest) {
         try {
@@ -804,34 +826,49 @@ async function handleMessage(
       await deliver(adapter, errorResponse);
     }
 
+    const sendPlanConfirmationCard = async (
+      workflowId: string,
+      title: string,
+      text: string,
+    ): Promise<boolean> => {
+      const workflow = store.getPlanWorkflow(workflowId);
+      if (!workflow) return false;
+      const actionCard = await deliver(adapter, {
+        address: msg.address,
+        text,
+        parseMode: 'Markdown',
+        inlineButtons: [[
+          { text: '执行', callbackData: `plan:execute:${workflow.workflowId}` },
+          { text: '继续', callbackData: `plan:continue:${workflow.workflowId}` },
+          { text: '取消', callbackData: `plan:cancel:${workflow.workflowId}` },
+        ]],
+        replyToMessageId: responseDelivery?.messageId || msg.messageId,
+        cardHeader: {
+          title,
+          template: 'blue',
+        },
+      }, { sessionId: binding.codepilotSessionId });
+      if (!actionCard.ok) return false;
+      store.updatePlanWorkflow(workflow.workflowId, {
+        status: 'awaiting_confirmation',
+        planMessageId: responseDelivery?.messageId || '',
+        actionCardMessageId: actionCard.messageId || '',
+        actionCardOpenMessageId: actionCard.openMessageId || '',
+        resolved: false,
+      });
+      return true;
+    };
+
     if (planWorkflowMeta?.kind === 'plan_request') {
       const workflow = store.getPlanWorkflow(planWorkflowMeta.workflowId);
       if (workflow) {
         if (result.responseText) {
-          const actionCard = await deliver(adapter, {
-            address: msg.address,
-            text: '计划已经准备好。选择下一步操作。',
-            parseMode: 'Markdown',
-            inlineButtons: [[
-              { text: '执行', callbackData: `plan:execute:${workflow.workflowId}` },
-              { text: '继续', callbackData: `plan:continue:${workflow.workflowId}` },
-              { text: '取消', callbackData: `plan:cancel:${workflow.workflowId}` },
-            ]],
-            replyToMessageId: responseDelivery?.messageId || msg.messageId,
-            cardHeader: {
-              title: '计划已生成',
-              template: 'blue',
-            },
-          }, { sessionId: binding.codepilotSessionId });
-          if (actionCard.ok) {
-            store.updatePlanWorkflow(workflow.workflowId, {
-              status: 'awaiting_confirmation',
-              planMessageId: responseDelivery?.messageId || '',
-              actionCardMessageId: actionCard.messageId || '',
-              actionCardOpenMessageId: actionCard.openMessageId || '',
-              resolved: false,
-            });
-          } else {
+          const sent = await sendPlanConfirmationCard(
+            workflow.workflowId,
+            '计划已生成',
+            '计划已经准备好。选择下一步操作。',
+          );
+          if (!sent) {
             store.updatePlanWorkflow(workflow.workflowId, {
               status: 'awaiting_input',
               resolved: true,
@@ -855,7 +892,41 @@ async function handleMessage(
     if (planWorkflowMeta?.kind === 'native_plan_request') {
       const workflow = store.getPlanWorkflow(planWorkflowMeta.workflowId);
       if (workflow) {
-        store.deletePlanWorkflow(workflow.workflowId);
+        if (result.responseText) {
+          const nativeApprovalReceived = result.permissionRequests.some(isApprovalRequest);
+          if (nativeApprovalReceived) {
+            store.updatePlanWorkflow(workflow.workflowId, {
+              status: 'awaiting_confirmation',
+              planMessageId: responseDelivery?.messageId || '',
+              actionCardMessageId: '',
+              actionCardOpenMessageId: '',
+              resolved: true,
+            });
+          } else {
+            const sent = await sendPlanConfirmationCard(
+              workflow.workflowId,
+              '原生计划已生成',
+              'Codex 已输出方案。确认后开始实施，或继续保持 PLAN 流程。',
+            );
+            if (!sent) {
+              store.updatePlanWorkflow(workflow.workflowId, {
+                status: 'awaiting_input',
+                resolved: true,
+              });
+              await deliver(adapter, {
+                address: msg.address,
+                text: '原生计划已生成，但确认卡发送失败。请重新执行 `/plan`，或直接切换 `/mode code` 继续。',
+                parseMode: 'Markdown',
+                replyToMessageId: responseDelivery?.messageId || msg.messageId,
+              }, { sessionId: binding.codepilotSessionId });
+            }
+          }
+        } else {
+          store.updatePlanWorkflow(workflow.workflowId, {
+            status: 'awaiting_input',
+            resolved: true,
+          });
+        }
       }
     }
 

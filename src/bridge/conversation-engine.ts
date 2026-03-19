@@ -24,6 +24,9 @@ export interface PermissionRequestInfo {
   toolName: string;
   toolInput: Record<string, unknown>;
   suggestions?: unknown[];
+  method?: string;
+  threadId?: string;
+  turnId?: string;
 }
 
 /**
@@ -426,6 +429,9 @@ async function consumeStream(
                 toolName: permData.toolName,
                 toolInput: permData.toolInput,
                 suggestions: permData.suggestions,
+                method: typeof permData.method === 'string' ? permData.method : undefined,
+                threadId: typeof permData.threadId === 'string' ? permData.threadId : undefined,
+                turnId: typeof permData.turnId === 'string' ? permData.turnId : undefined,
               };
               permissionRequests.push(perm);
               // Forward immediately — the stream blocks until the permission is

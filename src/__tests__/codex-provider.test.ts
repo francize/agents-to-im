@@ -164,6 +164,82 @@ describe('CodexProvider', () => {
     assert.equal((turnStart?.params as any).collaborationMode.settings.model, 'gpt-5.4');
   });
 
+  it('forwards collaborationMode=default when explicitly exiting plan mode', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const fake = new FakeCodexClient({
+      'thread/start': async () => ({ thread: { id: 'thread-default' }, model: 'gpt-5.4' }),
+      'turn/start': async () => {
+        queueMicrotask(() => {
+          fake.emit({
+            kind: 'notification',
+            method: 'turn/completed',
+            params: {
+              threadId: 'thread-default',
+              turn: { id: 'turn-default', error: null },
+            },
+          });
+        });
+        return { turn: { id: 'turn-default' } };
+      },
+    });
+
+    const provider = new CodexProvider();
+    (provider as any).client = fake;
+
+    await collectStream(provider.streamChat({
+      prompt: '按确认后的方案开始实施',
+      sessionId: 'session-default',
+      collaborationMode: 'default',
+      model: 'gpt-5.4',
+    }));
+
+    const turnStart = fake.calls.find((call) => call.method === 'turn/start');
+    assert.equal((turnStart?.params as any).collaborationMode.mode, 'default');
+    assert.equal((turnStart?.params as any).collaborationMode.settings.model, 'gpt-5.4');
+  });
+
+  it('retries without collaborationMode when explicit default is rejected', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    let turnStartCalls = 0;
+    const fake = new FakeCodexClient({
+      'thread/start': async () => ({ thread: { id: 'thread-default-retry' }, model: 'gpt-5.4' }),
+      'turn/start': async (params) => {
+        turnStartCalls += 1;
+        if (turnStartCalls === 1) {
+          assert.equal((params as any).collaborationMode.mode, 'default');
+          throw new Error('Cannot switch collaboration mode while a turn is running');
+        }
+        assert.equal((params as any).collaborationMode, undefined);
+        queueMicrotask(() => {
+          fake.emit({
+            kind: 'notification',
+            method: 'turn/completed',
+            params: {
+              threadId: 'thread-default-retry',
+              turn: { id: 'turn-default-retry', error: null },
+            },
+          });
+        });
+        return { turn: { id: 'turn-default-retry' } };
+      },
+    });
+
+    const provider = new CodexProvider();
+    (provider as any).client = fake;
+
+    const chunks = await collectStream(provider.streamChat({
+      prompt: '退出 plan 并继续实施',
+      sessionId: 'session-default-retry',
+      collaborationMode: 'default',
+      model: 'gpt-5.4',
+    }));
+
+    const events = parseSSEChunks(chunks);
+    assert.equal(turnStartCalls, 2);
+    assert.ok(events.some((event) => event.type === 'result'));
+    assert.ok(!events.some((event) => event.type === 'error'));
+  });
+
   it('emits completed agent messages as text_segment instead of duplicating text deltas', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
     const fake = new FakeCodexClient({
@@ -346,6 +422,71 @@ describe('CodexProvider', () => {
         decision: 'acceptForSession',
       },
     });
+  });
+
+  it('bridges generic requestApproval methods instead of rejecting them as unsupported', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const pendingApprovals = new PendingApprovals();
+    const fake = new FakeCodexClient({
+      'thread/start': async () => ({ thread: { id: 'thread-approval-generic' }, model: 'gpt-5.4' }),
+      'turn/start': async () => {
+        queueMicrotask(() => {
+          fake.emit({
+            kind: 'request',
+            id: 'req-approval-generic',
+            method: 'item/planExecution/requestApproval',
+            params: {
+              threadId: 'thread-approval-generic',
+              turnId: 'turn-approval-generic',
+              itemId: 'plan-approval-1',
+              reason: 'Confirm whether to implement the proposed plan.',
+            },
+          });
+        });
+        return { turn: { id: 'turn-approval-generic' } };
+      },
+    });
+    const provider = new CodexProvider(pendingApprovals, new PendingStructuredInputs());
+    (provider as any).client = fake;
+
+    const streamPromise = collectStream(provider.streamChat({
+      prompt: '请给我一个方案',
+      sessionId: 'session-approval-generic',
+      collaborationMode: 'plan',
+    }));
+
+    await waitFor(() => fake.calls.some((call) => call.method === 'turn/start'));
+    pendingApprovals.resolve('req-approval-generic', {
+      behavior: 'allow',
+      scope: 'turn',
+    });
+    await waitFor(() => fake.responses.length === 1);
+    fake.emit({
+      kind: 'notification',
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-approval-generic',
+        turn: { id: 'turn-approval-generic', error: null },
+      },
+    });
+
+    const chunks = await streamPromise;
+    const events = parseSSEChunks(chunks);
+    const approvalEvent = events.find((event) => event.type === 'approval_request');
+    assert.ok(approvalEvent);
+    assert.equal(fake.responseErrors.length, 0);
+    assert.deepEqual(fake.responses[0], {
+      id: 'req-approval-generic',
+      result: {
+        decision: 'accept',
+      },
+    });
+    const approvalPayload = JSON.parse(approvalEvent!.data);
+    assert.equal(approvalPayload.toolName, 'Plan Execution');
+    assert.equal(approvalPayload.toolInput.reason, 'Confirm whether to implement the proposed plan.');
+    assert.equal(approvalPayload.method, 'item/planExecution/requestApproval');
+    assert.equal(approvalPayload.threadId, 'thread-approval-generic');
+    assert.equal(approvalPayload.turnId, 'turn-approval-generic');
   });
 
   it('retries with a fresh thread when thread/resume fails before any turn starts', async () => {

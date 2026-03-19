@@ -95,6 +95,7 @@ export interface BridgeMessageMeta {
     promptText: string;
     storedUserText?: string;
     permissionMode?: 'plan' | 'default' | 'acceptEdits';
+    collaborationMode?: 'plan' | 'default';
   };
 }
 

@@ -158,9 +158,12 @@ function mapTokenUsage(breakdown: TokenUsageBreakdown | undefined): {
   };
 }
 
-function buildCollaborationMode(model: string): { mode: 'plan' | 'default'; settings: { model: string; reasoning_effort: null; developer_instructions: null } } {
+function buildCollaborationMode(
+  mode: 'plan' | 'default',
+  model: string,
+): { mode: 'plan' | 'default'; settings: { model: string; reasoning_effort: null; developer_instructions: null } } {
   return {
-    mode: 'plan',
+    mode,
     settings: {
       model,
       reasoning_effort: null,
@@ -177,9 +180,28 @@ function normalizeItemType(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
+function normalizeRequestMethod(method: string): string {
+  return method.trim().replace(/[_-]/g, '').toLowerCase();
+}
+
+function isApprovalRequestMethod(method: string): boolean {
+  return normalizeRequestMethod(method).endsWith('requestapproval');
+}
+
+function inferApprovalToolName(method: string): string {
+  const parts = method.split('/').filter(Boolean);
+  const rawName = parts.length >= 2 ? parts[parts.length - 2] || method : method;
+  const humanized = rawName
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .trim();
+  if (!humanized) return 'Approval';
+  return humanized[0]!.toUpperCase() + humanized.slice(1);
+}
+
 function approvalToolPayload(method: string, params: JsonRecord): { toolName: string; toolInput: JsonRecord } {
-  switch (method) {
-    case 'item/commandExecution/requestApproval':
+  switch (normalizeRequestMethod(method)) {
+    case 'item/commandexecution/requestapproval':
       return {
         toolName: 'Bash',
         toolInput: {
@@ -190,7 +212,7 @@ function approvalToolPayload(method: string, params: JsonRecord): { toolName: st
           additionalPermissions: params.additionalPermissions,
         },
       };
-    case 'item/fileChange/requestApproval':
+    case 'item/filechange/requestapproval':
       return {
         toolName: 'Edit',
         toolInput: {
@@ -198,7 +220,7 @@ function approvalToolPayload(method: string, params: JsonRecord): { toolName: st
           grantRoot: params.grantRoot,
         },
       };
-    case 'item/permissions/requestApproval':
+    case 'item/permissions/requestapproval':
       return {
         toolName: 'Permissions',
         toolInput: {
@@ -208,14 +230,14 @@ function approvalToolPayload(method: string, params: JsonRecord): { toolName: st
       };
     default:
       return {
-        toolName: method,
+        toolName: inferApprovalToolName(method),
         toolInput: params,
       };
   }
 }
 
 function approvalResponseFor(method: string, params: JsonRecord, resolution: PermissionResolution): unknown {
-  if (method === 'item/fileChange/requestApproval') {
+  if (normalizeRequestMethod(method) === 'item/filechange/requestapproval') {
     return {
       decision: resolution.behavior === 'deny'
         ? 'decline'
@@ -224,7 +246,7 @@ function approvalResponseFor(method: string, params: JsonRecord, resolution: Per
           : 'accept',
     };
   }
-  if (method === 'item/permissions/requestApproval') {
+  if (normalizeRequestMethod(method) === 'item/permissions/requestapproval') {
     return {
       permissions: resolution.behavior === 'deny' ? {} : (params.permissions || {}),
       scope: resolution.scope === 'session' ? 'session' : 'turn',
@@ -373,14 +395,29 @@ export class CodexProvider implements LLMProvider {
       if (!hasLocalCodexConfig() && params.permissionMode) {
         turnParams.approvalPolicy = toApprovalPolicy(params.permissionMode);
       }
-      if (params.collaborationMode === 'plan') {
-        if (!client.supportsCollaborationMode('plan')) {
-          throw new Error('Local Codex does not support native plan mode');
-        }
-        turnParams.collaborationMode = buildCollaborationMode(params.model || bootstrap.model || 'gpt-5.4');
+      if (params.collaborationMode === 'plan' && !client.supportsCollaborationMode('plan')) {
+        throw new Error('Local Codex does not support native plan mode');
+      }
+      if (params.collaborationMode) {
+        turnParams.collaborationMode = buildCollaborationMode(
+          params.collaborationMode,
+          params.model || bootstrap.model || 'gpt-5.4',
+        );
       }
 
-      const turnStart = await client.call<{ turn?: { id?: string } }>('turn/start', turnParams);
+      let turnStart;
+      try {
+        turnStart = await client.call<{ turn?: { id?: string } }>('turn/start', turnParams);
+      } catch (error) {
+        const canRetryWithoutMode = params.collaborationMode === 'default' && 'collaborationMode' in turnParams;
+        if (!canRetryWithoutMode) {
+          throw error;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn('[codex-provider] collaborationMode=default rejected, retrying without explicit mode:', message);
+        delete turnParams.collaborationMode;
+        turnStart = await client.call<{ turn?: { id?: string } }>('turn/start', turnParams);
+      }
       let activeTurnId = typeof turnStart?.turn?.id === 'string' ? turnStart.turn.id : '';
 
       while (true) {
@@ -548,11 +585,7 @@ export class CodexProvider implements LLMProvider {
       return;
     }
 
-    if (
-      message.method === 'item/commandExecution/requestApproval' ||
-      message.method === 'item/fileChange/requestApproval' ||
-      message.method === 'item/permissions/requestApproval'
-    ) {
+    if (isApprovalRequestMethod(message.method)) {
       const requestId = String(message.id);
       const { toolName, toolInput } = approvalToolPayload(message.method, params);
       controller.enqueue(sseEvent('approval_request', {
@@ -560,12 +593,16 @@ export class CodexProvider implements LLMProvider {
         toolName,
         toolInput,
         suggestions: [],
+        method: message.method,
+        threadId: typeof params.threadId === 'string' ? params.threadId : '',
+        turnId: typeof params.turnId === 'string' ? params.turnId : '',
       }));
       const resolution = await this.pendingApprovals.waitFor(requestId);
       await client.respond(message.id, approvalResponseFor(message.method, params, resolution));
       return;
     }
 
+    console.warn('[codex-provider] Unsupported server request:', message.method);
     await client.respondError(message.id, -32601, buildUnsupportedRequestError(message.method).message);
   }
 

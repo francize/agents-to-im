@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import * as lark from '@larksuiteoapi/node-sdk';
 
 import type {
@@ -86,6 +88,24 @@ interface PreviewArtifact {
   mode: 'cardkit' | 'patch';
 }
 
+type StructuredActionEvent = lark.InteractiveCardActionEvent & {
+  action: lark.InteractiveCardActionEvent['action'] & {
+    form_value?: Record<string, unknown>;
+    name?: string;
+    options?: string[];
+    input_value?: string;
+    checked?: boolean;
+  };
+  operator?: {
+    open_id?: string;
+    user_id?: string;
+  };
+  context?: {
+    open_message_id?: string;
+    open_chat_id?: string;
+  };
+};
+
 function buildRouteKey(chatId: string, threadId?: string): string {
   return threadId ? `${chatId}:thread:${threadId}` : `${chatId}:main`;
 }
@@ -160,24 +180,36 @@ function buildActionCard(
   text: string,
   buttons: NonNullable<OutboundMessage['inlineButtons']>,
   template: NonNullable<lark.InteractiveCard['header']>['template'] = 'orange',
-): lark.InteractiveCard {
-  const actions = buttons.flat().map((button) => {
+): Record<string, unknown> {
+  const actionColumns = buttons.flat().map((button) => {
     const lower = button.text.toLowerCase();
     const type: 'default' | 'danger' | 'primary' =
       lower.includes('deny') ? 'danger' : lower.includes('allow') ? 'primary' : 'default';
     return {
-      tag: 'button' as const,
-      text: {
-        tag: 'plain_text' as const,
-        content: button.text,
-      },
-      type,
-      value: {
-        callback_data: button.callbackData,
-      },
+      tag: 'column' as const,
+      width: 'auto' as const,
+      elements: [
+        {
+          tag: 'button' as const,
+          text: {
+            tag: 'plain_text' as const,
+            content: button.text,
+          },
+          type,
+          behaviors: [
+            {
+              type: 'callback' as const,
+              value: {
+                callback_data: button.callbackData,
+              },
+            },
+          ],
+        },
+      ],
     };
   });
   return {
+    schema: '2.0',
     config: {
       wide_screen_mode: true,
       update_multi: true,
@@ -189,92 +221,124 @@ function buildActionCard(
       },
       template,
     },
-    elements: [
-      {
-        tag: 'markdown',
-        content: text,
-      },
-      {
-        tag: 'action',
-        actions,
-      },
-    ],
+    body: {
+      elements: [
+        {
+          tag: 'markdown',
+          content: text,
+        },
+        {
+          tag: 'column_set',
+          flex_mode: 'flow',
+          horizontal_spacing: '8px',
+          horizontal_align: 'left',
+          columns: actionColumns,
+        },
+      ],
+    },
   };
 }
 
-function buildPermissionCard(text: string, buttons: NonNullable<OutboundMessage['inlineButtons']>): lark.InteractiveCard {
+function buildPermissionCard(text: string, buttons: NonNullable<OutboundMessage['inlineButtons']>): Record<string, unknown> {
   return buildActionCard('Permission Required', text, buttons, 'orange');
 }
 
 function buildStructuredFieldName(requestId: string, questionId: string, kind: 'answer' | 'other'): string {
-  return `${STRUCTURED_INPUT_PREFIX}:${requestId}:${kind}:${questionId}`;
+  const sanitize = (value: string): string => value.replace(/[^a-zA-Z0-9_]/g, '_');
+  return `${STRUCTURED_INPUT_PREFIX}_${sanitize(requestId)}_${kind}_${sanitize(questionId)}`;
 }
 
 function buildStructuredInputQuestionElements(request: StructuredInputRequestInfo): Array<Record<string, unknown>> {
   const elements: Array<Record<string, unknown>> = [
     {
-      tag: 'div',
-      text: {
-        tag: 'lark_md',
-        content: 'Codex 需要你补充一些信息后才能继续。',
-      },
+      tag: 'markdown',
+      content: 'Codex 需要你补充一些信息后才能继续。',
     },
   ];
 
   for (const question of request.questions) {
     elements.push({
-      tag: 'div',
-      text: {
-        tag: 'lark_md',
-        content: `**${question.header || question.id}**\n${question.question}`,
-      },
+      tag: 'markdown',
+      content: `**${question.header || question.id}**\n${question.question}`,
     });
+
     if (question.options?.length) {
       elements.push({
-        tag: 'action',
-        actions: [
-          {
-            tag: 'select_static',
-            placeholder: {
-              tag: 'plain_text',
-              content: '请选择',
-            },
-            options: question.options.map((option) => ({
-              text: {
-                tag: 'plain_text',
-                content: option.label,
-              },
-              value: option.label,
-            })),
-            value: {
-              callback_data: `input:field:${request.requestId}:${question.id}`,
-            },
+        tag: 'select_static',
+        name: buildStructuredFieldName(request.requestId, question.id, 'answer'),
+        placeholder: {
+          tag: 'plain_text',
+          content: '请选择',
+        },
+        width: 'fill',
+        options: question.options.map((option) => ({
+          text: {
+            tag: 'plain_text',
+            content: option.label,
           },
-        ],
+          value: option.label,
+        })),
       });
     }
-    if (!question.options?.length) {
+
+    if (!question.options?.length || question.isOther) {
       elements.push({
-        tag: 'div',
-        text: {
-          tag: 'lark_md',
-          content: '> 当前渠道暂不支持自由文本输入，请转到本地 Codex 继续。',
+        tag: 'input',
+        name: buildStructuredFieldName(request.requestId, question.id, 'other'),
+        width: 'fill',
+        placeholder: {
+          tag: 'plain_text',
+          content: question.options?.length ? '可补充自定义答案' : '请输入答案',
         },
       });
-    } else if (question.isOther) {
+    }
+
+    if (question.options?.length && question.isOther) {
       elements.push({
-        tag: 'note',
-        elements: [
-          {
-            tag: 'plain_text',
-            content: '如果这些选项都不合适，请转到本地 Codex 做自定义输入。',
-          },
-        ],
+        tag: 'markdown',
+        content: '如果预设选项都不合适，可填写上面的自定义输入框。',
       });
     }
   }
 
-  return elements;
+  elements.push({
+    tag: 'column_set',
+    horizontal_align: 'right',
+    columns: [
+      {
+        tag: 'column',
+        width: 'auto',
+        elements: [
+          {
+            tag: 'button',
+            name: `submit_${request.requestId}`,
+            form_action_type: 'submit',
+            type: 'primary',
+            text: {
+              tag: 'plain_text',
+              content: '提交',
+            },
+            behaviors: [
+              {
+                type: 'callback',
+                value: {
+                  callback_data: `input:submit:${request.requestId}`,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  return [
+    {
+      tag: 'form',
+      name: `form_${request.requestId.replace(/[^a-zA-Z0-9_]/g, '_')}`,
+      elements,
+    },
+  ];
 }
 
 function buildResolvedStructuredInputElements(
@@ -311,30 +375,13 @@ function buildStructuredInputCard(
         request,
         options.note || '该问答已完成，Codex 正在继续执行。',
       )
-    : [
-        ...buildStructuredInputQuestionElements(request),
-        {
-          tag: 'action',
-          actions: [
-            {
-              tag: 'button',
-              text: {
-                tag: 'plain_text',
-                content: '提交',
-              },
-              type: 'primary',
-              value: {
-                callback_data: `input:submit:${request.requestId}`,
-              },
-            },
-          ],
-        },
-      ];
+    : buildStructuredInputQuestionElements(request);
 
   return {
+    schema: '2.0',
     config: {
-      wide_screen_mode: true,
       update_multi: true,
+      width_mode: 'fill',
     },
     header: {
       title: {
@@ -343,7 +390,9 @@ function buildStructuredInputCard(
       },
       template: 'wathet',
     },
-    elements,
+    body: {
+      elements,
+    },
   };
 }
 
@@ -480,6 +529,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private previewArtifacts = new Map<string, PreviewArtifact>();
   private activePreviewByRoute = new Map<string, string>();
   private pendingTitles = new Set<string>();
+  private outboundMessageQueues = new Map<string, Promise<void>>();
+  private lastOutboundMessageAt = new Map<string, number>();
 
   async start(): Promise<void> {
     if (this.running) return;
@@ -497,7 +548,20 @@ export class FeishuAdapter extends BaseChannelAdapter {
       'im.message.receive_v1': async (data: unknown) => {
         await this.handleIncomingEvent(data as FeishuMessageEventData);
       },
-      'card.action.trigger': async (data: unknown) => this.handleCardAction(data as lark.InteractiveCardActionEvent),
+      'im.message.message_read_v1': async () => {},
+      'card.action.trigger': async (data: unknown) => {
+        try {
+          return await this.handleCardAction(data as StructuredActionEvent);
+        } catch (error) {
+          console.warn('[feishu-adapter] card.action.trigger handler error:', error);
+          return {
+            toast: {
+              type: 'error',
+              content: '交互处理失败，请稍后重试。',
+            },
+          };
+        }
+      },
     });
 
     this.wsClient = new lark.WSClient({
@@ -548,6 +612,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
     this.previewArtifacts.clear();
     this.activePreviewByRoute.clear();
     this.pendingTitles.clear();
+    this.outboundMessageQueues.clear();
+    this.lastOutboundMessageAt.clear();
   }
 
   isRunning(): boolean {
@@ -862,10 +928,15 @@ export class FeishuAdapter extends BaseChannelAdapter {
     });
   }
 
-  private async handleCardAction(event: lark.InteractiveCardActionEvent): Promise<{ toast: { type: string; content: string } }> {
+  private async handleCardAction(event: StructuredActionEvent): Promise<{ toast: { type: string; content: string } }> {
     const callbackData = typeof event.action?.value?.callback_data === 'string'
       ? event.action.value.callback_data
       : '';
+    console.log(
+      `[feishu-adapter] card.action.trigger tag=${event.action?.tag || 'unknown'} ` +
+      `open_message_id=${event.open_message_id || event.context?.open_message_id || 'unknown'} ` +
+      `callback=${callbackData || '(none)'}`,
+    );
     if (!callbackData) {
       if (isStructuredInputFieldInteraction(event)) {
         return { toast: { type: 'success', content: '已记录选择，填写完成后点击提交。' } };
@@ -1097,7 +1168,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
       await this.sendAsPost(
         inbound.address,
         runtime === 'codex'
-          ? '当前群已有等待中的原生 PLAN 请求。请先在原线程继续输入，或使用 `/mode ...` / `/reset` 覆盖。'
+          ? existing.status === 'awaiting_confirmation'
+            ? '当前群已有待确认的原生 PLAN 结果。请先点击上一张计划卡片中的“执行 / 继续 / 取消”，或使用 `/mode ...` / `/reset` 覆盖。'
+            : '当前群已有等待中的原生 PLAN 请求。请先在原线程继续输入，或使用 `/mode ...` / `/reset` 覆盖。'
           : '当前群已有进行中的 PLAN 流程。请先点击上一张计划卡片中的“执行 / 继续 / 取消”，或使用 `/mode ...` / `/reset` 覆盖。',
         inbound.messageId,
       );
@@ -1263,6 +1336,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
           promptText: requestText,
           storedUserText: requestText,
           permissionMode: 'plan',
+          collaborationMode: 'plan',
         },
       },
     };
@@ -1282,13 +1356,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
           promptText: buildPlanExecutionPrompt(requestText),
           storedUserText,
           permissionMode: 'acceptEdits',
+          collaborationMode: 'default',
         },
       },
     };
   }
 
   private async handleStructuredInputCardAction(
-    event: lark.InteractiveCardActionEvent,
+    event: StructuredActionEvent,
     callbackData: string,
   ): Promise<{ toast: { type: string; content: string } }> {
     const [, action, requestId, questionId] = callbackData.split(':');
@@ -1301,8 +1376,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return { toast: { type: 'warning', content: '问答请求不存在或已失效' } };
     }
 
+    const actionMessageId = event.open_message_id || event.context?.open_message_id || '';
     const knownIds = [request.messageId, request.openMessageId].filter((value): value is string => !!value);
-    if (knownIds.length > 1 && !knownIds.includes(event.open_message_id)) {
+    if (knownIds.length > 1 && !knownIds.includes(actionMessageId)) {
       return { toast: { type: 'warning', content: '问答卡已过期' } };
     }
 
@@ -1333,34 +1409,41 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return { toast: { type: 'warning', content: 'Unsupported action' } };
     }
 
-    if (!store.markStructuredInputRequestResolved(requestId)) {
-      return { toast: { type: 'warning', content: '问答已经提交过了' } };
-    }
-
     const hasSecret = request.questions.some((question) => question.isSecret);
     if (hasSecret) {
-      await this.resolveStructuredInputRequest(requestId);
-      getBridgeContext().permissions.resolvePendingStructuredInput?.(requestId, { answers: {} });
+      if (!store.markStructuredInputRequestResolved(requestId)) {
+        return { toast: { type: 'warning', content: '问答已经提交过了' } };
+      }
+      setImmediate(() => {
+        void this.resolveStructuredInputRequest(requestId);
+        getBridgeContext().permissions.resolvePendingStructuredInput?.(requestId, { answers: {} });
+      });
       return { toast: { type: 'warning', content: '该问题涉及敏感输入，请转到本地 Codex 继续' } };
     }
 
     const answers = extractStructuredAnswers(
       request,
-      event.action?.value as Record<string, unknown> | undefined,
+      ((event.action?.form_value || event.action?.value) as Record<string, unknown> | undefined),
       request.draftAnswers,
     );
     const hasAnswers = Object.keys(answers.answers).length > 0;
     if (!hasAnswers) {
-      store.updateStructuredInputRequest(requestId, { resolved: false });
       return { toast: { type: 'warning', content: '请至少填写一个答案' } };
     }
 
-    const resolved = getBridgeContext().permissions.resolvePendingStructuredInput?.(requestId, answers);
-    if (!resolved) {
-      store.updateStructuredInputRequest(requestId, { resolved: false });
-      return { toast: { type: 'warning', content: '问答请求已失效' } };
+    if (!store.markStructuredInputRequestResolved(requestId)) {
+      return { toast: { type: 'warning', content: '问答已经提交过了' } };
     }
-    await this.resolveStructuredInputRequest(requestId);
+
+    setImmediate(() => {
+      const resolved = getBridgeContext().permissions.resolvePendingStructuredInput?.(requestId, answers);
+      if (!resolved) {
+        store.updateStructuredInputRequest(requestId, { resolved: false });
+        return;
+      }
+      void this.resolveStructuredInputRequest(requestId);
+    });
+
     return { toast: { type: 'success', content: '答案已提交' } };
   }
 
@@ -1685,26 +1768,62 @@ export class FeishuAdapter extends BaseChannelAdapter {
     content: string,
     replyToMessageId?: string,
   ): Promise<{ code?: number; msg?: string; data?: { message_id?: string; open_message_id?: string; chat_id?: string } }> {
-    if (replyToMessageId) {
-      return this.restClient!.im.message.reply({
-        path: { message_id: replyToMessageId },
+    return this.enqueueOutboundMessage(address.chatId, async () => {
+      if (replyToMessageId) {
+        return this.restClient!.im.message.reply({
+          path: { message_id: replyToMessageId },
+          data: {
+            msg_type: msgType,
+            content,
+            uuid: randomUUID().slice(0, 50),
+            ...(address.threadId ? { reply_in_thread: true } : {}),
+          },
+        });
+      }
+      const receiveId = address.threadId || address.chatId;
+      const receiveIdType = (address.threadId ? 'thread_id' : 'chat_id') as 'thread_id' | 'chat_id';
+      return this.restClient!.im.message.create({
+        params: { receive_id_type: receiveIdType as never },
         data: {
+          receive_id: receiveId,
           msg_type: msgType,
           content,
-          ...(address.threadId ? { reply_in_thread: true } : {}),
+          uuid: randomUUID().slice(0, 50),
         },
       });
-    }
-    const receiveId = address.threadId || address.chatId;
-    const receiveIdType = (address.threadId ? 'thread_id' : 'chat_id') as 'thread_id' | 'chat_id';
-    return this.restClient!.im.message.create({
-      params: { receive_id_type: receiveIdType as never },
-      data: {
-        receive_id: receiveId,
-        msg_type: msgType,
-        content,
-      },
     });
+  }
+
+  private async enqueueOutboundMessage<T>(
+    chatId: string,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.outboundMessageQueues.get(chatId) || Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queued = previous.catch(() => {}).then(() => current);
+    this.outboundMessageQueues.set(chatId, queued);
+
+    await previous.catch(() => {});
+    try {
+      const lastSentAt = this.lastOutboundMessageAt.get(chatId) || 0;
+      const elapsed = Date.now() - lastSentAt;
+      const minIntervalMs = 250;
+      if (elapsed < minIntervalMs) {
+        await new Promise((resolve) => setTimeout(resolve, minIntervalMs - elapsed));
+      }
+      const result = await task();
+      this.lastOutboundMessageAt.set(chatId, Date.now());
+      return result;
+    } finally {
+      release();
+      const pending = this.outboundMessageQueues.get(chatId);
+      if (pending === queued) {
+        this.outboundMessageQueues.delete(chatId);
+      }
+    }
   }
 
   private async patchInteractiveCard(messageId: string, card: Record<string, unknown>): Promise<void> {
