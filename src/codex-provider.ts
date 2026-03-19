@@ -1,24 +1,16 @@
-/**
- * Codex Provider — LLMProvider implementation backed by @openai/codex-sdk.
- *
- * Maps Codex SDK thread events to the SSE stream format consumed by
- * the bridge conversation engine, making Codex a drop-in alternative
- * to the Claude Code SDK backend.
- *
- * Requires `@openai/codex-sdk` to be installed (optionalDependency).
- * The provider lazily imports the SDK at first use and throws a clear
- * error if it is not available.
- */
-
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import type { LLMProvider, StreamChatParams } from './bridge/host.js';
-import type { PendingPermissions } from './permission-gateway.js';
+import { CodexAppServerClient, type CodexServerMessage } from './codex-app-server-client.js';
+import type { LLMProvider, StreamChatParams, StructuredInputRequestInfo } from './bridge/host.js';
+import {
+  PendingApprovals,
+  PendingStructuredInputs,
+  type PermissionResolution,
+} from './permission-gateway.js';
 import { sseEvent } from './sse-utils.js';
 
-/** MIME → file extension for temp image files. */
 const MIME_EXT: Record<string, string> = {
   'image/png': '.png',
   'image/jpeg': '.jpg',
@@ -27,45 +19,17 @@ const MIME_EXT: Record<string, string> = {
   'image/webp': '.webp',
 };
 
-// All SDK types kept as `any` because @openai/codex-sdk is optional.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type CodexModule = any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type CodexInstance = any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type ThreadInstance = any;
+type JsonRecord = Record<string, unknown>;
 
-/**
- * Map bridge permission modes to Codex approval policies.
- * - 'acceptEdits' (code mode) → 'on-failure' (auto-approve most things)
- * - 'plan' → 'on-request' (ask before executing)
- * - 'default' (ask mode) → 'on-request'
- */
-function toApprovalPolicy(permissionMode?: string): string {
-  switch (permissionMode) {
-    case 'acceptEdits': return 'on-failure';
-    case 'plan': return 'on-request';
-    case 'default': return 'on-request';
-    default: return 'on-request';
-  }
+interface ThreadBootstrap {
+  threadId: string;
+  model?: string;
 }
 
-/** Whether to forward bridge model to Codex. Default: only when a Codex default model is configured. */
-function shouldPassModelToCodex(): boolean {
-  return !!process.env.CTI_CODEX_DEFAULT_MODEL;
-}
-
-function looksLikeClaudeModel(model?: string): boolean {
-  return !!model && /^claude[-_]/i.test(model);
-}
-
-function shouldRetryFreshThread(message: string): boolean {
-  const lower = message.toLowerCase();
-  return (
-    lower.includes('resuming session with different model') ||
-    lower.includes('no such session') ||
-    (lower.includes('resume') && lower.includes('session'))
-  );
+interface TokenUsageBreakdown {
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
 }
 
 function resolveCodexHome(): string {
@@ -129,304 +93,551 @@ export function isTrustedCodexWorkingDirectory(workingDirectory: string | undefi
   return trustedRoots.some((root) => isPathWithin(root, workingDirectory));
 }
 
-function loadTrustedCodexProjects(): string[] {
-  const configPath = path.join(resolveCodexHome(), 'config.toml');
-  try {
-    return parseTrustedProjectsFromCodexConfig(fs.readFileSync(configPath, 'utf-8'));
-  } catch {
-    return [];
+function hasLocalCodexConfig(): boolean {
+  return fs.existsSync(path.join(resolveCodexHome(), 'config.toml'));
+}
+
+function looksLikeClaudeModel(model?: string): boolean {
+  return !!model && /^claude[-_]/i.test(model);
+}
+
+function shouldRetryFreshThread(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes('resuming session with different model') ||
+    lower.includes('no such session') ||
+    (lower.includes('resume') && lower.includes('session'))
+  );
+}
+
+function toApprovalPolicy(permissionMode?: string): 'on-request' | 'on-failure' {
+  switch (permissionMode) {
+    case 'acceptEdits':
+      return 'on-failure';
+    case 'plan':
+    case 'default':
+    default:
+      return 'on-request';
   }
 }
 
+function toTextInput(text: string): { type: 'text'; text: string; text_elements: [] } {
+  return {
+    type: 'text',
+    text,
+    text_elements: [],
+  };
+}
+
+function mapRuntimeStatus(status: unknown): string {
+  const type = typeof status === 'object' && status && typeof (status as JsonRecord).type === 'string'
+    ? String((status as JsonRecord).type)
+    : '';
+  switch (type) {
+    case 'active':
+      return 'running';
+    case 'idle':
+      return 'idle';
+    case 'systemError':
+      return 'error';
+    default:
+      return type || 'unknown';
+  }
+}
+
+function mapTokenUsage(breakdown: TokenUsageBreakdown | undefined): {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+} | undefined {
+  if (!breakdown) return undefined;
+  return {
+    input_tokens: breakdown.inputTokens || 0,
+    output_tokens: breakdown.outputTokens || 0,
+    cache_read_input_tokens: breakdown.cachedInputTokens || 0,
+  };
+}
+
+function buildCollaborationMode(model: string): { mode: 'plan' | 'default'; settings: { model: string; reasoning_effort: null; developer_instructions: null } } {
+  return {
+    mode: 'plan',
+    settings: {
+      model,
+      reasoning_effort: null,
+      developer_instructions: null,
+    },
+  };
+}
+
+function buildUnsupportedRequestError(method: string): Error {
+  return new Error(`[codex-provider] Unsupported server request: ${method}`);
+}
+
+function normalizeItemType(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function approvalToolPayload(method: string, params: JsonRecord): { toolName: string; toolInput: JsonRecord } {
+  switch (method) {
+    case 'item/commandExecution/requestApproval':
+      return {
+        toolName: 'Bash',
+        toolInput: {
+          command: params.command,
+          cwd: params.cwd,
+          reason: params.reason,
+          commandActions: params.commandActions,
+          additionalPermissions: params.additionalPermissions,
+        },
+      };
+    case 'item/fileChange/requestApproval':
+      return {
+        toolName: 'Edit',
+        toolInput: {
+          reason: params.reason,
+          grantRoot: params.grantRoot,
+        },
+      };
+    case 'item/permissions/requestApproval':
+      return {
+        toolName: 'Permissions',
+        toolInput: {
+          reason: params.reason,
+          permissions: params.permissions,
+        },
+      };
+    default:
+      return {
+        toolName: method,
+        toolInput: params,
+      };
+  }
+}
+
+function approvalResponseFor(method: string, params: JsonRecord, resolution: PermissionResolution): unknown {
+  if (method === 'item/fileChange/requestApproval') {
+    return {
+      decision: resolution.behavior === 'deny'
+        ? 'decline'
+        : resolution.scope === 'session'
+          ? 'acceptForSession'
+          : 'accept',
+    };
+  }
+  if (method === 'item/permissions/requestApproval') {
+    return {
+      permissions: resolution.behavior === 'deny' ? {} : (params.permissions || {}),
+      scope: resolution.scope === 'session' ? 'session' : 'turn',
+    };
+  }
+  return {
+    decision: resolution.behavior === 'deny'
+      ? 'decline'
+      : resolution.scope === 'session'
+        ? 'acceptForSession'
+        : 'accept',
+  };
+}
+
+function parseStructuredInputRequest(requestId: string, params: JsonRecord): StructuredInputRequestInfo {
+  return {
+    requestId,
+    threadId: String(params.threadId || ''),
+    turnId: String(params.turnId || ''),
+    itemId: String(params.itemId || ''),
+    questions: Array.isArray(params.questions) ? params.questions as StructuredInputRequestInfo['questions'] : [],
+  };
+}
+
+function extractThreadId(message: CodexServerMessage): string {
+  const params = typeof message.params === 'object' && message.params ? message.params as JsonRecord : {};
+  return typeof params.threadId === 'string' ? params.threadId : '';
+}
+
+function extractTurnId(message: CodexServerMessage): string {
+  const params = typeof message.params === 'object' && message.params ? message.params as JsonRecord : {};
+  return typeof params.turnId === 'string' ? params.turnId : '';
+}
+
+async function buildUserInput(
+  prompt: string,
+  files: StreamChatParams['files'],
+): Promise<{ input: Array<Record<string, unknown>>; tempFiles: string[] }> {
+  const tempFiles: string[] = [];
+  const input: Array<Record<string, unknown>> = [toTextInput(prompt)];
+
+  for (const file of files ?? []) {
+    if (!file.type.startsWith('image/')) continue;
+    const ext = MIME_EXT[file.type] || '.png';
+    const tmpPath = path.join(os.tmpdir(), `cti-img-${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`);
+    fs.writeFileSync(tmpPath, Buffer.from(file.data, 'base64'));
+    tempFiles.push(tmpPath);
+    input.push({ type: 'localImage', path: tmpPath });
+  }
+
+  return { input, tempFiles };
+}
+
 export class CodexProvider implements LLMProvider {
-  private sdk: CodexModule | null = null;
-  private codex: CodexInstance | null = null;
-  private trustedCodexProjects: string[] | null = null;
-  private codexConfigPresent: boolean | null = null;
+  private client: CodexAppServerClient | null = null;
+  private readonly pendingApprovals: PendingApprovals;
+  private readonly pendingStructuredInputs: PendingStructuredInputs;
 
-  /** Maps session IDs to Codex thread IDs for resume. */
-  private threadIds = new Map<string, string>();
-
-  constructor(private pendingPerms: PendingPermissions) {}
-
-  private hasLocalCodexConfig(): boolean {
-    if (this.codexConfigPresent !== null) return this.codexConfigPresent;
-    this.codexConfigPresent = fs.existsSync(path.join(resolveCodexHome(), 'config.toml'));
-    return this.codexConfigPresent;
+  constructor(
+    pendingApprovals?: unknown,
+    pendingStructuredInputs?: unknown,
+  ) {
+    this.pendingApprovals = pendingApprovals instanceof PendingApprovals
+      ? pendingApprovals
+      : new PendingApprovals();
+    this.pendingStructuredInputs = pendingStructuredInputs instanceof PendingStructuredInputs
+      ? pendingStructuredInputs
+      : new PendingStructuredInputs();
   }
 
-  private getTrustedCodexProjects(): string[] {
-    if (this.trustedCodexProjects) return this.trustedCodexProjects;
-    this.trustedCodexProjects = loadTrustedCodexProjects();
-    return this.trustedCodexProjects;
-  }
-
-  /**
-   * Lazily load the Codex SDK. Throws a clear error if not installed.
-   */
-  private async ensureSDK(): Promise<{ sdk: CodexModule; codex: CodexInstance }> {
-    if (this.sdk && this.codex) {
-      return { sdk: this.sdk, codex: this.codex };
+  private async ensureClient(): Promise<CodexAppServerClient> {
+    if (this.client) {
+      await this.client.prepare();
+      return this.client;
     }
-
-    try {
-      this.sdk = await (Function('return import("@openai/codex-sdk")')() as Promise<CodexModule>);
-    } catch {
-      throw new Error(
-        '[CodexProvider] @openai/codex-sdk is not installed. ' +
-        'Install it with: npm install @openai/codex-sdk'
-      );
-    }
-
-    // Resolve API key: CTI_CODEX_API_KEY > CODEX_API_KEY > OPENAI_API_KEY > (login auth)
-    const apiKey = process.env.CTI_CODEX_API_KEY
-      || process.env.CODEX_API_KEY
-      || process.env.OPENAI_API_KEY
-      || undefined;
-    const baseUrl = process.env.CTI_CODEX_BASE_URL || undefined;
-
-    const CodexClass = this.sdk.Codex;
-    this.codex = new CodexClass({
-      ...(apiKey ? { apiKey } : {}),
-      ...(baseUrl ? { baseUrl } : {}),
-      env: {
-        ...Object.fromEntries(
-          Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
-        ),
-        HOME: os.homedir(),
-        CODEX_HOME: resolveCodexHome(),
-      },
-    });
-
-    return { sdk: this.sdk, codex: this.codex };
+    const client = new CodexAppServerClient();
+    await client.prepare();
+    this.client = client;
+    return client;
   }
 
   async prepare(): Promise<void> {
-    await this.ensureSDK();
+    await this.ensureClient();
+  }
+
+  async close(): Promise<void> {
+    await this.client?.close();
+    this.client = null;
+  }
+
+  async supportsNativePlan(): Promise<boolean> {
+    const client = await this.ensureClient();
+    return client.supportsCollaborationMode('plan');
   }
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
     const self = this;
-
     return new ReadableStream<string>({
       start(controller) {
-        (async () => {
-          const tempFiles: string[] = [];
-          try {
-            const { codex } = await self.ensureSDK();
-
-            // Resolve or create thread
-            let savedThreadId = params.sdkSessionId
-              ? self.threadIds.get(params.sessionId) || params.sdkSessionId
-              : undefined;
-
-            // Cross-runtime migration safety:
-            // when a persisted Claude-model session leaks into Codex runtime,
-            // resuming it can fail immediately with model/session mismatch.
-            if (savedThreadId && looksLikeClaudeModel(params.model)) {
-              console.warn('[codex-provider] Ignoring stale Claude-like sdkSessionId in Codex runtime; starting fresh thread');
-              savedThreadId = undefined;
-            }
-
-            const passModel = shouldPassModelToCodex();
-            const trustedProjects = self.getTrustedCodexProjects();
-            const trustedWorkingDirectory = isTrustedCodexWorkingDirectory(
-              params.workingDirectory,
-              trustedProjects,
-            );
-            const forceSkipGitRepoCheck = process.env.CTI_CODEX_SKIP_GIT_REPO_CHECK === 'true';
-
-            const threadOptions: Record<string, unknown> = {
-              ...(passModel && params.model ? { model: params.model } : {}),
-              ...(params.workingDirectory ? { workingDirectory: params.workingDirectory } : {}),
-              ...(trustedWorkingDirectory || forceSkipGitRepoCheck ? { skipGitRepoCheck: true } : {}),
-            };
-
-            // Let the local Codex CLI config drive approval behavior when available.
-            if (!self.hasLocalCodexConfig()) {
-              threadOptions.approvalPolicy = toApprovalPolicy(params.permissionMode);
-            }
-
-            // Build input: Codex SDK UserInput supports { type: "text" } and
-            // { type: "local_image", path: string }. We write base64 data to
-            // temp files so the SDK can read them as local images.
-            const imageFiles = params.files?.filter(
-              f => f.type.startsWith('image/')
-            ) ?? [];
-
-            let input: string | Array<Record<string, string>>;
-            if (imageFiles.length > 0) {
-              const parts: Array<Record<string, string>> = [
-                { type: 'text', text: params.prompt },
-              ];
-              for (const file of imageFiles) {
-                const ext = MIME_EXT[file.type] || '.png';
-                const tmpPath = path.join(os.tmpdir(), `cti-img-${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`);
-                fs.writeFileSync(tmpPath, Buffer.from(file.data, 'base64'));
-                tempFiles.push(tmpPath);
-                parts.push({ type: 'local_image', path: tmpPath });
-              }
-              input = parts;
-            } else {
-              input = params.prompt;
-            }
-
-            let retryFresh = false;
-
-            while (true) {
-              let thread: ThreadInstance;
-              if (savedThreadId) {
-                try {
-                  thread = codex.resumeThread(savedThreadId, threadOptions);
-                } catch {
-                  thread = codex.startThread(threadOptions);
-                }
-              } else {
-                thread = codex.startThread(threadOptions);
-              }
-
-              let sawAnyEvent = false;
-              try {
-                const { events } = await thread.runStreamed(input);
-
-                for await (const event of events) {
-                  sawAnyEvent = true;
-                  if (params.abortController?.signal.aborted) {
-                    break;
-                  }
-
-                  switch (event.type) {
-                    case 'thread.started': {
-                      const threadId = event.thread_id as string;
-                      self.threadIds.set(params.sessionId, threadId);
-
-                      controller.enqueue(sseEvent('status', {
-                        session_id: threadId,
-                      }));
-                      break;
-                    }
-
-                    case 'item.completed': {
-                      const item = event.item as Record<string, unknown>;
-                      self.handleCompletedItem(controller, item);
-                      break;
-                    }
-
-                    case 'turn.completed': {
-                      const usage = event.usage as Record<string, unknown> | undefined;
-                      const threadId = self.threadIds.get(params.sessionId);
-
-                      controller.enqueue(sseEvent('result', {
-                        usage: usage ? {
-                          input_tokens: usage.input_tokens ?? 0,
-                          output_tokens: usage.output_tokens ?? 0,
-                          cache_read_input_tokens: usage.cached_input_tokens ?? 0,
-                        } : undefined,
-                        ...(threadId ? { session_id: threadId } : {}),
-                      }));
-                      break;
-                    }
-
-                    case 'turn.failed': {
-                      const error = (event as { message?: string }).message;
-                      controller.enqueue(sseEvent('error', error || 'Turn failed'));
-                      break;
-                    }
-
-                    case 'error': {
-                      const error = (event as { message?: string }).message;
-                      controller.enqueue(sseEvent('error', error || 'Thread error'));
-                      break;
-                    }
-
-                    // item.started, item.updated, turn.started — no action needed
-                  }
-                }
-                break;
-              } catch (err) {
-                const message = err instanceof Error ? err.message : String(err);
-                if (savedThreadId && !retryFresh && !sawAnyEvent && shouldRetryFreshThread(message)) {
-                  console.warn('[codex-provider] Resume failed, retrying with a fresh thread:', message);
-                  savedThreadId = undefined;
-                  retryFresh = true;
-                  continue;
-                }
-                throw err;
-              }
-            }
-
-            controller.close();
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            console.error('[codex-provider] Error:', err instanceof Error ? err.stack || err.message : err);
-            try {
-              controller.enqueue(sseEvent('error', message));
-              controller.close();
-            } catch {
-              // Controller already closed
-            }
-          } finally {
-            // Clean up temp image files
-            for (const tmp of tempFiles) {
-              try { fs.unlinkSync(tmp); } catch { /* ignore */ }
-            }
-          }
-        })();
+        void self.run(controller, params);
       },
     });
   }
 
-  /**
-   * Map a completed Codex item to SSE events.
-   */
+  private async run(
+    controller: ReadableStreamDefaultController<string>,
+    params: StreamChatParams,
+  ): Promise<void> {
+    const client = await this.ensureClient();
+    const tempFiles: string[] = [];
+    let unsubscribe: (() => void) | null = null;
+
+    try {
+      const bootstrap = await this.bootstrapThread(client, params);
+      const threadId = bootstrap.threadId;
+      const queue: CodexServerMessage[] = [];
+      let wakeQueue: (() => void) | null = null;
+      let tokenUsage: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number } | undefined;
+
+      unsubscribe = client.subscribe((message) => {
+        if (extractThreadId(message) !== threadId) return;
+        queue.push(message);
+        wakeQueue?.();
+        wakeQueue = null;
+      });
+
+      controller.enqueue(sseEvent('status', {
+        session_id: threadId,
+        ...(bootstrap.model ? { model: bootstrap.model } : {}),
+      }));
+
+      const { input, tempFiles: createdTemps } = await buildUserInput(params.prompt, params.files);
+      tempFiles.push(...createdTemps);
+
+      const turnParams: JsonRecord = {
+        threadId,
+        input,
+      };
+      if (params.workingDirectory) {
+        turnParams.cwd = params.workingDirectory;
+      }
+      if (params.model) {
+        turnParams.model = params.model;
+        turnParams.effort = null;
+      }
+      if (!hasLocalCodexConfig() && params.permissionMode) {
+        turnParams.approvalPolicy = toApprovalPolicy(params.permissionMode);
+      }
+      if (params.collaborationMode === 'plan') {
+        if (!client.supportsCollaborationMode('plan')) {
+          throw new Error('Local Codex does not support native plan mode');
+        }
+        turnParams.collaborationMode = buildCollaborationMode(params.model || bootstrap.model || 'gpt-5.4');
+      }
+
+      const turnStart = await client.call<{ turn?: { id?: string } }>('turn/start', turnParams);
+      let activeTurnId = typeof turnStart?.turn?.id === 'string' ? turnStart.turn.id : '';
+
+      while (true) {
+        if (params.abortController?.signal.aborted) {
+          break;
+        }
+
+        const message = await this.readNext(queue, () => {
+          if (wakeQueue) return;
+          wakeQueue = () => {};
+        }, () => {
+          if (queue.length > 0) return;
+          return new Promise<void>((resolve) => {
+            wakeQueue = resolve;
+          });
+        });
+        if (!message) continue;
+
+        if (message.kind === 'request') {
+          await this.handleServerRequest(client, controller, message);
+          continue;
+        }
+
+        const paramsRecord = (typeof message.params === 'object' && message.params ? message.params as JsonRecord : {});
+        switch (message.method) {
+          case 'thread/status/changed':
+            params.onRuntimeStatusChange?.(mapRuntimeStatus(paramsRecord.status));
+            break;
+          case 'thread/tokenUsage/updated':
+            tokenUsage = mapTokenUsage((paramsRecord.tokenUsage as JsonRecord | undefined)?.last as TokenUsageBreakdown | undefined);
+            break;
+          case 'turn/started':
+            activeTurnId = typeof (paramsRecord.turn as JsonRecord | undefined)?.id === 'string'
+              ? String((paramsRecord.turn as JsonRecord).id)
+              : activeTurnId;
+            break;
+          case 'item/agentMessage/delta':
+            if (typeof paramsRecord.delta === 'string') {
+              controller.enqueue(sseEvent('text', paramsRecord.delta));
+            }
+            break;
+          case 'item/reasoning/textDelta':
+          case 'item/reasoning/summaryTextDelta':
+            if (typeof paramsRecord.delta === 'string') {
+              controller.enqueue(sseEvent('status', { reasoning: paramsRecord.delta }));
+            }
+            break;
+          case 'turn/plan/updated':
+            controller.enqueue(sseEvent('plan_state', paramsRecord));
+            break;
+          case 'item/plan/delta':
+            if (typeof paramsRecord.delta === 'string') {
+              controller.enqueue(sseEvent('plan_delta', paramsRecord.delta));
+            }
+            break;
+          case 'item/completed':
+            if (activeTurnId && extractTurnId(message) && extractTurnId(message) !== activeTurnId) {
+              break;
+            }
+            this.handleCompletedItem(controller, paramsRecord.item as JsonRecord);
+            break;
+          case 'serverRequest/resolved':
+            controller.enqueue(sseEvent('server_request_resolved', paramsRecord));
+            break;
+          case 'error':
+            controller.enqueue(sseEvent('error', String((paramsRecord.error as JsonRecord | undefined)?.message || 'Turn failed')));
+            break;
+          case 'turn/completed':
+            controller.enqueue(sseEvent('result', {
+              ...(tokenUsage ? { usage: tokenUsage } : {}),
+              session_id: threadId,
+              is_error: !!(paramsRecord.turn as JsonRecord | undefined)?.error,
+            }));
+            controller.close();
+            return;
+        }
+      }
+
+      controller.close();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[codex-provider] Error:', error instanceof Error ? error.stack || error.message : error);
+      try {
+        controller.enqueue(sseEvent('error', message));
+        controller.close();
+      } catch {
+        // no-op
+      }
+    } finally {
+      unsubscribe?.();
+      for (const tmp of tempFiles) {
+        try {
+          fs.unlinkSync(tmp);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
+  private async bootstrapThread(client: CodexAppServerClient, params: StreamChatParams): Promise<ThreadBootstrap> {
+    let savedThreadId = params.sdkSessionId || undefined;
+    if (savedThreadId && looksLikeClaudeModel(params.model)) {
+      savedThreadId = undefined;
+    }
+
+    const threadParams: JsonRecord = {
+      experimentalRawEvents: false,
+      persistExtendedHistory: true,
+    };
+    if (params.workingDirectory) {
+      threadParams.cwd = params.workingDirectory;
+    }
+    if (!hasLocalCodexConfig() && params.permissionMode) {
+      threadParams.approvalPolicy = toApprovalPolicy(params.permissionMode);
+    }
+
+    let retriedFresh = false;
+    while (true) {
+      try {
+        if (savedThreadId) {
+          const resumed = await client.call<{ thread?: { id?: string }; model?: string }>('thread/resume', {
+            ...threadParams,
+            threadId: savedThreadId,
+          });
+          return {
+            threadId: String(resumed.thread?.id || savedThreadId),
+            model: typeof resumed.model === 'string' ? resumed.model : undefined,
+          };
+        }
+
+        const started = await client.call<{ thread?: { id?: string }; model?: string }>('thread/start', threadParams);
+        const threadId = started.thread?.id;
+        if (typeof threadId !== 'string' || !threadId) {
+          throw new Error('thread/start succeeded without thread id');
+        }
+        return {
+          threadId,
+          model: typeof started.model === 'string' ? started.model : undefined,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (savedThreadId && !retriedFresh && shouldRetryFreshThread(message)) {
+          savedThreadId = undefined;
+          retriedFresh = true;
+          continue;
+        }
+        throw error;
+      }
+    }
+  }
+
+  private async handleServerRequest(
+    client: CodexAppServerClient,
+    controller: ReadableStreamDefaultController<string>,
+    message: Extract<CodexServerMessage, { kind: 'request' }>,
+  ): Promise<void> {
+    const params = typeof message.params === 'object' && message.params ? message.params as JsonRecord : {};
+
+    if (message.method === 'item/tool/requestUserInput') {
+      const request = parseStructuredInputRequest(String(message.id), params);
+      controller.enqueue(sseEvent('structured_input_request', request));
+      const response = await this.pendingStructuredInputs.waitFor(request.requestId);
+      await client.respond(message.id, response);
+      return;
+    }
+
+    if (
+      message.method === 'item/commandExecution/requestApproval' ||
+      message.method === 'item/fileChange/requestApproval' ||
+      message.method === 'item/permissions/requestApproval'
+    ) {
+      const requestId = String(message.id);
+      const { toolName, toolInput } = approvalToolPayload(message.method, params);
+      controller.enqueue(sseEvent('approval_request', {
+        permissionRequestId: requestId,
+        toolName,
+        toolInput,
+        suggestions: [],
+      }));
+      const resolution = await this.pendingApprovals.waitFor(requestId);
+      await client.respond(message.id, approvalResponseFor(message.method, params, resolution));
+      return;
+    }
+
+    await client.respondError(message.id, -32601, buildUnsupportedRequestError(message.method).message);
+  }
+
+  private async readNext(
+    queue: CodexServerMessage[],
+    _arm: () => void,
+    wait: () => Promise<void> | undefined,
+  ): Promise<CodexServerMessage | null> {
+    if (queue.length > 0) {
+      return queue.shift() || null;
+    }
+    const waiter = wait();
+    if (waiter) {
+      await waiter;
+    }
+    return queue.shift() || null;
+  }
+
   private handleCompletedItem(
     controller: ReadableStreamDefaultController<string>,
-    item: Record<string, unknown>,
+    item: JsonRecord | undefined,
   ): void {
-    const itemType = item.type as string;
+    if (!item) return;
+    const itemType = normalizeItemType(item.type);
 
     switch (itemType) {
-      case 'agent_message': {
-        const text = (item.text as string) || '';
+      case 'agentMessage': {
+        const text = typeof item.text === 'string' ? item.text : '';
         if (text) {
-          controller.enqueue(sseEvent('text', text));
+          controller.enqueue(sseEvent('text_segment', text));
         }
         break;
       }
-
-      case 'command_execution': {
-        const toolId = (item.id as string) || `tool-${Date.now()}`;
-        const command = item.command as string || '';
-        const output = item.aggregated_output as string || '';
-        const exitCode = item.exit_code as number | undefined;
-        const isError = exitCode != null && exitCode !== 0;
-
+      case 'plan': {
+        const text = typeof item.text === 'string' ? item.text : '';
+        if (text) {
+          controller.enqueue(sseEvent('plan_result', text));
+        }
+        break;
+      }
+      case 'commandExecution': {
+        const toolId = typeof item.id === 'string' ? item.id : `tool-${Date.now()}`;
+        const command = typeof item.command === 'string' ? item.command : '';
+        const output = typeof item.aggregatedOutput === 'string' ? item.aggregatedOutput : '';
+        const exitCode = typeof item.exitCode === 'number' ? item.exitCode : null;
+        const isError = exitCode !== null && exitCode !== 0;
         controller.enqueue(sseEvent('tool_use', {
           id: toolId,
           name: 'Bash',
-          input: { command },
+          input: { command, cwd: item.cwd },
         }));
-
-        const resultContent = output || (isError ? `Exit code: ${exitCode}` : 'Done');
         controller.enqueue(sseEvent('tool_result', {
           tool_use_id: toolId,
-          content: resultContent,
+          content: output || (isError ? `Exit code: ${exitCode}` : 'Done'),
           is_error: isError,
         }));
         break;
       }
-
-      case 'file_change': {
-        const toolId = (item.id as string) || `tool-${Date.now()}`;
-        const changes = item.changes as Array<{ path: string; kind: string }> || [];
-        const summary = changes.map(c => `${c.kind}: ${c.path}`).join('\n');
-
+      case 'fileChange': {
+        const toolId = typeof item.id === 'string' ? item.id : `tool-${Date.now()}`;
+        const changes = Array.isArray(item.changes) ? item.changes : [];
+        const summary = changes
+          .map((change) => {
+            const record = change as JsonRecord;
+            return `${String(record.kind || 'update')}: ${String(record.path || '')}`;
+          })
+          .join('\n');
         controller.enqueue(sseEvent('tool_use', {
           id: toolId,
           name: 'Edit',
           input: { files: changes },
         }));
-
         controller.enqueue(sseEvent('tool_result', {
           tool_use_id: toolId,
           content: summary || 'File changes applied',
@@ -434,35 +645,28 @@ export class CodexProvider implements LLMProvider {
         }));
         break;
       }
-
-      case 'mcp_tool_call': {
-        const toolId = (item.id as string) || `tool-${Date.now()}`;
-        const server = item.server as string || '';
-        const tool = item.tool as string || '';
-        const args = item.arguments as unknown;
-        const result = item.result as { content?: unknown; structured_content?: unknown } | undefined;
-        const error = item.error as { message?: string } | undefined;
-
-        const resultContent = result?.content ?? result?.structured_content;
-        const resultText = typeof resultContent === 'string' ? resultContent : (resultContent ? JSON.stringify(resultContent) : undefined);
-
+      case 'mcpToolCall': {
+        const toolId = typeof item.id === 'string' ? item.id : `tool-${Date.now()}`;
+        const server = typeof item.server === 'string' ? item.server : '';
+        const tool = typeof item.tool === 'string' ? item.tool : '';
+        const result = item.result as JsonRecord | null | undefined;
+        const error = item.error as JsonRecord | null | undefined;
+        const content = result?.content ?? result?.structuredContent ?? result?.structured_content;
         controller.enqueue(sseEvent('tool_use', {
           id: toolId,
           name: `mcp__${server}__${tool}`,
-          input: args,
+          input: item.arguments,
         }));
-
         controller.enqueue(sseEvent('tool_result', {
           tool_use_id: toolId,
-          content: error?.message || resultText || 'Done',
+          content: typeof content === 'string' ? content : content ? JSON.stringify(content) : String(error?.message || 'Done'),
           is_error: !!error,
         }));
         break;
       }
-
       case 'reasoning': {
-        // Reasoning is internal; emit as status
-        const text = (item.text as string) || '';
+        const parts = Array.isArray(item.content) ? item.content.filter((part): part is string => typeof part === 'string') : [];
+        const text = parts.join('\n').trim();
         if (text) {
           controller.enqueue(sseEvent('status', { reasoning: text }));
         }

@@ -1,32 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-// ── SSE utils tests ─────────────────────────────────────────
-
+import { PendingApprovals, PendingStructuredInputs } from '../permission-gateway.js';
 import { sseEvent } from '../sse-utils.js';
-
-describe('sseEvent', () => {
-  it('formats a string data payload', () => {
-    const result = sseEvent('text', 'hello');
-    assert.equal(result, 'data: {"type":"text","data":"hello"}\n');
-  });
-
-  it('stringifies object data payload', () => {
-    const result = sseEvent('result', { usage: { input_tokens: 10 } });
-    const parsed = JSON.parse(result.slice(6));
-    assert.equal(parsed.type, 'result');
-    const inner = JSON.parse(parsed.data);
-    assert.equal(inner.usage.input_tokens, 10);
-  });
-
-  it('handles newlines in data', () => {
-    const result = sseEvent('text', 'line1\nline2');
-    const parsed = JSON.parse(result.slice(6));
-    assert.equal(parsed.data, 'line1\nline2');
-  });
-});
-
-// ── CodexProvider tests ─────────────────────────────────────
 
 async function collectStream(stream: ReadableStream<string>): Promise<string[]> {
   const reader = stream.getReader();
@@ -41,422 +17,417 @@ async function collectStream(stream: ReadableStream<string>): Promise<string[]> 
 
 function parseSSEChunks(chunks: string[]): Array<{ type: string; data: string }> {
   return chunks
-    .flatMap(chunk => chunk.split('\n'))
-    .filter(line => line.startsWith('data: '))
-    .map(line => JSON.parse(line.slice(6)));
+    .flatMap((chunk) => chunk.split('\n'))
+    .filter((line) => line.startsWith('data: '))
+    .map((line) => JSON.parse(line.slice(6)));
 }
 
-describe('CodexProvider', () => {
-  it('emits error when SDK init fails', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
-    const provider = new CodexProvider(new PendingPermissions());
-
-    // Force ensureSDK to fail by setting sdk to a broken module
-    (provider as any).sdk = { Codex: class { constructor() { throw new Error('Missing API key'); } } };
-    (provider as any).codex = null;
-    // Reset so ensureSDK re-runs the constructor
-    (provider as any).sdk = null;
-    // Override ensureSDK directly
-    (provider as any).ensureSDK = async () => { throw new Error('SDK init failed: Missing API key'); };
-
-    const stream = provider.streamChat({
-      prompt: 'test',
-      sessionId: 'test-session',
-    });
-
-    const chunks = await collectStream(stream);
-    const events = parseSSEChunks(chunks);
-
-    const errorEvent = events.find(e => e.type === 'error');
-    assert.ok(errorEvent, 'Should emit an error event');
-    assert.ok(errorEvent!.data.includes('Missing API key'), 'Error should contain the cause');
-  });
-
-  it('maps agent_message item to text SSE event', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
-    const provider = new CodexProvider(new PendingPermissions());
-
-    const chunks: string[] = [];
-    const mockController = {
-      enqueue: (chunk: string) => chunks.push(chunk),
-    } as unknown as ReadableStreamDefaultController<string>;
-
-    (provider as any).handleCompletedItem(mockController, {
-      type: 'agent_message',
-      id: 'msg-1',
-      text: 'Hello from Codex!',
-    });
-
-    const events = parseSSEChunks(chunks);
-    assert.equal(events.length, 1);
-    assert.equal(events[0].type, 'text');
-    assert.equal(events[0].data, 'Hello from Codex!');
-  });
-
-  it('maps command_execution item to tool_use + tool_result', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
-    const provider = new CodexProvider(new PendingPermissions());
-
-    const chunks: string[] = [];
-    const mockController = {
-      enqueue: (chunk: string) => chunks.push(chunk),
-    } as unknown as ReadableStreamDefaultController<string>;
-
-    (provider as any).handleCompletedItem(mockController, {
-      type: 'command_execution',
-      id: 'cmd-1',
-      command: 'ls -la',
-      aggregated_output: 'file1.txt\nfile2.txt',
-      exit_code: 0,
-      status: 'completed',
-    });
-
-    const events = parseSSEChunks(chunks);
-    assert.equal(events.length, 2);
-
-    const toolUse = JSON.parse(events[0].data);
-    assert.equal(toolUse.name, 'Bash');
-    assert.equal(toolUse.input.command, 'ls -la');
-
-    const toolResult = JSON.parse(events[1].data);
-    assert.equal(toolResult.tool_use_id, 'cmd-1');
-    assert.equal(toolResult.is_error, false);
-  });
-
-  it('marks non-zero exit code as error', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
-    const provider = new CodexProvider(new PendingPermissions());
-
-    const chunks: string[] = [];
-    const mockController = {
-      enqueue: (chunk: string) => chunks.push(chunk),
-    } as unknown as ReadableStreamDefaultController<string>;
-
-    (provider as any).handleCompletedItem(mockController, {
-      type: 'command_execution',
-      id: 'cmd-2',
-      command: 'false',
-      aggregated_output: '',
-      exit_code: 1,
-    });
-
-    const events = parseSSEChunks(chunks);
-    const toolResult = JSON.parse(events[1].data);
-    assert.equal(toolResult.is_error, true);
-  });
-
-  it('maps file_change item correctly', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
-    const provider = new CodexProvider(new PendingPermissions());
-
-    const chunks: string[] = [];
-    const mockController = {
-      enqueue: (chunk: string) => chunks.push(chunk),
-    } as unknown as ReadableStreamDefaultController<string>;
-
-    (provider as any).handleCompletedItem(mockController, {
-      type: 'file_change',
-      id: 'fc-1',
-      changes: [
-        { path: 'src/main.ts', kind: 'update' },
-        { path: 'src/new.ts', kind: 'add' },
-      ],
-    });
-
-    const events = parseSSEChunks(chunks);
-    assert.equal(events.length, 2);
-    const toolUse = JSON.parse(events[0].data);
-    assert.equal(toolUse.name, 'Edit');
-    const toolResult = JSON.parse(events[1].data);
-    assert.ok(toolResult.content.includes('update: src/main.ts'));
-  });
-
-  it('maps mcp_tool_call item correctly', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
-    const provider = new CodexProvider(new PendingPermissions());
-
-    const chunks: string[] = [];
-    const mockController = {
-      enqueue: (chunk: string) => chunks.push(chunk),
-    } as unknown as ReadableStreamDefaultController<string>;
-
-    (provider as any).handleCompletedItem(mockController, {
-      type: 'mcp_tool_call',
-      id: 'mcp-1',
-      server: 'myserver',
-      tool: 'search',
-      arguments: { query: 'test' },
-      result: { content: 'found 3 results' },
-    });
-
-    const events = parseSSEChunks(chunks);
-    const toolUse = JSON.parse(events[0].data);
-    assert.equal(toolUse.name, 'mcp__myserver__search');
-    const toolResult = JSON.parse(events[1].data);
-    assert.equal(toolResult.content, 'found 3 results');
-  });
-
-  it('maps mcp_tool_call with structured_content', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
-    const provider = new CodexProvider(new PendingPermissions());
-
-    const chunks: string[] = [];
-    const mockController = {
-      enqueue: (chunk: string) => chunks.push(chunk),
-    } as unknown as ReadableStreamDefaultController<string>;
-
-    (provider as any).handleCompletedItem(mockController, {
-      type: 'mcp_tool_call',
-      id: 'mcp-2',
-      server: 'myserver',
-      tool: 'getData',
-      arguments: {},
-      result: { structured_content: { items: [1, 2, 3] } },
-    });
-
-    const events = parseSSEChunks(chunks);
-    const toolResult = JSON.parse(events[1].data);
-    assert.equal(toolResult.content, JSON.stringify({ items: [1, 2, 3] }));
-  });
-
-  it('skips empty agent_message', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
-    const provider = new CodexProvider(new PendingPermissions());
-
-    const chunks: string[] = [];
-    const mockController = {
-      enqueue: (chunk: string) => chunks.push(chunk),
-    } as unknown as ReadableStreamDefaultController<string>;
-
-    (provider as any).handleCompletedItem(mockController, {
-      type: 'agent_message',
-      id: 'msg-2',
-      text: '',
-    });
-
-    assert.equal(chunks.length, 0);
-  });
-
-  it('does not pass model by default and skips stale Claude resume id', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
-    const provider = new CodexProvider(new PendingPermissions());
-
-    let resumeCalls = 0;
-    let startCalls = 0;
-    let capturedStartOptions: Record<string, unknown> | undefined;
-
-    const mockThread = {
-      runStreamed: () => ({
-        events: (async function* () {
-          yield { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } };
-        })(),
-      }),
-    };
-
-    (provider as any).sdk = { Codex: class { constructor() {} } };
-    (provider as any).codex = {
-      resumeThread: () => {
-        resumeCalls += 1;
-        return mockThread;
-      },
-      startThread: (opts: Record<string, unknown>) => {
-        startCalls += 1;
-        capturedStartOptions = opts;
-        return mockThread;
-      },
-    };
-
-    const stream = provider.streamChat({
-      prompt: 'hello',
-      sessionId: 'model-default-session',
-      sdkSessionId: 'old-claude-session-id',
-      model: 'claude-sonnet-4-20250514',
-    });
-
-    await collectStream(stream);
-
-    assert.equal(resumeCalls, 0, 'Should skip resume for stale Claude-model session in Codex runtime');
-    assert.equal(startCalls, 1, 'Should start a fresh Codex thread');
-    assert.ok(capturedStartOptions, 'startThread options should be captured');
-    assert.ok(!Object.prototype.hasOwnProperty.call(capturedStartOptions!, 'model'), 'Model should not be forwarded by default');
-  });
-
-  it('passes model only when CTI_CODEX_DEFAULT_MODEL is configured', async () => {
-    const old = process.env.CTI_CODEX_DEFAULT_MODEL;
-    process.env.CTI_CODEX_DEFAULT_MODEL = 'gpt-5-codex';
-    try {
-      const { CodexProvider } = await import('../codex-provider.js');
-      const { PendingPermissions } = await import('../permission-gateway.js');
-      const provider = new CodexProvider(new PendingPermissions());
-
-      let capturedStartOptions: Record<string, unknown> | undefined;
-      const mockThread = {
-        runStreamed: () => ({
-          events: (async function* () {
-            yield { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } };
-          })(),
-        }),
-      };
-      (provider as any).sdk = { Codex: class { constructor() {} } };
-      (provider as any).codex = {
-        startThread: (opts: Record<string, unknown>) => {
-          capturedStartOptions = opts;
-          return mockThread;
-        },
-      };
-
-      const stream = provider.streamChat({
-        prompt: 'hello',
-        sessionId: 'model-forward-session',
-        model: 'gpt-5-codex',
-      });
-      await collectStream(stream);
-
-      assert.equal(capturedStartOptions?.model, 'gpt-5-codex');
-    } finally {
-      if (old === undefined) {
-        delete process.env.CTI_CODEX_DEFAULT_MODEL;
-      } else {
-        process.env.CTI_CODEX_DEFAULT_MODEL = old;
-      }
+async function waitFor(check: () => boolean, timeoutMs = 1000): Promise<void> {
+  const start = Date.now();
+  while (!check()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error('Timed out waiting for condition');
     }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+class FakeCodexClient {
+  public calls: Array<{ method: string; params: unknown }> = [];
+  public responses: Array<{ id: string | number; result: unknown }> = [];
+  public responseErrors: Array<{ id: string | number; code: number; message: string }> = [];
+  private listener: ((message: any) => void) | null = null;
+
+  constructor(
+    private readonly handlers: Record<string, (params: any) => unknown | Promise<unknown>>,
+    private readonly planSupported = true,
+  ) {}
+
+  async prepare(): Promise<void> {
+    // no-op
+  }
+
+  supportsCollaborationMode(mode: string): boolean {
+    return this.planSupported && mode === 'plan';
+  }
+
+  subscribe(listener: (message: any) => void): () => void {
+    this.listener = listener;
+    return () => {
+      this.listener = null;
+    };
+  }
+
+  emit(message: any): void {
+    this.listener?.(message);
+  }
+
+  async call<T>(method: string, params?: unknown): Promise<T> {
+    this.calls.push({ method, params });
+    const handler = this.handlers[method];
+    if (!handler) {
+      throw new Error(`Unhandled method: ${method}`);
+    }
+    return await handler(params) as T;
+  }
+
+  async respond(id: string | number, result: unknown): Promise<void> {
+    this.responses.push({ id, result });
+  }
+
+  async respondError(id: string | number, code: number, message: string): Promise<void> {
+    this.responseErrors.push({ id, code, message });
+  }
+}
+
+describe('sseEvent', () => {
+  it('formats a string data payload', () => {
+    const result = sseEvent('text', 'hello');
+    assert.equal(result, 'data: {"type":"text","data":"hello"}\n');
   });
 
-  it('reuses local Codex config and skips git repo check for trusted directories', async () => {
+  it('stringifies object data payload', () => {
+    const result = sseEvent('result', { usage: { input_tokens: 10 } });
+    const parsed = JSON.parse(result.slice(6));
+    assert.equal(parsed.type, 'result');
+    const inner = JSON.parse(parsed.data);
+    assert.equal(inner.usage.input_tokens, 10);
+  });
+});
+
+describe('CodexProvider', () => {
+  it('emits native plan events and forwards collaborationMode=plan', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
-    const provider = new CodexProvider(new PendingPermissions());
-
-    let capturedStartOptions: Record<string, unknown> | undefined;
-    const mockThread = {
-      runStreamed: () => ({
-        events: (async function* () {
-          yield { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } };
-        })(),
-      }),
-    };
-
-    (provider as any).sdk = { Codex: class { constructor() {} } };
-    (provider as any).codex = {
-      startThread: (opts: Record<string, unknown>) => {
-        capturedStartOptions = opts;
-        return mockThread;
+    const fake = new FakeCodexClient({
+      'thread/start': async () => ({ thread: { id: 'thread-1' }, model: 'gpt-5.4' }),
+      'turn/start': async () => {
+        queueMicrotask(() => {
+          fake.emit({
+            kind: 'notification',
+            method: 'turn/plan/updated',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              explanation: '先做实现计划',
+              plan: [{ title: '分析代码', status: 'in_progress' }],
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'item/plan/delta',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              itemId: 'plan-1',
+              delta: '1. 先分析现有实现',
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'item/completed',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              item: { type: 'plan', id: 'plan-1', text: '1. 先分析现有实现\n2. 再修改逻辑' },
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'turn/completed',
+            params: {
+              threadId: 'thread-1',
+              turn: { id: 'turn-1', error: null },
+            },
+          });
+        });
+        return { turn: { id: 'turn-1' } };
       },
-    };
-    (provider as any).codexConfigPresent = true;
-    (provider as any).trustedCodexProjects = ['/Users/shesong/codes', '/'];
-
-    const stream = provider.streamChat({
-      prompt: 'hello',
-      sessionId: 'trusted-dir-session',
-      workingDirectory: '/Users/shesong/codes',
-      permissionMode: 'acceptEdits',
     });
-    await collectStream(stream);
 
-    assert.equal(capturedStartOptions?.workingDirectory, '/Users/shesong/codes');
-    assert.equal(capturedStartOptions?.skipGitRepoCheck, true);
-    assert.ok(
-      !Object.prototype.hasOwnProperty.call(capturedStartOptions!, 'approvalPolicy'),
-      'Local ~/.codex/config.toml should own approval policy',
-    );
+    const provider = new CodexProvider();
+    (provider as any).client = fake;
+
+    const chunks = await collectStream(provider.streamChat({
+      prompt: '请先规划',
+      sessionId: 'session-1',
+      collaborationMode: 'plan',
+      model: 'gpt-5.4',
+    }));
+
+    const events = parseSSEChunks(chunks);
+    assert.ok(events.some((event) => event.type === 'plan_state'));
+    assert.ok(events.some((event) => event.type === 'plan_delta'));
+    assert.ok(events.some((event) => event.type === 'plan_result'));
+
+    const turnStart = fake.calls.find((call) => call.method === 'turn/start');
+    assert.equal((turnStart?.params as any).collaborationMode.mode, 'plan');
+    assert.equal((turnStart?.params as any).collaborationMode.settings.model, 'gpt-5.4');
   });
 
-  it('falls back to bridge approval policy when no local Codex config exists', async () => {
+  it('emits completed agent messages as text_segment instead of duplicating text deltas', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
-    const provider = new CodexProvider(new PendingPermissions());
-
-    let capturedStartOptions: Record<string, unknown> | undefined;
-    const mockThread = {
-      runStreamed: () => ({
-        events: (async function* () {
-          yield { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } };
-        })(),
-      }),
-    };
-
-    (provider as any).sdk = { Codex: class { constructor() {} } };
-    (provider as any).codex = {
-      startThread: (opts: Record<string, unknown>) => {
-        capturedStartOptions = opts;
-        return mockThread;
+    const fake = new FakeCodexClient({
+      'thread/start': async () => ({ thread: { id: 'thread-segment' }, model: 'gpt-5.4' }),
+      'turn/start': async () => {
+        queueMicrotask(() => {
+          fake.emit({
+            kind: 'notification',
+            method: 'item/agentMessage/delta',
+            params: {
+              threadId: 'thread-segment',
+              turnId: 'turn-segment',
+              itemId: 'agent-1',
+              delta: '我会先查看项目约束。',
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'item/completed',
+            params: {
+              threadId: 'thread-segment',
+              turnId: 'turn-segment',
+              item: { type: 'agentMessage', id: 'agent-1', text: '我会先查看项目约束。' },
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'turn/completed',
+            params: {
+              threadId: 'thread-segment',
+              turn: { id: 'turn-segment', error: null },
+            },
+          });
+        });
+        return { turn: { id: 'turn-segment' } };
       },
-    };
-    (provider as any).codexConfigPresent = false;
-    (provider as any).trustedCodexProjects = [];
-
-    const stream = provider.streamChat({
-      prompt: 'hello',
-      sessionId: 'no-config-session',
-      permissionMode: 'plan',
     });
-    await collectStream(stream);
 
-    assert.equal(capturedStartOptions?.approvalPolicy, 'on-request');
-    assert.ok(
-      !Object.prototype.hasOwnProperty.call(capturedStartOptions!, 'skipGitRepoCheck'),
-      'skipGitRepoCheck should not be forced without trusted local config',
-    );
+    const provider = new CodexProvider();
+    (provider as any).client = fake;
+
+    const chunks = await collectStream(provider.streamChat({
+      prompt: '规划一下',
+      sessionId: 'session-segment',
+    }));
+
+    const events = parseSSEChunks(chunks);
+    assert.equal(events.filter((event) => event.type === 'text').length, 1);
+    assert.equal(events.filter((event) => event.type === 'text_segment').length, 1);
+    assert.equal(events.find((event) => event.type === 'text')?.data, '我会先查看项目约束。');
+    assert.equal(events.find((event) => event.type === 'text_segment')?.data, '我会先查看项目约束。');
   });
 
-  it('retries with fresh thread when resume fails before any events', async () => {
+  it('bridges structured user input requests back into app-server responses', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
-    const provider = new CodexProvider(new PendingPermissions());
+    const pendingInputs = new PendingStructuredInputs();
+    const fake = new FakeCodexClient({
+      'thread/start': async () => ({ thread: { id: 'thread-2' }, model: 'gpt-5.4' }),
+      'turn/start': async () => {
+        queueMicrotask(() => {
+          fake.emit({
+            kind: 'request',
+            id: 'req-input-1',
+            method: 'item/tool/requestUserInput',
+            params: {
+              threadId: 'thread-2',
+              turnId: 'turn-2',
+              itemId: 'item-2',
+              questions: [
+                {
+                  id: 'q1',
+                  header: '输出文件',
+                  question: '你想把文件命名为什么？',
+                  isOther: false,
+                  isSecret: false,
+                  options: null,
+                },
+              ],
+            },
+          });
+        });
+        return { turn: { id: 'turn-2' } };
+      },
+    });
+    const provider = new CodexProvider(new PendingApprovals(), pendingInputs);
+    (provider as any).client = fake;
 
+    const streamPromise = collectStream(provider.streamChat({
+      prompt: '继续',
+      sessionId: 'session-2',
+    }));
+
+    await waitFor(() => fake.calls.some((call) => call.method === 'turn/start'));
+    pendingInputs.resolve('req-input-1', {
+      answers: {
+        q1: { answers: ['index.html'] },
+      },
+    });
+    await waitFor(() => fake.responses.length === 1);
+    fake.emit({
+      kind: 'notification',
+      method: 'serverRequest/resolved',
+      params: { threadId: 'thread-2', requestId: 'req-input-1' },
+    });
+    fake.emit({
+      kind: 'notification',
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-2',
+        turn: { id: 'turn-2', error: null },
+      },
+    });
+
+    const chunks = await streamPromise;
+    const events = parseSSEChunks(chunks);
+    assert.ok(events.some((event) => event.type === 'structured_input_request'));
+    assert.ok(events.some((event) => event.type === 'server_request_resolved'));
+    assert.deepEqual(fake.responses[0], {
+      id: 'req-input-1',
+      result: {
+        answers: {
+          q1: { answers: ['index.html'] },
+        },
+      },
+    });
+  });
+
+  it('bridges approval requests and maps allow_session to acceptForSession', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const pendingApprovals = new PendingApprovals();
+    const fake = new FakeCodexClient({
+      'thread/start': async () => ({ thread: { id: 'thread-3' }, model: 'gpt-5.4' }),
+      'turn/start': async () => {
+        queueMicrotask(() => {
+          fake.emit({
+            kind: 'request',
+            id: 'req-approval-1',
+            method: 'item/commandExecution/requestApproval',
+            params: {
+              threadId: 'thread-3',
+              turnId: 'turn-3',
+              itemId: 'cmd-1',
+              command: 'npm test',
+              cwd: '/tmp/demo',
+            },
+          });
+        });
+        return { turn: { id: 'turn-3' } };
+      },
+    });
+    const provider = new CodexProvider(pendingApprovals, new PendingStructuredInputs());
+    (provider as any).client = fake;
+
+    const streamPromise = collectStream(provider.streamChat({
+      prompt: '执行测试',
+      sessionId: 'session-3',
+    }));
+
+    await waitFor(() => fake.calls.some((call) => call.method === 'turn/start'));
+    pendingApprovals.resolve('req-approval-1', {
+      behavior: 'allow',
+      scope: 'session',
+    });
+    await waitFor(() => fake.responses.length === 1);
+    fake.emit({
+      kind: 'notification',
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-3',
+        turn: { id: 'turn-3', error: null },
+      },
+    });
+
+    const chunks = await streamPromise;
+    const events = parseSSEChunks(chunks);
+    assert.ok(events.some((event) => event.type === 'approval_request'));
+    assert.deepEqual(fake.responses[0], {
+      id: 'req-approval-1',
+      result: {
+        decision: 'acceptForSession',
+      },
+    });
+  });
+
+  it('retries with a fresh thread when thread/resume fails before any turn starts', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
     let resumeCalls = 0;
     let startCalls = 0;
-    const resumeThread = {
-      runStreamed: async () => {
+    const fake = new FakeCodexClient({
+      'thread/resume': async () => {
+        resumeCalls += 1;
         throw new Error('resuming session with different model');
       },
-    };
-    const freshThread = {
-      runStreamed: () => ({
-        events: (async function* () {
-          yield { type: 'turn.completed', usage: { input_tokens: 2, output_tokens: 3, cached_input_tokens: 0 } };
-        })(),
-      }),
-    };
-
-    (provider as any).sdk = { Codex: class { constructor() {} } };
-    (provider as any).codex = {
-      resumeThread: () => {
-        resumeCalls += 1;
-        return resumeThread;
-      },
-      startThread: () => {
+      'thread/start': async () => {
         startCalls += 1;
-        return freshThread;
+        return { thread: { id: 'thread-fresh' }, model: 'gpt-5.4' };
       },
-    };
-
-    const stream = provider.streamChat({
-      prompt: 'retry test',
-      sessionId: 'resume-retry-session',
-      sdkSessionId: 'codex-old-thread-id',
-      model: 'gpt-5-codex',
+      'turn/start': async () => {
+        queueMicrotask(() => {
+          fake.emit({
+            kind: 'notification',
+            method: 'turn/completed',
+            params: {
+              threadId: 'thread-fresh',
+              turn: { id: 'turn-fresh', error: null },
+            },
+          });
+        });
+        return { turn: { id: 'turn-fresh' } };
+      },
     });
+    const provider = new CodexProvider();
+    (provider as any).client = fake;
 
-    const chunks = await collectStream(stream);
-    const events = parseSSEChunks(chunks);
-    const errorEvent = events.find(e => e.type === 'error');
-    const resultEvent = events.find(e => e.type === 'result');
+    await collectStream(provider.streamChat({
+      prompt: '继续',
+      sessionId: 'session-4',
+      sdkSessionId: 'old-thread',
+    }));
 
-    assert.equal(resumeCalls, 1, 'Should attempt resume once');
-    assert.equal(startCalls, 1, 'Should fall back to a fresh thread');
-    assert.ok(!errorEvent, 'Retry success should not emit error');
-    assert.ok(resultEvent, 'Retry success should emit result');
+    assert.equal(resumeCalls, 1);
+    assert.equal(startCalls, 1);
+  });
+
+  it('builds localImage inputs for image attachments', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const fake = new FakeCodexClient({
+      'thread/start': async () => ({ thread: { id: 'thread-5' }, model: 'gpt-5.4' }),
+      'turn/start': async () => {
+        queueMicrotask(() => {
+          fake.emit({
+            kind: 'notification',
+            method: 'turn/completed',
+            params: {
+              threadId: 'thread-5',
+              turn: { id: 'turn-5', error: null },
+            },
+          });
+        });
+        return { turn: { id: 'turn-5' } };
+      },
+    });
+    const provider = new CodexProvider();
+    (provider as any).client = fake;
+
+    const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==';
+    await collectStream(provider.streamChat({
+      prompt: '看图说话',
+      sessionId: 'session-5',
+      files: [
+        {
+          id: 'img-1',
+          name: 'pixel.png',
+          type: 'image/png',
+          size: pngBase64.length,
+          data: pngBase64,
+        },
+      ],
+    }));
+
+    const turnStart = fake.calls.find((call) => call.method === 'turn/start');
+    assert.ok(Array.isArray((turnStart?.params as any).input));
+    assert.equal((turnStart?.params as any).input[0].type, 'text');
+    assert.equal((turnStart?.params as any).input[1].type, 'localImage');
   });
 });
 
@@ -479,235 +450,5 @@ trust_level = "trusted"
     assert.deepEqual(trusted, ['/Users/shesong/codes', '/']);
     assert.equal(isTrustedCodexWorkingDirectory('/Users/shesong/codes/agents-to-im', trusted), true);
     assert.equal(isTrustedCodexWorkingDirectory('/private/tmp/demo', trusted), true);
-  });
-});
-
-// ── Image input building tests ──────────────────────────────
-
-import fs from 'node:fs';
-
-/** Helper: build a full FileAttachment object for tests. */
-function makeFile(type: string, data: string, name = 'test-file') {
-  return { id: `file-${Date.now()}`, name, type, size: data.length, data };
-}
-
-describe('CodexProvider image input', () => {
-  it('builds local_image input array for text+image', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
-    const provider = new CodexProvider(new PendingPermissions());
-
-    // Mock the SDK so we can capture the input passed to runStreamed
-    let capturedInput: unknown;
-    const mockThread = {
-      runStreamed: (input: unknown) => {
-        capturedInput = input;
-        return {
-          events: (async function* () {
-            yield { type: 'turn.completed', usage: { input_tokens: 0, output_tokens: 0 } };
-          })(),
-        };
-      },
-    };
-    (provider as any).sdk = {
-      Codex: class { constructor() {} },
-    };
-    (provider as any).codex = {
-      startThread: () => mockThread,
-    };
-
-    // Use valid base64 (1x1 red PNG pixel)
-    const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==';
-
-    const stream = provider.streamChat({
-      prompt: 'Describe this image',
-      sessionId: 'img-session',
-      files: [makeFile('image/png', pngBase64, 'test.png')],
-    });
-
-    await collectStream(stream);
-
-    assert.ok(Array.isArray(capturedInput), 'Input should be an array for image input');
-    const parts = capturedInput as Array<Record<string, string>>;
-    assert.equal(parts.length, 2);
-    assert.equal(parts[0].type, 'text');
-    assert.equal(parts[0].text, 'Describe this image');
-    assert.equal(parts[1].type, 'local_image');
-    assert.ok(parts[1].path.endsWith('.png'), 'Temp file should have .png extension');
-  });
-
-  it('passes plain string when no images attached', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
-    const provider = new CodexProvider(new PendingPermissions());
-
-    let capturedInput: unknown;
-    const mockThread = {
-      runStreamed: (input: unknown) => {
-        capturedInput = input;
-        return {
-          events: (async function* () {
-            yield { type: 'turn.completed', usage: { input_tokens: 0, output_tokens: 0 } };
-          })(),
-        };
-      },
-    };
-    (provider as any).sdk = {
-      Codex: class { constructor() {} },
-    };
-    (provider as any).codex = {
-      startThread: () => mockThread,
-    };
-
-    const stream = provider.streamChat({
-      prompt: 'Hello',
-      sessionId: 'no-img-session',
-    });
-
-    await collectStream(stream);
-
-    assert.equal(typeof capturedInput, 'string', 'Input should be a plain string without images');
-    assert.equal(capturedInput, 'Hello');
-  });
-
-  it('builds local_image input with multiple images, ignoring non-image files', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
-    const provider = new CodexProvider(new PendingPermissions());
-
-    let capturedInput: unknown;
-    const mockThread = {
-      runStreamed: (input: unknown) => {
-        capturedInput = input;
-        return {
-          events: (async function* () {
-            yield { type: 'turn.completed', usage: { input_tokens: 0, output_tokens: 0 } };
-          })(),
-        };
-      },
-    };
-    (provider as any).sdk = {
-      Codex: class { constructor() {} },
-    };
-    (provider as any).codex = {
-      startThread: () => mockThread,
-    };
-
-    const stream = provider.streamChat({
-      prompt: 'Compare these',
-      sessionId: 'multi-img-session',
-      files: [
-        makeFile('image/png', 'cG5n', 'a.png'),
-        makeFile('image/jpeg', 'anBn', 'b.jpg'),
-        makeFile('text/plain', 'dGV4dA==', 'c.txt'),
-      ],
-    });
-
-    await collectStream(stream);
-
-    const parts = capturedInput as Array<Record<string, string>>;
-    assert.equal(parts.length, 3, 'Should have 1 text + 2 local_image parts (non-image file excluded)');
-    assert.equal(parts[0].type, 'text');
-    assert.equal(parts[1].type, 'local_image');
-    assert.ok(parts[1].path.endsWith('.png'));
-    assert.equal(parts[2].type, 'local_image');
-    assert.ok(parts[2].path.endsWith('.jpg'));
-  });
-});
-
-// ── Error event tests ───────────────────────────────────────
-
-describe('CodexProvider error events', () => {
-  it('reads message field from turn.failed event', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
-    const provider = new CodexProvider(new PendingPermissions());
-
-    const mockThread = {
-      runStreamed: () => ({
-        events: (async function* () {
-          yield { type: 'turn.failed', message: 'Rate limit exceeded' };
-        })(),
-      }),
-    };
-    (provider as any).sdk = {
-      Codex: class { constructor() {} },
-    };
-    (provider as any).codex = {
-      startThread: () => mockThread,
-    };
-
-    const stream = provider.streamChat({
-      prompt: 'test',
-      sessionId: 'err-session-1',
-    });
-
-    const chunks = await collectStream(stream);
-    const events = parseSSEChunks(chunks);
-    const errorEvent = events.find(e => e.type === 'error');
-    assert.ok(errorEvent, 'Should emit an error event');
-    assert.equal(errorEvent!.data, 'Rate limit exceeded');
-  });
-
-  it('reads message field from error event', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
-    const provider = new CodexProvider(new PendingPermissions());
-
-    const mockThread = {
-      runStreamed: () => ({
-        events: (async function* () {
-          yield { type: 'error', message: 'Connection lost' };
-        })(),
-      }),
-    };
-    (provider as any).sdk = {
-      Codex: class { constructor() {} },
-    };
-    (provider as any).codex = {
-      startThread: () => mockThread,
-    };
-
-    const stream = provider.streamChat({
-      prompt: 'test',
-      sessionId: 'err-session-2',
-    });
-
-    const chunks = await collectStream(stream);
-    const events = parseSSEChunks(chunks);
-    const errorEvent = events.find(e => e.type === 'error');
-    assert.ok(errorEvent, 'Should emit an error event');
-    assert.equal(errorEvent!.data, 'Connection lost');
-  });
-
-  it('falls back to default message when message field is absent', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
-    const { PendingPermissions } = await import('../permission-gateway.js');
-    const provider = new CodexProvider(new PendingPermissions());
-
-    const mockThread = {
-      runStreamed: () => ({
-        events: (async function* () {
-          yield { type: 'turn.failed' };
-        })(),
-      }),
-    };
-    (provider as any).sdk = {
-      Codex: class { constructor() {} },
-    };
-    (provider as any).codex = {
-      startThread: () => mockThread,
-    };
-
-    const stream = provider.streamChat({
-      prompt: 'test',
-      sessionId: 'err-session-3',
-    });
-
-    const chunks = await collectStream(stream);
-    const events = parseSSEChunks(chunks);
-    const errorEvent = events.find(e => e.type === 'error');
-    assert.ok(errorEvent);
-    assert.equal(errorEvent!.data, 'Turn failed');
   });
 });

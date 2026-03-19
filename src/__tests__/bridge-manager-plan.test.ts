@@ -21,6 +21,9 @@ function makeSettings(): Map<string, string> {
     ['bridge_default_mode', 'code'],
     ['bridge_default_runtime', 'claude'],
     ['bridge_default_model', 'claude-sonnet-4-6'],
+    [`bridge_${CHANNEL_TYPE}_stream_interval_ms`, '1'],
+    [`bridge_${CHANNEL_TYPE}_stream_min_delta_chars`, '1'],
+    [`bridge_${CHANNEL_TYPE}_stream_max_chars`, '4000'],
   ]);
 }
 
@@ -191,5 +194,141 @@ describe('bridge-manager plan workflow', () => {
     );
     assert.equal(store.getPlanWorkflow('wf-1')?.status, 'awaiting_confirmation');
     assert.equal(store.getPlanWorkflow('wf-1')?.actionCardMessageId, 'sent-2');
+  });
+
+  it('falls back to a plain text prompt when structured input card delivery fails', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'structured_input_request',
+              data: JSON.stringify({
+                requestId: 'req-1',
+                threadId: 'thread-1',
+                turnId: 'turn-1',
+                itemId: 'item-1',
+                questions: [
+                  {
+                    id: 'q1',
+                    header: '文件位置',
+                    question: '这个单文件 HTML 默认放在哪里、叫什么？',
+                    isOther: true,
+                    isSecret: false,
+                    options: [{ label: '根目录 about-codex.html', description: '推荐' }],
+                  },
+                ],
+              }),
+            })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-2' }) })}\n`);
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-structured',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    (adapter as any).sendStructuredInputRequest = async () => {
+      throw new Error('card rejected');
+    };
+
+    await start();
+    adapter.push({
+      messageId: 'msg-structured',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-structured' },
+      text: '继续',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length >= 1);
+    assert.match(adapter.sent[0].text, /当前运行时请求补充信息/);
+  });
+
+  it('rotates preview drafts per segment and merges a one-character lead segment', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text', data: '我' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '我' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text', data: '已经确认技术方案并开始生成页面。' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '已经确认技术方案并开始生成页面。' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text', data: '接下来补齐剩余内容。' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '接下来补齐剩余内容。' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-segmented' }) })}\n`);
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-segmented',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    const previewUpdates: string[] = [];
+    const previewEnds: number[] = [];
+    (adapter as any).getPreviewCapabilities = () => ({ supported: true, privateOnly: false });
+    (adapter as any).sendPreview = async (_address: unknown, text: string, draftId: number) => {
+      previewUpdates.push(`${draftId}:${text}`);
+      return 'sent';
+    };
+    (adapter as any).endPreview = (_address: unknown, draftId: number) => {
+      previewEnds.push(draftId);
+    };
+
+    await start();
+    adapter.push({
+      messageId: 'msg-segmented',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-segmented', threadId: 'thread-1' },
+      text: '继续',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length === 2);
+
+    assert.deepEqual(
+      adapter.sent.map((message) => message.text),
+      [
+        '我已经确认技术方案并开始生成页面。',
+        '接下来补齐剩余内容。',
+      ],
+    );
+    assert.ok(previewUpdates.length > 0);
+    assert.ok(!previewUpdates.some((entry) => entry.endsWith(':我')));
+    assert.ok(previewEnds.length >= 2);
   });
 });

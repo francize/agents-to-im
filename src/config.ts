@@ -15,8 +15,6 @@ export interface Config {
   claudeDefaultModel?: string;
   codexDefaultModel?: string;
   claudeCliExecutable?: string;
-  codexApiKey?: string;
-  codexBaseUrl?: string;
   legacyRuntime?: RuntimeName;
 }
 
@@ -78,8 +76,6 @@ export function loadConfig(): Config {
     claudeDefaultModel: env.get('CTI_CLAUDE_DEFAULT_MODEL') || undefined,
     codexDefaultModel: env.get('CTI_CODEX_DEFAULT_MODEL') || undefined,
     claudeCliExecutable: env.get('CTI_CLAUDE_CODE_EXECUTABLE') || undefined,
-    codexApiKey: env.get('CTI_CODEX_API_KEY') || undefined,
-    codexBaseUrl: env.get('CTI_CODEX_BASE_URL') || undefined,
     legacyRuntime: parseRuntime(env.get('CTI_RUNTIME')),
   };
 }
@@ -101,8 +97,6 @@ export function saveConfig(config: Config): void {
   out += formatEnvLine('CTI_CLAUDE_DEFAULT_MODEL', config.claudeDefaultModel);
   out += formatEnvLine('CTI_CODEX_DEFAULT_MODEL', config.codexDefaultModel);
   out += formatEnvLine('CTI_CLAUDE_CODE_EXECUTABLE', config.claudeCliExecutable);
-  out += formatEnvLine('CTI_CODEX_API_KEY', config.codexApiKey);
-  out += formatEnvLine('CTI_CODEX_BASE_URL', config.codexBaseUrl);
 
   fs.mkdirSync(CTI_HOME, { recursive: true });
   const tmpPath = CONFIG_PATH + '.tmp';

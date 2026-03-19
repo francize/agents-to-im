@@ -418,6 +418,309 @@ describe('FeishuAdapter', () => {
     assert.equal(store.getPlanWorkflow(waiting!.workflowId)?.status, 'planning');
   });
 
+  it('keeps the PLAN workflow active for codex until the native plan turn actually finishes', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {
+      ensureCodexNativePlanAvailable: async () => {},
+    });
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-native-plan',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5-codex',
+    });
+
+    const updatedNames: string[] = [];
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        chat: {
+          update: async (payload: { data: { name: string } }) => {
+            updatedNames.push(payload.data.name);
+            return { code: 0, data: {} };
+          },
+        },
+        message: {
+          create: async () => ({ code: 0, data: { message_id: 'msg-1' } }),
+          reply: async () => ({ code: 0, data: { message_id: 'msg-1' } }),
+        },
+      },
+    };
+
+    await adapter.handleGroupMessage(
+      { id: 'ou_123', type: 'open_id' },
+      {
+        messageId: 'cmd-1',
+        address: { channelType: 'feishu', chatId: 'group-native-plan', threadId: 'thread-1' },
+        text: '/plan',
+        timestamp: Date.now(),
+      },
+    );
+
+    const waiting = store.getActivePlanWorkflowByBinding(binding.id);
+    assert.ok(waiting);
+    assert.equal(waiting?.status, 'awaiting_input');
+    assert.equal(updatedNames.at(-1), 'Codex 新会话 [PLAN]');
+
+    await adapter.handleGroupMessage(
+      { id: 'ou_123', type: 'open_id' },
+      {
+        messageId: 'user-2',
+        address: { channelType: 'feishu', chatId: 'group-native-plan', threadId: 'thread-1' },
+        text: '请给我一个原生 plan',
+        timestamp: Date.now(),
+      },
+    );
+
+    const queued = (adapter as any).queue[0];
+    assert.equal(queued.bridgeMeta.planWorkflow.kind, 'native_plan_request');
+    assert.equal(store.getPlanWorkflow(waiting!.workflowId)?.status, 'planning');
+    assert.equal(updatedNames.at(-1), 'Codex 新会话 [PLAN]');
+  });
+
+  it('sends structured input cards with select menus inside action rows', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const adapter = new FeishuAdapter() as any;
+    let payloadContent = '';
+    adapter.restClient = {
+      im: {
+        message: {
+          reply: async (payload: { data: { content: string } }) => {
+            payloadContent = payload.data.content;
+            return { code: 0, data: { message_id: 'msg-input-1', open_message_id: 'open-input-1' } };
+          },
+        },
+      },
+    };
+
+    const result = await adapter.sendStructuredInputRequest(
+      { channelType: 'feishu', chatId: 'group-structured', threadId: 'thread-1' },
+      {
+        requestId: 'req-1',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        itemId: 'item-1',
+        questions: [
+          {
+            id: 'q1',
+            header: '文件位置',
+            question: '这个单文件 HTML 默认放在哪里、叫什么？',
+            isOther: true,
+            isSecret: false,
+            options: [
+              { label: '根目录 about-codex.html', description: '推荐' },
+            ],
+          },
+        ],
+      },
+      'reply-1',
+    );
+
+    const card = JSON.parse(payloadContent);
+    assert.equal(result.ok, true);
+    assert.equal(card.header.title.content, '补充信息');
+    assert.equal(card.elements[2].tag, 'action');
+    assert.equal(card.elements[2].actions[0].tag, 'select_static');
+    assert.equal(card.elements[2].actions[0].value.callback_data, 'input:field:req-1:q1');
+    assert.equal(card.elements[2].actions[0].options[0].value, '根目录 about-codex.html');
+    assert.equal(card.elements.at(-1).tag, 'action');
+    assert.equal(card.elements.at(-1).actions[0].tag, 'button');
+    assert.equal(card.elements.at(-1).actions[0].value.callback_data, 'input:submit:req-1');
+  });
+
+  it('stores structured input field interactions before submit instead of timing out', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    store.upsertStructuredInputRequest({
+      requestId: 'req-1',
+      channelType: 'feishu',
+      chatId: 'group-input',
+      codepilotSessionId: 'session-1',
+      address: { channelType: 'feishu', chatId: 'group-input', threadId: 'thread-1' },
+      routeKey: 'group-input:thread:thread-1',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'item-1',
+      questions: [
+        {
+          id: 'q1',
+          header: '页面风格',
+          question: '选一个风格',
+          isOther: true,
+          isSecret: false,
+          options: [{ label: '偏科技感', description: '推荐' }],
+        },
+      ],
+      messageId: 'msg-input-1',
+      openMessageId: 'open-input-1',
+      resolved: false,
+    });
+    const adapter = new FeishuAdapter() as any;
+
+    const result = await adapter.handleCardAction({
+      open_id: 'ou_123',
+      tenant_key: 'tenant',
+      token: 'token',
+      open_message_id: 'open-input-1',
+      action: {
+        tag: 'select_static',
+        value: {
+          callback_data: 'input:field:req-1:q1',
+        },
+        option: '偏科技感',
+      },
+    });
+
+    assert.equal(result.toast.type, 'success');
+    assert.match(result.toast.content, /已记录选择/);
+    assert.deepEqual(store.getStructuredInputRequest('req-1')?.draftAnswers, {
+      q1: {
+        answers: ['偏科技感'],
+      },
+    });
+  });
+
+  it('submits structured input answers from interactive card actions', async () => {
+    const store = new JsonFileStore(makeSettings());
+    let resolvedPayload: unknown = null;
+    initBridgeContext({
+      store,
+      llm: {} as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+        resolvePendingStructuredInput: (_requestId: string, answers: unknown) => {
+          resolvedPayload = answers;
+          return true;
+        },
+      },
+      lifecycle: {},
+    });
+    store.upsertStructuredInputRequest({
+      requestId: 'req-submit',
+      channelType: 'feishu',
+      chatId: 'group-submit',
+      codepilotSessionId: 'session-1',
+      address: { channelType: 'feishu', chatId: 'group-submit', threadId: 'thread-1' },
+      routeKey: 'group-submit:thread:thread-1',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'item-1',
+      questions: [
+        {
+          id: 'q1',
+          header: '页面风格',
+          question: '选一个风格',
+          isOther: true,
+          isSecret: false,
+          options: [{ label: '极简', description: '推荐' }],
+        },
+      ],
+      messageId: 'msg-submit-1',
+      openMessageId: 'open-submit-1',
+      resolved: false,
+    });
+
+    const adapter = new FeishuAdapter() as any;
+    let patchCalls = 0;
+    adapter.restClient = {
+      im: {
+        message: {
+          patch: async () => {
+            patchCalls += 1;
+            return { code: 0, data: {} };
+          },
+        },
+      },
+    };
+
+    const fieldResult = await adapter.handleCardAction({
+      open_id: 'ou_123',
+      tenant_key: 'tenant',
+      token: 'token',
+      open_message_id: 'open-submit-1',
+      action: {
+        tag: 'select_static',
+        option: '极简',
+        value: {
+          callback_data: 'input:field:req-submit:q1',
+        },
+      },
+    });
+
+    const result = await adapter.handleCardAction({
+      open_id: 'ou_123',
+      tenant_key: 'tenant',
+      token: 'token',
+      open_message_id: 'open-submit-1',
+      action: {
+        tag: 'button',
+        value: {
+          callback_data: 'input:submit:req-submit',
+        },
+      },
+    });
+
+    assert.equal(fieldResult.toast.type, 'success');
+    assert.equal(result.toast.type, 'success');
+    assert.equal(patchCalls, 1);
+    assert.deepEqual(resolvedPayload, {
+      answers: {
+        q1: {
+          answers: ['极简'],
+        },
+      },
+    });
+  });
+
+  it('skips empty preview updates instead of sending invalid empty CardKit content', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const adapter = new FeishuAdapter() as any;
+    let createCalls = 0;
+    let streamCalls = 0;
+    adapter.restClient = {
+      cardkit: {
+        v1: {
+          card: {
+            create: async () => {
+              createCalls += 1;
+              return { code: 0, data: { card_id: 'card-empty' } };
+            },
+          },
+          cardElement: {
+            content: async () => {
+              streamCalls += 1;
+              return { code: 0, data: {} };
+            },
+          },
+        },
+      },
+      im: {
+        message: {
+          create: async () => ({ code: 0, data: { message_id: 'msg-empty' } }),
+          reply: async () => ({ code: 0, data: { message_id: 'msg-empty' } }),
+        },
+      },
+    };
+
+    const result = await adapter.sendPreview(
+      { channelType: 'feishu', chatId: 'group-empty', threadId: 'thread-1' },
+      '   ',
+      9,
+    );
+
+    assert.equal(result, 'skip');
+    assert.equal(createCalls, 0);
+    assert.equal(streamCalls, 0);
+  });
+
   it('rejects cross-thread messages while a PLAN workflow is waiting for input', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});

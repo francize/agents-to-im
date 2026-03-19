@@ -73,6 +73,8 @@ export interface OutboundMessage {
   replyToMessageId?: string;
   /** Optional card header metadata for adapters that support interactive cards */
   cardHeader?: CardHeader;
+  /** Optional adapter-specific raw card payload */
+  rawCard?: Record<string, unknown>;
 }
 
 /** Inline keyboard button for permission prompts */
@@ -88,7 +90,7 @@ export interface CardHeader {
 
 export interface BridgeMessageMeta {
   planWorkflow?: {
-    kind: 'plan_request' | 'plan_execute';
+    kind: 'plan_request' | 'plan_execute' | 'native_plan_request';
     workflowId: string;
     promptText: string;
     storedUserText?: string;
@@ -101,6 +103,7 @@ export interface SendResult {
   ok: boolean;
   /** Platform-specific message ID of the sent message */
   messageId?: string;
+  openMessageId?: string;
   error?: string;
 }
 

@@ -73,6 +73,16 @@ show_failure_help() {
   echo "  3. Rebuild bundle:   cd \"$SKILL_DIR\" && npm run build"
 }
 
+wait_until_stopped() {
+  for _ in $(seq 1 10); do
+    if ! supervisor_is_running && ! supervisor_is_managed; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 # ── Load platform-specific supervisor ──
 
 case "$(uname -s)" in
@@ -166,6 +176,20 @@ case "${1:-help}" in
     fi
     ;;
 
+  restart)
+    echo "Restarting bridge..."
+    if supervisor_is_managed || supervisor_is_running; then
+      supervisor_stop
+      if ! wait_until_stopped; then
+        echo "Failed to stop bridge cleanly before restart."
+        show_last_exit_reason
+        exit 1
+      fi
+    fi
+    rm -f "$PID_FILE"
+    bash "$0" start
+    ;;
+
   status)
     # Platform-specific status info (prints launchd/service state)
     supervisor_status_extra
@@ -194,6 +218,6 @@ case "${1:-help}" in
     ;;
 
   *)
-    echo "Usage: daemon.sh {start|stop|status|logs [N]}"
+    echo "Usage: daemon.sh {start|stop|restart|status|logs [N]}"
     ;;
 esac

@@ -8,11 +8,7 @@ await esbuild.build({
   target: 'node20',
   outfile: 'dist/daemon.mjs',
   external: [
-    // SDK must stay external — it spawns a CLI subprocess and resolves
-    // dist/cli.js relative to its own package location. Bundling it
-    // breaks that path resolution.
     '@anthropic-ai/claude-agent-sdk',
-    '@openai/codex-sdk',
     // discord.js optional native deps
     'bufferutil', 'utf-8-validate', 'zlib-sync', 'erlpack',
     // Node.js built-ins

@@ -15,7 +15,7 @@ import { loadConfig, configToSettings, CTI_HOME } from './config.js';
 import './feishu/adapter.js';
 import { MultiplexLLMProvider } from './multiplex-llm-provider.js';
 import { JsonFileStore } from './store.js';
-import { PendingPermissions } from './permission-gateway.js';
+import { PendingApprovals, PendingPermissions, PendingStructuredInputs } from './permission-gateway.js';
 import { setupLogger } from './logger.js';
 import { startDashboard, stopDashboard } from './dashboard.js';
 
@@ -53,12 +53,6 @@ function applyConfigToEnv(config: ReturnType<typeof loadConfig>): void {
   if (config.claudeCliExecutable && !process.env.CTI_CLAUDE_CODE_EXECUTABLE) {
     process.env.CTI_CLAUDE_CODE_EXECUTABLE = config.claudeCliExecutable;
   }
-  if (config.codexApiKey && !process.env.CTI_CODEX_API_KEY) {
-    process.env.CTI_CODEX_API_KEY = config.codexApiKey;
-  }
-  if (config.codexBaseUrl && !process.env.CTI_CODEX_BASE_URL) {
-    process.env.CTI_CODEX_BASE_URL = config.codexBaseUrl;
-  }
 }
 
 async function main(): Promise<void> {
@@ -74,15 +68,23 @@ async function main(): Promise<void> {
   const store = new JsonFileStore(settings);
   store.migrateLegacySessions(config.legacyRuntime || 'claude');
   const pendingPerms = new PendingPermissions();
-  const llm = new MultiplexLLMProvider(store, pendingPerms, config);
+  const pendingApprovals = new PendingApprovals();
+  const pendingStructuredInputs = new PendingStructuredInputs();
+  const llm = new MultiplexLLMProvider(store, pendingPerms, pendingApprovals, pendingStructuredInputs, config);
   console.log('[agents-to-im] Runtime selection: per-session multiplex (claude/codex)');
 
   const gateway = {
     resolvePendingPermission: (
       id: string,
       resolution: { behavior: 'allow' | 'deny'; message?: string; updatedPermissions?: unknown[] },
-    ) =>
-      pendingPerms.resolve(id, resolution),
+    ) => (
+      pendingPerms.resolve(id, resolution)
+      || pendingApprovals.resolve(id, resolution)
+    ),
+    resolvePendingStructuredInput: (
+      requestId: string,
+      resolution: { answers: Record<string, { answers: string[] }> },
+    ) => pendingStructuredInputs.resolve(requestId, resolution),
   };
 
   initBridgeContext({
@@ -131,7 +133,10 @@ async function main(): Promise<void> {
     const reason = signal ? `signal: ${signal}` : 'shutdown requested';
     console.log(`[agents-to-im] Shutting down (${reason})...`);
     pendingPerms.denyAll();
+    pendingApprovals.denyAll();
+    pendingStructuredInputs.denyAll();
     stopDashboard();
+    await llm.dispose();
     await bridgeManager.stop();
     writeStatus({ running: false, lastExitReason: reason });
     process.exit(0);

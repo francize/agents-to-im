@@ -5,6 +5,8 @@ CTI_HOME="${CTI_HOME:-$HOME/.agents-to-im}"
 CONFIG_FILE="$CTI_HOME/config.env"
 PID_FILE="$CTI_HOME/runtime/bridge.pid"
 SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
+CODEX_CONFIG_FILE="$CODEX_HOME_DIR/config.toml"
 
 PASS=0
 FAIL=0
@@ -63,18 +65,22 @@ else
   check "Claude CLI available in PATH" 1
 fi
 
-if [ -d "$SKILL_DIR/node_modules/@openai/codex-sdk" ]; then
-  check "@openai/codex-sdk installed" 0
+if command -v codex >/dev/null 2>&1; then
+  check "Codex CLI available in PATH ($(codex --version 2>/dev/null || echo unknown))" 0
 else
-  check "@openai/codex-sdk installed" 1
+  check "Codex CLI available in PATH" 1
 fi
 
-if [ -n "${CTI_CODEX_API_KEY:-}" ] || [ -n "${CODEX_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] || [ -n "$(get_config CTI_CODEX_API_KEY || true)" ]; then
-  check "Codex auth configured (API key present)" 0
-elif command -v codex >/dev/null 2>&1; then
-  check "Codex CLI available for interactive auth ($(codex --version 2>/dev/null || echo unknown))" 0
+if command -v codex >/dev/null 2>&1 && codex app-server --help >/dev/null 2>&1; then
+  check "Codex app-server subcommand available" 0
 else
-  check "Codex auth path available (API key or codex CLI)" 1
+  check "Codex app-server subcommand available" 1
+fi
+
+if [ -f "$CODEX_CONFIG_FILE" ]; then
+  check "Codex config.toml exists ($CODEX_CONFIG_FILE)" 0
+else
+  check "Codex config.toml exists ($CODEX_CONFIG_FILE)" 1
 fi
 
 if [ -f "$PID_FILE" ]; then

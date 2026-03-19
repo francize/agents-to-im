@@ -28,9 +28,9 @@ build_env_dict() {
       ;; esac
   done < <(env)
 
-  # Forward both Claude and Codex auth/config env vars. Runtime is selected
-  # per session inside the bridge, so there is no global backend switch here.
-  for var in OPENAI_API_KEY CODEX_API_KEY CTI_CODEX_API_KEY CTI_CODEX_BASE_URL; do
+  # Forward non-CTI runtime overrides that should survive launchd.
+  # Codex reuses the local CLI state plus an optional CODEX_HOME override.
+  for var in CODEX_HOME; do
     local val="${!var:-}"
     [ -z "$val" ] && continue
     dict+="${indent}<key>${var}</key>\n${indent}<string>${val}</string>\n"

@@ -51,9 +51,8 @@ This project no longer has a multi-platform setup wizard. Setup means:
    - `CTI_CLAUDE_DEFAULT_MODEL`
    - `CTI_CODEX_DEFAULT_MODEL`
    - `CTI_CLAUDE_CODE_EXECUTABLE`
-   - `CTI_CODEX_API_KEY`
-   - `CTI_CODEX_BASE_URL`
    - `CTI_AUTO_APPROVE`
+   - external `CODEX_HOME` override if the user stores Codex config outside `~/.codex`
 4. Remind the user to enable Feishu long connection events:
    - `im.message.receive_v1`
    - `card.action.trigger`

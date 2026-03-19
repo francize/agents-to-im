@@ -105,9 +105,9 @@
 - `CTI_CLAUDE_DEFAULT_MODEL`
 - `CTI_CODEX_DEFAULT_MODEL`
 - `CTI_CLAUDE_CODE_EXECUTABLE`
-- `CTI_CODEX_API_KEY`
-- `CTI_CODEX_BASE_URL`
 - `CTI_AUTO_APPROVE`
+
+Codex runtime 会直接复用本地 `codex` CLI 及其 `~/.codex/config.toml`（或 `$CODEX_HOME/config.toml`）。
 
 ## 9. 使用方式
 

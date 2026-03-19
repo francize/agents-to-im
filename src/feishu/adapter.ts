@@ -8,6 +8,7 @@ import type {
   PreviewCapabilities,
   SendResult,
 } from '../bridge/types.js';
+import type { StructuredInputRequestInfo, StructuredInputResponse } from '../bridge/host.js';
 import { BaseChannelAdapter, registerAdapterFactory } from '../bridge/channel-adapter.js';
 import { getBridgeContext } from '../bridge/context.js';
 import { handlePermissionCallback } from '../bridge/permission-broker.js';
@@ -27,6 +28,7 @@ import { JsonFileStore } from '../store.js';
 const STREAM_ELEMENT_ID = 'stream_content';
 const TYPING_EMOJI = 'Typing';
 const PLAN_SUFFIX = ' [PLAN]';
+const STRUCTURED_INPUT_PREFIX = 'structured-input';
 export const FEISHU_REQUIRED_APP_SCOPES = [
   'im:message:send_as_bot',
   'im:message:readonly',
@@ -202,6 +204,191 @@ function buildActionCard(
 
 function buildPermissionCard(text: string, buttons: NonNullable<OutboundMessage['inlineButtons']>): lark.InteractiveCard {
   return buildActionCard('Permission Required', text, buttons, 'orange');
+}
+
+function buildStructuredFieldName(requestId: string, questionId: string, kind: 'answer' | 'other'): string {
+  return `${STRUCTURED_INPUT_PREFIX}:${requestId}:${kind}:${questionId}`;
+}
+
+function buildStructuredInputQuestionElements(request: StructuredInputRequestInfo): Array<Record<string, unknown>> {
+  const elements: Array<Record<string, unknown>> = [
+    {
+      tag: 'div',
+      text: {
+        tag: 'lark_md',
+        content: 'Codex 需要你补充一些信息后才能继续。',
+      },
+    },
+  ];
+
+  for (const question of request.questions) {
+    elements.push({
+      tag: 'div',
+      text: {
+        tag: 'lark_md',
+        content: `**${question.header || question.id}**\n${question.question}`,
+      },
+    });
+    if (question.options?.length) {
+      elements.push({
+        tag: 'action',
+        actions: [
+          {
+            tag: 'select_static',
+            placeholder: {
+              tag: 'plain_text',
+              content: '请选择',
+            },
+            options: question.options.map((option) => ({
+              text: {
+                tag: 'plain_text',
+                content: option.label,
+              },
+              value: option.label,
+            })),
+            value: {
+              callback_data: `input:field:${request.requestId}:${question.id}`,
+            },
+          },
+        ],
+      });
+    }
+    if (!question.options?.length) {
+      elements.push({
+        tag: 'div',
+        text: {
+          tag: 'lark_md',
+          content: '> 当前渠道暂不支持自由文本输入，请转到本地 Codex 继续。',
+        },
+      });
+    } else if (question.isOther) {
+      elements.push({
+        tag: 'note',
+        elements: [
+          {
+            tag: 'plain_text',
+            content: '如果这些选项都不合适，请转到本地 Codex 做自定义输入。',
+          },
+        ],
+      });
+    }
+  }
+
+  return elements;
+}
+
+function buildResolvedStructuredInputElements(
+  request: StructuredInputRequestInfo,
+  note: string,
+): Array<Record<string, unknown>> {
+  const elements: Array<Record<string, unknown>> = [
+    {
+      tag: 'div',
+      text: {
+        tag: 'lark_md',
+        content: note,
+      },
+    },
+  ];
+  for (const question of request.questions) {
+    elements.push({
+      tag: 'div',
+      text: {
+        tag: 'lark_md',
+        content: `**${question.header || question.id}**\n${question.question}`,
+      },
+    });
+  }
+  return elements;
+}
+
+function buildStructuredInputCard(
+  request: StructuredInputRequestInfo,
+  options?: { resolved?: boolean; note?: string },
+): Record<string, unknown> {
+  const elements = options?.resolved
+    ? buildResolvedStructuredInputElements(
+        request,
+        options.note || '该问答已完成，Codex 正在继续执行。',
+      )
+    : [
+        ...buildStructuredInputQuestionElements(request),
+        {
+          tag: 'action',
+          actions: [
+            {
+              tag: 'button',
+              text: {
+                tag: 'plain_text',
+                content: '提交',
+              },
+              type: 'primary',
+              value: {
+                callback_data: `input:submit:${request.requestId}`,
+              },
+            },
+          ],
+        },
+      ];
+
+  return {
+    config: {
+      wide_screen_mode: true,
+      update_multi: true,
+    },
+    header: {
+      title: {
+        tag: 'plain_text',
+        content: '补充信息',
+      },
+      template: 'wathet',
+    },
+    elements,
+  };
+}
+
+function buildStructuredInputFallbackText(request: StructuredInputRequestInfo): string {
+  const lines: string[] = ['Codex 需要你补充一些信息后才能继续。', ''];
+  request.questions.forEach((question, index) => {
+    lines.push(`${index + 1}. ${question.header || question.id}`);
+    lines.push(question.question);
+    if (question.options?.length) {
+      lines.push(`可选项：${question.options.map((option) => option.label).join(' / ')}`);
+    }
+    lines.push('');
+  });
+  lines.push('当前交互卡发送失败，请转到本地 Codex 继续，或稍后重试。');
+  return lines.join('\n').trim();
+}
+
+function extractStructuredAnswers(
+  request: StructuredInputRequestInfo,
+  value: Record<string, unknown> | undefined,
+  persistedAnswers?: StructuredInputResponse['answers'],
+): StructuredInputResponse {
+  const answers: StructuredInputResponse['answers'] = persistedAnswers
+    ? JSON.parse(JSON.stringify(persistedAnswers))
+    : {};
+  const record = value || {};
+  for (const question of request.questions) {
+    const selected = collectTextFragments(record[buildStructuredFieldName(request.requestId, question.id, 'answer')]);
+    const other = collectTextFragments(record[buildStructuredFieldName(request.requestId, question.id, 'other')]);
+    const resolved = [...selected, ...other];
+    if (resolved.length > 0) {
+      answers[question.id] = { answers: resolved };
+    }
+  }
+  return { answers };
+}
+
+function isStructuredInputFieldInteraction(event: lark.InteractiveCardActionEvent): boolean {
+  const tag = typeof event.action?.tag === 'string' ? event.action.tag : '';
+  if (tag === 'select_static' || tag === 'select_person' || tag === 'input') {
+    return true;
+  }
+  const value = event.action?.value;
+  if (!value || typeof value !== 'object') return false;
+  return Object.keys(value).some((key) => key.startsWith(`${STRUCTURED_INPUT_PREFIX}:`));
 }
 
 function collectTextFragments(value: unknown): string[] {
@@ -415,11 +602,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const routeKey = routeKeyForAddress(address);
     const reactionId = this.typingReactions.get(routeKey);
     const messageId = this.lastIncomingMessageId.get(routeKey);
-    if (!reactionId || !messageId) return;
-    this.typingReactions.delete(routeKey);
-    void this.restClient.im.messageReaction.delete({
-      path: { message_id: messageId, reaction_id: reactionId },
-    }).catch(() => {});
+    if (reactionId && messageId) {
+      this.typingReactions.delete(routeKey);
+      void this.restClient.im.messageReaction.delete({
+        path: { message_id: messageId, reaction_id: reactionId },
+      }).catch(() => {});
+    }
+    void this.syncChatName(address.chatId);
   }
 
   getPreviewCapabilities(address: ChannelAddress): PreviewCapabilities | null {
@@ -436,6 +625,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
   async sendPreview(address: ChannelAddress, text: string, draftId: number): Promise<'sent' | 'skip' | 'degrade'> {
     if (!this.restClient) return 'skip';
     const processedText = preprocessFeishuMarkdown(text);
+    if (!processedText.trim()) return 'skip';
     const routeKey = routeKeyForAddress(address);
     const key = previewKey(routeKey, draftId);
     let artifact = this.previewArtifacts.get(key);
@@ -487,9 +677,67 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
   }
 
+  async sendStructuredInputRequest(
+    address: ChannelAddress,
+    request: StructuredInputRequestInfo,
+    replyToMessageId?: string,
+  ): Promise<SendResult> {
+    const hasSecret = request.questions.some((question) => question.isSecret);
+    if (hasSecret) {
+      await this.sendAsPost(
+        address,
+        '当前问题包含敏感输入，飞书群聊不适合采集。请转到本地 Codex 继续。',
+        replyToMessageId,
+      );
+      getBridgeContext().permissions.resolvePendingStructuredInput?.(request.requestId, { answers: {} });
+      return { ok: true };
+    }
+    const result = await this.sendInteractiveCard(
+      address,
+      buildStructuredInputCard(request),
+      replyToMessageId,
+    );
+    return {
+      ok: true,
+      messageId: result.messageId,
+      openMessageId: result.openMessageId,
+    };
+  }
+
+  async resolveStructuredInputRequest(requestId: string): Promise<void> {
+    const request = this.getStore().getStructuredInputRequest(requestId);
+    if (!request?.messageId) return;
+    try {
+      await this.patchInteractiveCard(
+        request.messageId,
+        buildStructuredInputCard({
+          requestId: request.requestId,
+          threadId: request.threadId,
+          turnId: request.turnId,
+          itemId: request.itemId,
+          questions: request.questions,
+        }, {
+          resolved: true,
+          note: '该问答已完成，Codex 正在继续执行。',
+        }),
+      );
+    } catch (error) {
+      console.warn('[feishu-adapter] Failed to resolve structured input card:', error);
+    }
+  }
+
   async send(message: OutboundMessage): Promise<SendResult> {
     if (!this.restClient) {
       return { ok: false, error: 'Feishu client not initialized' };
+    }
+
+    if (message.rawCard) {
+      const result = await this.sendInteractiveCard(message.address, message.rawCard, message.replyToMessageId);
+      return {
+        ok: true,
+        messageId: result.messageId,
+        openMessageId: result.openMessageId,
+      };
     }
 
     if (message.inlineButtons && message.inlineButtons.length > 0) {
@@ -536,7 +784,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
           }
           artifact.lastText = finalText;
           void this.maybeRenameChat(message.address.chatId);
-          return { ok: true, messageId: artifact.messageId };
+          return { ok: true, messageId: artifact.messageId, openMessageId: artifact.messageId };
         } catch (error) {
           console.warn('[feishu-adapter] Failed to finalize preview in place:', error);
         }
@@ -619,6 +867,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
       ? event.action.value.callback_data
       : '';
     if (!callbackData) {
+      if (isStructuredInputFieldInteraction(event)) {
+        return { toast: { type: 'success', content: '已记录选择，填写完成后点击提交。' } };
+      }
       return { toast: { type: 'warning', content: 'Unsupported action' } };
     }
     if (callbackData.startsWith('perm:')) {
@@ -629,6 +880,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
         return { toast: { type: 'success', content: 'Permission updated' } };
       }
       return { toast: { type: 'warning', content: 'Permission already handled' } };
+    }
+    if (callbackData.startsWith('input:')) {
+      return this.handleStructuredInputCardAction(event, callbackData);
     }
     if (callbackData.startsWith('plan:')) {
       return this.handlePlanCardAction(event, callbackData);
@@ -805,6 +1059,22 @@ export class FeishuAdapter extends BaseChannelAdapter {
       await this.sendAsPost(address, '当前群尚未绑定会话。', replyToMessageId);
       return;
     }
+    const runtime = store.getSessionExt(binding.codepilotSessionId)?.runtime || 'claude';
+    if (runtime === 'codex' && mode === 'plan') {
+      const llm = getBridgeContext().llm as MultiplexLLMProvider & {
+        ensureCodexNativePlanAvailable?: () => Promise<void>;
+      };
+      try {
+        await llm.ensureCodexNativePlanAvailable?.();
+      } catch (error) {
+        await this.sendAsPost(
+          address,
+          `当前本地 Codex 不支持原生 plan：${error instanceof Error ? error.message : String(error)}`,
+          replyToMessageId,
+        );
+        return;
+      }
+    }
     const workflow = store.getActivePlanWorkflowByBinding(bindingId);
     if (workflow) {
       store.deletePlanWorkflow(workflow.workflowId);
@@ -821,17 +1091,70 @@ export class FeishuAdapter extends BaseChannelAdapter {
       await this.sendAsPost(inbound.address, '当前群尚未绑定会话。', inbound.messageId);
       return;
     }
+    const runtime = store.getSessionExt(binding.codepilotSessionId)?.runtime || 'claude';
     const existing = store.getActivePlanWorkflowByBinding(bindingId);
     if (existing) {
       await this.sendAsPost(
         inbound.address,
-        '当前群已有进行中的 PLAN 流程。请先点击上一张计划卡片中的“执行 / 继续 / 取消”，或使用 `/mode ...` / `/reset` 覆盖。',
+        runtime === 'codex'
+          ? '当前群已有等待中的原生 PLAN 请求。请先在原线程继续输入，或使用 `/mode ...` / `/reset` 覆盖。'
+          : '当前群已有进行中的 PLAN 流程。请先点击上一张计划卡片中的“执行 / 继续 / 取消”，或使用 `/mode ...` / `/reset` 覆盖。',
         inbound.messageId,
       );
       return;
     }
 
     const requestText = inbound.text.trim().slice('/plan'.length).trim();
+    if (runtime === 'codex') {
+      const llm = getBridgeContext().llm as MultiplexLLMProvider & {
+        ensureCodexNativePlanAvailable?: () => Promise<void>;
+      };
+      try {
+        await llm.ensureCodexNativePlanAvailable?.();
+      } catch (error) {
+        await this.sendAsPost(
+          inbound.address,
+          `当前本地 Codex 不支持原生 plan：${error instanceof Error ? error.message : String(error)}`,
+          inbound.messageId,
+        );
+        return;
+      }
+      if (!requestText) {
+        store.upsertPlanWorkflow({
+          bindingId,
+          channelType: this.channelType,
+          chatId: inbound.address.chatId,
+          codepilotSessionId: binding.codepilotSessionId,
+          status: 'awaiting_input',
+          previousMode: binding.mode,
+          requestText: '',
+          address: inbound.address,
+          routeKey: routeKeyForAddress(inbound.address),
+          requestMessageId: inbound.messageId,
+          resolved: true,
+        });
+        await this.syncChatName(inbound.address.chatId);
+        await this.sendAsPost(inbound.address, '已进入原生 PLAN 流程。下一条同线程消息将作为 plan 请求发送给 Codex。', inbound.messageId);
+        return;
+      }
+      const workflow = store.upsertPlanWorkflow({
+        bindingId,
+        channelType: this.channelType,
+        chatId: inbound.address.chatId,
+        codepilotSessionId: binding.codepilotSessionId,
+        status: 'planning',
+        previousMode: binding.mode,
+        requestText,
+        address: inbound.address,
+        routeKey: routeKeyForAddress(inbound.address),
+        requestMessageId: inbound.messageId,
+        resolved: true,
+      });
+      await this.syncChatName(inbound.address.chatId);
+      this.enqueue(this.buildNativePlanRequestInbound(inbound.address, inbound.messageId, workflow.workflowId, requestText));
+      return;
+    }
+
     const workflow = store.upsertPlanWorkflow({
       bindingId,
       channelType: this.channelType,
@@ -859,6 +1182,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const store = this.getStore();
     const workflow = store.getPlanWorkflow(workflowId);
     if (!workflow) return false;
+    const binding = Array.from(store.listChannelBindings(this.channelType)).find((item) => item.id === bindingId);
+    const runtime = binding ? (store.getSessionExt(binding.codepilotSessionId)?.runtime || 'claude') : 'claude';
     const routeKey = routeKeyForAddress(inbound.address);
     if (workflow.routeKey !== routeKey) {
       await this.sendAsPost(
@@ -872,6 +1197,18 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     switch (workflow.status) {
       case 'awaiting_input':
+        if (runtime === 'codex') {
+          store.updatePlanWorkflow(workflow.workflowId, {
+            status: 'planning',
+            requestText: inbound.text.trim(),
+            address: inbound.address,
+            routeKey,
+            requestMessageId: inbound.messageId,
+            resolved: true,
+          });
+          this.enqueue(this.buildNativePlanRequestInbound(inbound.address, inbound.messageId, workflow.workflowId, inbound.text.trim()));
+          return true;
+        }
         store.updatePlanWorkflow(workflow.workflowId, {
           status: 'planning',
           requestText: inbound.text.trim(),
@@ -913,6 +1250,24 @@ export class FeishuAdapter extends BaseChannelAdapter {
     };
   }
 
+  private buildNativePlanRequestInbound(address: ChannelAddress, messageId: string, workflowId: string, requestText: string): InboundMessage {
+    return {
+      messageId,
+      address,
+      text: requestText,
+      timestamp: Date.now(),
+      bridgeMeta: {
+        planWorkflow: {
+          kind: 'native_plan_request',
+          workflowId,
+          promptText: requestText,
+          storedUserText: requestText,
+          permissionMode: 'plan',
+        },
+      },
+    };
+  }
+
   private buildPlanExecutionInbound(address: ChannelAddress, messageId: string, workflowId: string, requestText: string): InboundMessage {
     const storedUserText = `执行已确认计划：${requestText}`;
     return {
@@ -932,6 +1287,83 @@ export class FeishuAdapter extends BaseChannelAdapter {
     };
   }
 
+  private async handleStructuredInputCardAction(
+    event: lark.InteractiveCardActionEvent,
+    callbackData: string,
+  ): Promise<{ toast: { type: string; content: string } }> {
+    const [, action, requestId, questionId] = callbackData.split(':');
+    if (!requestId) {
+      return { toast: { type: 'warning', content: 'Unsupported action' } };
+    }
+    const store = this.getStore();
+    const request = store.getStructuredInputRequest(requestId);
+    if (!request) {
+      return { toast: { type: 'warning', content: '问答请求不存在或已失效' } };
+    }
+
+    const knownIds = [request.messageId, request.openMessageId].filter((value): value is string => !!value);
+    if (knownIds.length > 1 && !knownIds.includes(event.open_message_id)) {
+      return { toast: { type: 'warning', content: '问答卡已过期' } };
+    }
+
+    if (action === 'field' && questionId) {
+      const selected = collectTextFragments(event.action?.option);
+      if (selected.length === 0) {
+        return { toast: { type: 'warning', content: '未读取到所选项' } };
+      }
+      const nextDraftAnswers = extractStructuredAnswers(
+        {
+          requestId: request.requestId,
+          threadId: request.threadId,
+          turnId: request.turnId,
+          itemId: request.itemId,
+          questions: request.questions,
+        },
+        undefined,
+        {
+          ...(request.draftAnswers || {}),
+          [questionId]: { answers: selected },
+        },
+      ).answers;
+      store.updateStructuredInputRequest(requestId, { draftAnswers: nextDraftAnswers });
+      return { toast: { type: 'success', content: '已记录选择，填写完成后点击提交。' } };
+    }
+
+    if (action !== 'submit') {
+      return { toast: { type: 'warning', content: 'Unsupported action' } };
+    }
+
+    if (!store.markStructuredInputRequestResolved(requestId)) {
+      return { toast: { type: 'warning', content: '问答已经提交过了' } };
+    }
+
+    const hasSecret = request.questions.some((question) => question.isSecret);
+    if (hasSecret) {
+      await this.resolveStructuredInputRequest(requestId);
+      getBridgeContext().permissions.resolvePendingStructuredInput?.(requestId, { answers: {} });
+      return { toast: { type: 'warning', content: '该问题涉及敏感输入，请转到本地 Codex 继续' } };
+    }
+
+    const answers = extractStructuredAnswers(
+      request,
+      event.action?.value as Record<string, unknown> | undefined,
+      request.draftAnswers,
+    );
+    const hasAnswers = Object.keys(answers.answers).length > 0;
+    if (!hasAnswers) {
+      store.updateStructuredInputRequest(requestId, { resolved: false });
+      return { toast: { type: 'warning', content: '请至少填写一个答案' } };
+    }
+
+    const resolved = getBridgeContext().permissions.resolvePendingStructuredInput?.(requestId, answers);
+    if (!resolved) {
+      store.updateStructuredInputRequest(requestId, { resolved: false });
+      return { toast: { type: 'warning', content: '问答请求已失效' } };
+    }
+    await this.resolveStructuredInputRequest(requestId);
+    return { toast: { type: 'success', content: '答案已提交' } };
+  }
+
   private async handlePlanCardAction(
     event: lark.InteractiveCardActionEvent,
     callbackData: string,
@@ -945,7 +1377,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!workflow) {
       return { toast: { type: 'warning', content: 'PLAN workflow not found' } };
     }
-    if (workflow.actionCardMessageId && workflow.actionCardMessageId !== event.open_message_id) {
+    const knownIds = [
+      workflow.actionCardMessageId,
+      workflow.actionCardOpenMessageId,
+    ].filter((value): value is string => !!value);
+    if (knownIds.length > 1 && !knownIds.includes(event.open_message_id)) {
       return { toast: { type: 'warning', content: 'PLAN card is stale' } };
     }
     if (workflow.status !== 'awaiting_confirmation') {
@@ -1204,6 +1640,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     return {
       ok: true,
       messageId: result.messageId,
+      openMessageId: result.openMessageId,
     };
   }
 
@@ -1214,6 +1651,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     return {
       ok: true,
       messageId: response.data?.message_id,
+      openMessageId: (response.data as { open_message_id?: string } | undefined)?.open_message_id,
     };
   }
 
@@ -1224,6 +1662,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     return {
       ok: true,
       messageId: response.data?.message_id,
+      openMessageId: (response.data as { open_message_id?: string } | undefined)?.open_message_id,
     };
   }
 
@@ -1231,10 +1670,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
     address: ChannelAddress,
     card: Record<string, unknown> | lark.InteractiveCard,
     replyToMessageId?: string,
-  ): Promise<{ messageId: string }> {
+  ): Promise<{ messageId: string; openMessageId?: string }> {
     const response = await this.sendLarkMessage(address, 'interactive', JSON.stringify(card), replyToMessageId);
     assertLarkOk(response, 'im.message.sendInteractiveCard');
-    return { messageId: response.data?.message_id || '' };
+    return {
+      messageId: response.data?.message_id || '',
+      openMessageId: (response.data as { open_message_id?: string } | undefined)?.open_message_id,
+    };
   }
 
   private async sendLarkMessage(
@@ -1242,7 +1684,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     msgType: 'interactive' | 'post',
     content: string,
     replyToMessageId?: string,
-  ): Promise<{ code?: number; msg?: string; data?: { message_id?: string; chat_id?: string } }> {
+  ): Promise<{ code?: number; msg?: string; data?: { message_id?: string; open_message_id?: string; chat_id?: string } }> {
     if (replyToMessageId) {
       return this.restClient!.im.message.reply({
         path: { message_id: replyToMessageId },

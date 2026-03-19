@@ -28,6 +28,9 @@ Feishu/Lark-only bridge for Claude Code and Codex.
   - Anything else returns a short help message.
 - Group:
   - Normal conversation
+  - `/mode plan|code|ask`
+  - `/plan`
+  - `/plan <request>`
   - `/reset`
   - `/perm allow|allow_session|deny <id>`
   - Other slash commands are rejected.
@@ -36,7 +39,7 @@ Feishu/Lark-only bridge for Claude Code and Codex.
 
 - Node.js >= 20
 - Claude Code CLI installed and authenticated for Claude sessions
-- `@openai/codex-sdk` installed for Codex sessions
+- local `codex` CLI installed, authenticated, and exposing `codex app-server`
 - Feishu/Lark custom app with bot capability enabled
 - Event dispatch mode set to long connection
 - Events:
@@ -68,11 +71,9 @@ Main variables:
 - `CTI_CLAUDE_DEFAULT_MODEL`
 - `CTI_CODEX_DEFAULT_MODEL`
 - `CTI_CLAUDE_CODE_EXECUTABLE`
-- `CTI_CODEX_API_KEY`
-- `CTI_CODEX_BASE_URL`
 - `CTI_AUTO_APPROVE`
 
-Codex sessions reuse the user's local `~/.codex/config.toml` for trusted directories, sandbox, approval policy, and default model behavior. `CTI_CODEX_*` values are bridge-side overrides, not the primary config source.
+Codex sessions reuse the user's local `~/.codex/config.toml` or `$CODEX_HOME/config.toml` for authentication, trusted directories, sandbox, approval policy, and default model behavior. The bridge only keeps `CTI_CODEX_DEFAULT_MODEL` as an optional default-model override.
 
 ## Quick Start
 

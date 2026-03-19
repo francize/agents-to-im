@@ -7,6 +7,7 @@
  * Uses globalThis to survive Next.js HMR in development.
  */
 
+import type { StructuredInputRequestInfo } from './host.js';
 import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewState } from './types.js';
 import { createAdapter, getRegisteredTypes } from './channel-adapter.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
@@ -61,6 +62,11 @@ function getPlanWorkflowMeta(msg: InboundMessage): NonNullable<InboundMessage['b
   return msg.bridgeMeta?.planWorkflow || null;
 }
 
+function isCodexRuntime(sessionId: string): boolean {
+  const { store } = getBridgeContext();
+  return store.getSessionExt(sessionId)?.runtime === 'codex';
+}
+
 /**
  * Check if a message looks like a numeric permission shortcut (1/2/3) for
  * feishu/qq channels WITH at least one pending permission in that chat.
@@ -90,6 +96,7 @@ function flushPreview(
   const text = state.pendingText.length > config.maxChars
     ? state.pendingText.slice(0, config.maxChars) + '...'
     : state.pendingText;
+  if (!text.trim()) return;
 
   state.lastSentText = text;
   state.lastSentAt = Date.now();
@@ -100,6 +107,17 @@ function flushPreview(
   }).catch(() => {
     // Network error — transient, don't degrade
   });
+}
+
+function resetPreviewState(state: StreamingPreviewState): void {
+  if (state.throttleTimer) {
+    clearTimeout(state.throttleTimer);
+    state.throttleTimer = null;
+  }
+  state.draftId = generateDraftId();
+  state.lastSentText = '';
+  state.lastSentAt = 0;
+  state.pendingText = '';
 }
 
 // ── Channel-aware rendering dispatch ──────────────────────────
@@ -643,6 +661,33 @@ async function handleMessage(
     flushPreview(adapter, ps, cfg);
   } : undefined;
 
+  let previewClosed = false;
+  let streamedSegmentCount = 0;
+  let streamedSegmentDelivery: SendResult | null = null;
+
+  const onResponseSegment = previewState ? async (segmentText: string) => {
+    const normalized = segmentText.trim();
+    if (!normalized) return;
+    const ps = previewState!;
+    if (ps.throttleTimer) {
+      clearTimeout(ps.throttleTimer);
+      ps.throttleTimer = null;
+    }
+    const delivery = await deliverResponse(
+      adapter,
+      msg.address,
+      normalized,
+      binding.codepilotSessionId,
+      msg.messageId,
+    );
+    if (delivery.ok) {
+      streamedSegmentCount += 1;
+      streamedSegmentDelivery = delivery;
+    }
+    adapter.endPreview?.(msg.address, ps.draftId);
+    resetPreviewState(ps);
+  } : undefined;
+
   try {
     // Pass permission callback so requests are forwarded to IM immediately
     // during streaming (the stream blocks until permission is resolved).
@@ -664,11 +709,90 @@ async function handleMessage(
     }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText, {
       storedUserText,
       permissionModeOverride: planWorkflowMeta?.permissionMode,
-    });
+      collaborationModeOverride: isCodexRuntime(binding.codepilotSessionId)
+        && (binding.mode === 'plan' || planWorkflowMeta?.kind === 'native_plan_request')
+        ? 'plan'
+        : undefined,
+    }, async (request: StructuredInputRequestInfo) => {
+      if (adapter.sendStructuredInputRequest) {
+        try {
+          const sent = await adapter.sendStructuredInputRequest(msg.address, request, msg.messageId);
+          if (sent.ok && sent.messageId) {
+            try {
+              store.upsertStructuredInputRequest({
+                requestId: request.requestId,
+                channelType: adapter.channelType,
+                chatId: msg.address.chatId,
+                codepilotSessionId: binding.codepilotSessionId,
+                address: msg.address,
+                routeKey: msg.address.threadId
+                  ? `${msg.address.chatId}:thread:${msg.address.threadId}`
+                  : `${msg.address.chatId}:main`,
+                threadId: request.threadId,
+                turnId: request.turnId,
+                itemId: request.itemId,
+                questions: request.questions,
+                messageId: sent.messageId,
+                openMessageId: sent.openMessageId,
+                resolved: false,
+              });
+            } catch {
+              // best effort
+            }
+            return;
+          }
+        } catch (error) {
+          console.error('[bridge-manager] Failed to deliver structured input card:', error);
+        }
+      }
+
+      await deliver(adapter, {
+        address: msg.address,
+        text: '当前运行时请求补充信息，但该渠道尚未实现结构化问答卡。请转到本地 Codex 继续。',
+        parseMode: 'plain',
+        replyToMessageId: msg.messageId,
+      }, { sessionId: binding.codepilotSessionId });
+    }, async (requestId: string) => {
+      try {
+        store.markStructuredInputRequestResolved(requestId);
+      } catch {
+        // ignore
+      }
+      await adapter.resolveStructuredInputRequest?.(requestId);
+    }, onResponseSegment);
 
     // Send response text — render via channel-appropriate format
     let responseDelivery: SendResult | null = null;
-    if (result.responseText) {
+    const remainingSegments = result.responseSegments
+      .filter((segment) => segment.trim())
+      .slice(streamedSegmentCount);
+    if (remainingSegments.length > 1) {
+      const [firstSegment, ...restSegments] = remainingSegments;
+      if (firstSegment) {
+        responseDelivery = await deliverResponse(adapter, msg.address, firstSegment, binding.codepilotSessionId, msg.messageId);
+        if (previewState && responseDelivery.ok) {
+          adapter.endPreview?.(msg.address, previewState.draftId);
+          previewClosed = true;
+        }
+      }
+      if (!responseDelivery || responseDelivery.ok) {
+        for (const segment of restSegments) {
+          const nextDelivery = await deliverResponse(adapter, msg.address, segment, binding.codepilotSessionId, msg.messageId);
+          responseDelivery = nextDelivery;
+          if (!nextDelivery.ok) break;
+        }
+      }
+    } else if (remainingSegments.length === 1) {
+      responseDelivery = await deliverResponse(
+        adapter,
+        msg.address,
+        remainingSegments[0],
+        binding.codepilotSessionId,
+        msg.messageId,
+      );
+    } else if (streamedSegmentDelivery) {
+      responseDelivery = streamedSegmentDelivery;
+    } else if (result.responseText) {
       responseDelivery = await deliverResponse(adapter, msg.address, result.responseText, binding.codepilotSessionId, msg.messageId);
     } else if (result.hasError) {
       const errorResponse: OutboundMessage = {
@@ -704,6 +828,7 @@ async function handleMessage(
               status: 'awaiting_confirmation',
               planMessageId: responseDelivery?.messageId || '',
               actionCardMessageId: actionCard.messageId || '',
+              actionCardOpenMessageId: actionCard.openMessageId || '',
               resolved: false,
             });
           } else {
@@ -727,10 +852,17 @@ async function handleMessage(
       }
     }
 
+    if (planWorkflowMeta?.kind === 'native_plan_request') {
+      const workflow = store.getPlanWorkflow(planWorkflowMeta.workflowId);
+      if (workflow) {
+        store.deletePlanWorkflow(workflow.workflowId);
+      }
+    }
+
     // Persist the actual SDK session ID for future resume.
     // If the result has an error and no session ID was captured, clear the
     // stale ID so the next message starts fresh instead of retrying a broken resume.
-    if (binding.id) {
+    if (binding.id && !isCodexRuntime(binding.codepilotSessionId)) {
       try {
         const update = computeSdkSessionUpdate(result.sdkSessionId, result.hasError);
         if (update !== null) {
@@ -745,7 +877,9 @@ async function handleMessage(
         clearTimeout(previewState.throttleTimer);
         previewState.throttleTimer = null;
       }
-      adapter.endPreview?.(msg.address, previewState.draftId);
+      if (!previewClosed) {
+        adapter.endPreview?.(msg.address, previewState.draftId);
+      }
     }
 
     state.activeTasks.delete(binding.codepilotSessionId);

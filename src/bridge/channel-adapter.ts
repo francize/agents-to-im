@@ -13,6 +13,7 @@ import type {
   PreviewCapabilities,
   SendResult,
 } from './types.js';
+import type { StructuredInputRequestInfo } from './host.js';
 
 export abstract class BaseChannelAdapter {
   /** Which channel type this adapter handles */
@@ -97,6 +98,21 @@ export abstract class BaseChannelAdapter {
    * normal delivery path, so this is typically a no-op.
    */
   endPreview?(_address: ChannelAddress, _draftId: number): void;
+
+  /**
+   * Send a structured input card for runtimes that can pause and request
+   * user answers mid-turn.
+   */
+  sendStructuredInputRequest?(
+    _address: ChannelAddress,
+    _request: StructuredInputRequestInfo,
+    _replyToMessageId?: string,
+  ): Promise<SendResult>;
+
+  /**
+   * Mark a previously sent structured-input card as resolved/disabled.
+   */
+  resolveStructuredInputRequest?(_requestId: string): Promise<void>;
 }
 
 // ── Adapter Registry ────────────────────────────────────────────

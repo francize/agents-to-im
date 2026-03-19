@@ -8,6 +8,7 @@ export interface SessionExt {
   runtime: RuntimeName;
   title?: string;
   titleStatus?: TitleStatus;
+  codexThreadId?: string;
 }
 
 export interface SessionRecord extends BridgeSession {

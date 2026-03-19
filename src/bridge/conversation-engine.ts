@@ -12,6 +12,7 @@ import type { ChannelBinding } from './types.js';
 import type {
   FileAttachment,
   SSEEvent,
+  StructuredInputRequestInfo,
   TokenUsage,
   MessageContentBlock,
 } from './host.js';
@@ -33,14 +34,21 @@ export interface PermissionRequestInfo {
  */
 export type OnPermissionRequest = (perm: PermissionRequestInfo) => Promise<void>;
 
+export type OnStructuredInputRequest = (request: StructuredInputRequestInfo) => Promise<void>;
+
+export type OnServerRequestResolved = (requestId: string) => Promise<void>;
+
 /**
- * Callback invoked on each `text` SSE event with the full accumulated text so far.
+ * Callback invoked on each `text` SSE event with the current in-flight segment text.
  * Must return synchronously — the bridge-manager handles throttling and fire-and-forget.
  */
 export type OnPartialText = (fullText: string) => void;
 
+export type OnResponseSegment = (segmentText: string) => Promise<void> | void;
+
 export interface ConversationResult {
   responseText: string;
+  responseSegments: string[];
   tokenUsage: TokenUsage | null;
   hasError: boolean;
   errorMessage: string;
@@ -53,6 +61,46 @@ export interface ConversationResult {
 export interface ProcessMessageOptions {
   storedUserText?: string;
   permissionModeOverride?: string;
+  collaborationModeOverride?: 'plan' | 'default';
+}
+
+interface PlanStepState {
+  title?: string;
+  text?: string;
+  status?: string;
+}
+
+function normalizePlanStep(step: unknown): PlanStepState {
+  const record = step as Record<string, unknown>;
+  return {
+    title: typeof record.title === 'string'
+      ? record.title
+      : typeof record.step === 'string'
+        ? record.step
+        : undefined,
+    text: typeof record.text === 'string' ? record.text : undefined,
+    status: typeof record.status === 'string' ? record.status : undefined,
+  };
+}
+
+function renderPlanMarkdown(explanation: string, steps: unknown[], body: string): string {
+  const lines: string[] = [];
+  if (explanation.trim()) {
+    lines.push(explanation.trim(), '');
+  }
+  const normalizedSteps = steps.map(normalizePlanStep).filter((step) => step.title || step.text);
+  if (normalizedSteps.length > 0) {
+    lines.push('计划步骤');
+    normalizedSteps.forEach((step, index) => {
+      const status = step.status ? ` [${step.status}]` : '';
+      lines.push(`${index + 1}. ${step.title || step.text || '未命名步骤'}${status}`);
+    });
+    lines.push('');
+  }
+  if (body.trim()) {
+    lines.push(body.trim());
+  }
+  return lines.join('\n').trim();
 }
 
 /**
@@ -67,6 +115,9 @@ export async function processMessage(
   files?: FileAttachment[],
   onPartialText?: OnPartialText,
   options?: ProcessMessageOptions,
+  onStructuredInputRequest?: OnStructuredInputRequest,
+  onServerRequestResolved?: OnServerRequestResolved,
+  onResponseSegment?: OnResponseSegment,
 ): Promise<ConversationResult> {
   const { store, llm } = getBridgeContext();
   const sessionId = binding.codepilotSessionId;
@@ -77,6 +128,7 @@ export async function processMessage(
   if (!lockAcquired) {
     return {
       responseText: '',
+      responseSegments: [],
       tokenUsage: null,
       hasError: true,
       errorMessage: 'Session is busy processing another request',
@@ -95,6 +147,7 @@ export async function processMessage(
   try {
     // Resolve session early — needed for workingDirectory and provider resolution
     const session = store.getSession(sessionId);
+    const runtime = store.getSessionExt(sessionId)?.runtime || 'claude';
 
     // Save user message — persist file attachments to disk using the same
     // <!--files:JSON--> format as the desktop chat route, so the UI can render them.
@@ -169,7 +222,9 @@ export async function processMessage(
     const stream = llm.streamChat({
       prompt: text,
       sessionId,
-      sdkSessionId: binding.sdkSessionId || undefined,
+      sdkSessionId: runtime === 'codex'
+        ? store.getCodexThreadId(sessionId) || undefined
+        : binding.sdkSessionId || undefined,
       model: effectiveModel,
       systemPrompt: session?.system_prompt || undefined,
       workingDirectory: binding.workingDirectory || session?.working_directory || undefined,
@@ -181,12 +236,22 @@ export async function processMessage(
       onRuntimeStatusChange: (status: string) => {
         try { store.setSessionRuntimeStatus(sessionId, status); } catch { /* best effort */ }
       },
+      collaborationMode: options?.collaborationModeOverride,
     });
 
     // Consume the stream server-side (replicate collectStreamResponse pattern).
     // Permission requests are forwarded immediately via the callback during streaming
     // because the stream blocks until permission is resolved — we can't wait until after.
-    return await consumeStream(stream, sessionId, onPermissionRequest, onPartialText);
+    return await consumeStream(
+      stream,
+      sessionId,
+      runtime,
+      onPermissionRequest,
+      onPartialText,
+      onStructuredInputRequest,
+      onServerRequestResolved,
+      onResponseSegment,
+    );
   } finally {
     clearInterval(renewalInterval);
     store.releaseSessionLock(sessionId, lockId);
@@ -201,21 +266,91 @@ export async function processMessage(
 async function consumeStream(
   stream: ReadableStream<string>,
   sessionId: string,
+  runtime: 'claude' | 'codex',
   onPermissionRequest?: OnPermissionRequest,
   onPartialText?: OnPartialText,
+  onStructuredInputRequest?: OnStructuredInputRequest,
+  onServerRequestResolved?: OnServerRequestResolved,
+  onResponseSegment?: OnResponseSegment,
 ): Promise<ConversationResult> {
   const { store } = getBridgeContext();
   const reader = stream.getReader();
   const contentBlocks: MessageContentBlock[] = [];
+  const responseSegments: string[] = [];
   let currentText = '';
-  /** Monotonically accumulated text for streaming preview — never resets on tool_use. */
-  let previewText = '';
   let tokenUsage: TokenUsage | null = null;
   let hasError = false;
   let errorMessage = '';
   const seenToolResultIds = new Set<string>();
   const permissionRequests: PermissionRequestInfo[] = [];
   let capturedSdkSessionId: string | null = null;
+  let planExplanation = '';
+  let planSteps: unknown[] = [];
+  let planBody = '';
+  let bufferedLeadingSegment = '';
+
+  const shouldBufferLeadingSegment = (text: string): boolean => {
+    const compact = text.replace(/\s+/g, '');
+    return !bufferedLeadingSegment && responseSegments.length === 0 && compact.length > 0 && compact.length <= 2;
+  };
+
+  const currentPreviewText = (): string => {
+    const merged = `${bufferedLeadingSegment}${currentText}`.trim();
+    if (!bufferedLeadingSegment && shouldBufferLeadingSegment(currentText)) {
+      return '';
+    }
+    return merged;
+  };
+
+  const appendTextSegment = async (text: string): Promise<void> => {
+    const normalized = text.trim();
+    if (!normalized) return;
+    const merged = bufferedLeadingSegment ? `${bufferedLeadingSegment}${normalized}`.trim() : normalized;
+    bufferedLeadingSegment = '';
+    contentBlocks.push({ type: 'text', text: merged });
+    responseSegments.push(merged);
+    if (onResponseSegment) {
+      await onResponseSegment(merged);
+    }
+  };
+
+  const flushBufferedLeadingSegment = async (): Promise<void> => {
+    if (!bufferedLeadingSegment) return;
+    const carry = bufferedLeadingSegment;
+    bufferedLeadingSegment = '';
+    await appendTextSegment(carry);
+  };
+
+  const finalizeTextSegment = async (preferredText?: string): Promise<void> => {
+    const segment = typeof preferredText === 'string' && preferredText.length > 0
+      ? preferredText
+      : currentText;
+    currentText = '';
+    const normalized = segment.trim();
+    if (!normalized) return;
+    if (shouldBufferLeadingSegment(normalized)) {
+      bufferedLeadingSegment = normalized;
+      return;
+    }
+    await appendTextSegment(normalized);
+  };
+
+  const flushTextBoundary = async (): Promise<void> => {
+    if (currentText.trim()) {
+      await finalizeTextSegment();
+    }
+    if (bufferedLeadingSegment) {
+      await flushBufferedLeadingSegment();
+    }
+  };
+
+  const emitPlanPreview = () => {
+    if (!onPartialText) return;
+    const rendered = renderPlanMarkdown(planExplanation, planSteps, planBody);
+    if (rendered) {
+      try { onPartialText(rendered); } catch { /* non-critical */ }
+    }
+  };
 
   try {
     while (true) {
@@ -237,16 +372,16 @@ async function consumeStream(
           case 'text':
             currentText += event.data;
             if (onPartialText) {
-              previewText += event.data;
-              try { onPartialText(previewText); } catch { /* non-critical */ }
+              try { onPartialText(currentPreviewText()); } catch { /* non-critical */ }
             }
             break;
 
+          case 'text_segment':
+            await finalizeTextSegment(event.data);
+            break;
+
           case 'tool_use': {
-            if (currentText.trim()) {
-              contentBlocks.push({ type: 'text', text: currentText });
-              currentText = '';
-            }
+            await flushTextBoundary();
             try {
               const toolData = JSON.parse(event.data);
               contentBlocks.push({
@@ -281,7 +416,9 @@ async function consumeStream(
             break;
           }
 
-          case 'permission_request': {
+          case 'permission_request':
+          case 'approval_request': {
+            await flushTextBoundary();
             try {
               const permData = JSON.parse(event.data);
               const perm: PermissionRequestInfo = {
@@ -302,12 +439,64 @@ async function consumeStream(
             break;
           }
 
+          case 'structured_input_request': {
+            await flushTextBoundary();
+            try {
+              const request = JSON.parse(event.data) as StructuredInputRequestInfo;
+              if (onStructuredInputRequest) {
+                onStructuredInputRequest(request).catch((err) => {
+                  console.error('[conversation-engine] Failed to forward structured input request:', err);
+                });
+              }
+            } catch { /* skip */ }
+            break;
+          }
+
+          case 'server_request_resolved': {
+            await flushTextBoundary();
+            try {
+              const payload = JSON.parse(event.data) as { requestId?: string };
+              if (payload.requestId && onServerRequestResolved) {
+                onServerRequestResolved(payload.requestId).catch((err) => {
+                  console.error('[conversation-engine] Failed to forward resolved server request:', err);
+                });
+              }
+            } catch { /* skip */ }
+            break;
+          }
+
+          case 'plan_state': {
+            await flushTextBoundary();
+            try {
+              const planData = JSON.parse(event.data) as { explanation?: string | null; plan?: unknown[] };
+              planExplanation = planData.explanation || '';
+              planSteps = Array.isArray(planData.plan) ? planData.plan : [];
+              emitPlanPreview();
+            } catch { /* skip */ }
+            break;
+          }
+
+          case 'plan_delta':
+            planBody += event.data;
+            emitPlanPreview();
+            break;
+
+          case 'plan_result':
+            await flushTextBoundary();
+            planBody = event.data;
+            emitPlanPreview();
+            break;
+
           case 'status': {
             try {
               const statusData = JSON.parse(event.data);
               if (statusData.session_id) {
                 capturedSdkSessionId = statusData.session_id;
-                store.updateSdkSessionId(sessionId, statusData.session_id);
+                if (runtime === 'codex') {
+                  store.updateCodexThreadId(sessionId, statusData.session_id);
+                } else {
+                  store.updateSdkSessionId(sessionId, statusData.session_id);
+                }
               }
               if (statusData.model) {
                 store.updateSessionModel(sessionId, statusData.model);
@@ -338,7 +527,11 @@ async function consumeStream(
               if (resultData.is_error) hasError = true;
               if (resultData.session_id) {
                 capturedSdkSessionId = resultData.session_id;
-                store.updateSdkSessionId(sessionId, resultData.session_id);
+                if (runtime === 'codex') {
+                  store.updateCodexThreadId(sessionId, resultData.session_id);
+                } else {
+                  store.updateSdkSessionId(sessionId, resultData.session_id);
+                }
               }
             } catch { /* skip */ }
             break;
@@ -350,8 +543,10 @@ async function consumeStream(
     }
 
     // Flush remaining text
-    if (currentText.trim()) {
-      contentBlocks.push({ type: 'text', text: currentText });
+    await flushTextBoundary();
+    const renderedPlan = renderPlanMarkdown(planExplanation, planSteps, planBody);
+    if (renderedPlan && responseSegments.at(-1) !== renderedPlan) {
+      await appendTextSegment(renderedPlan);
     }
 
     // Save assistant message
@@ -373,14 +568,11 @@ async function consumeStream(
     }
 
     // Extract text-only response for IM delivery
-    const responseText = contentBlocks
-      .filter((b): b is Extract<MessageContentBlock, { type: 'text' }> => b.type === 'text')
-      .map((b) => b.text)
-      .join('')
-      .trim();
+    const responseText = responseSegments.join('\n\n').trim();
 
     return {
       responseText,
+      responseSegments,
       tokenUsage,
       hasError,
       errorMessage,
@@ -389,8 +581,10 @@ async function consumeStream(
     };
   } catch (e) {
     // Best-effort save on stream error
-    if (currentText.trim()) {
-      contentBlocks.push({ type: 'text', text: currentText });
+    finalizeTextSegment();
+    const renderedPlan = renderPlanMarkdown(planExplanation, planSteps, planBody);
+    if (renderedPlan && responseSegments.at(-1) !== renderedPlan) {
+      appendTextSegment(renderedPlan);
     }
     if (contentBlocks.length > 0) {
       const hasToolBlocks = contentBlocks.some(
@@ -413,6 +607,7 @@ async function consumeStream(
 
     return {
       responseText: '',
+      responseSegments: [],
       tokenUsage,
       hasError: true,
       errorMessage: isAbort ? 'Task stopped by user' : (e instanceof Error ? e.message : 'Stream consumption error'),

@@ -121,6 +121,7 @@ export async function forwardPermissionRequest(
         channelType: adapter.channelType,
         chatId: address.chatId,
         messageId: result.messageId,
+        ...(result.openMessageId ? { openMessageId: result.openMessageId } : {}),
         toolName,
         suggestions: suggestions ? JSON.stringify(suggestions) : '',
       });
@@ -165,7 +166,11 @@ export function handlePermissionCallback(
   }
 
   // Security: verify the callback came from the original permission message
-  if (callbackMessageId && link.messageId !== callbackMessageId) {
+  if (
+    callbackMessageId &&
+    link.messageId !== callbackMessageId &&
+    link.openMessageId !== callbackMessageId
+  ) {
     console.warn(`[permission-broker] Message ID mismatch: expected ${link.messageId}, got ${callbackMessageId}`);
     return false;
   }
@@ -197,6 +202,7 @@ export function handlePermissionCallback(
     case 'allow':
       resolved = permissions.resolvePendingPermission(permissionRequestId, {
         behavior: 'allow',
+        scope: 'turn',
       });
       break;
 
@@ -211,6 +217,7 @@ export function handlePermissionCallback(
 
       resolved = permissions.resolvePendingPermission(permissionRequestId, {
         behavior: 'allow',
+        scope: 'session',
         ...(updatedPermissions ? { updatedPermissions } : {}),
       });
       break;
@@ -220,6 +227,7 @@ export function handlePermissionCallback(
       resolved = permissions.resolvePendingPermission(permissionRequestId, {
         behavior: 'deny',
         message: 'Denied via IM bridge',
+        scope: 'turn',
       });
       break;
 

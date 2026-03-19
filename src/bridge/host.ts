@@ -6,6 +6,7 @@
  * interfaces to use the bridge.
  */
 
+import type { SessionExt } from '../runtime-types.js';
 import type { ChannelAddress, ChannelBinding, ChannelType } from './types.js';
 
 // ── Bridge-local types (replacing @/types imports) ────────────
@@ -28,6 +29,7 @@ export interface SSEEvent {
 
 export type SSEEventType =
   | 'text'
+  | 'text_segment'
   | 'tool_use'
   | 'tool_result'
   | 'tool_output'
@@ -36,6 +38,12 @@ export type SSEEventType =
   | 'result'
   | 'error'
   | 'permission_request'
+  | 'approval_request'
+  | 'structured_input_request'
+  | 'server_request_resolved'
+  | 'plan_state'
+  | 'plan_delta'
+  | 'plan_result'
   | 'mode_changed'
   | 'task_update'
   | 'keep_alive'
@@ -103,6 +111,7 @@ export interface PermissionLinkInput {
   channelType: string;
   chatId: string;
   messageId: string;
+  openMessageId?: string;
   toolName: string;
   suggestions: string;
 }
@@ -112,6 +121,7 @@ export interface PermissionLinkRecord {
   permissionRequestId: string;
   chatId: string;
   messageId: string;
+  openMessageId?: string;
   resolved: boolean;
   suggestions: string;
 }
@@ -132,11 +142,65 @@ export interface PlanWorkflowInput {
   requestMessageId?: string;
   planMessageId?: string;
   actionCardMessageId?: string;
+  actionCardOpenMessageId?: string;
   resolved?: boolean;
 }
 
 export interface PlanWorkflowRecord extends Omit<PlanWorkflowInput, 'workflowId'> {
   workflowId: string;
+  resolved: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StructuredInputOption {
+  label: string;
+  description: string;
+}
+
+export interface StructuredInputQuestion {
+  id: string;
+  header: string;
+  question: string;
+  isOther: boolean;
+  isSecret: boolean;
+  options: StructuredInputOption[] | null;
+}
+
+export interface StructuredInputAnswer {
+  answers: string[];
+}
+
+export interface StructuredInputResponse {
+  answers: Record<string, StructuredInputAnswer>;
+}
+
+export interface StructuredInputRequestInfo {
+  requestId: string;
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  questions: StructuredInputQuestion[];
+}
+
+export interface StructuredInputRequestInput {
+  requestId: string;
+  channelType: string;
+  chatId: string;
+  codepilotSessionId: string;
+  address: ChannelAddress;
+  routeKey: string;
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  questions: StructuredInputQuestion[];
+  draftAnswers?: StructuredInputResponse['answers'];
+  messageId?: string;
+  openMessageId?: string;
+  resolved?: boolean;
+}
+
+export interface StructuredInputRequestRecord extends Omit<StructuredInputRequestInput, 'resolved'> {
   resolved: boolean;
   createdAt: string;
   updatedAt: string;
@@ -197,6 +261,11 @@ export interface BridgeStore {
 
   // ── SDK session ──
   updateSdkSessionId(sessionId: string, sdkSessionId: string): void;
+  getSessionSdkSessionId(sessionId: string): string;
+  getCodexThreadId(sessionId: string): string;
+  updateCodexThreadId(sessionId: string, threadId: string): void;
+  getSessionExt(sessionId: string): SessionExt | null;
+  updateSessionExt(sessionId: string, updates: Partial<SessionExt>): SessionExt | null;
   updateSessionModel(sessionId: string, model: string): void;
   syncSdkTasks(sessionId: string, todos: unknown): void;
 
@@ -227,6 +296,16 @@ export interface BridgeStore {
   markPlanWorkflowResolved(workflowId: string): boolean;
   deletePlanWorkflow(workflowId: string): boolean;
 
+  // ── Structured input requests ──
+  upsertStructuredInputRequest(request: StructuredInputRequestInput): StructuredInputRequestRecord;
+  getStructuredInputRequest(requestId: string): StructuredInputRequestRecord | null;
+  updateStructuredInputRequest(
+    requestId: string,
+    updates: Partial<Omit<StructuredInputRequestRecord, 'requestId' | 'channelType' | 'chatId' | 'codepilotSessionId' | 'createdAt'>>,
+  ): StructuredInputRequestRecord | null;
+  markStructuredInputRequestResolved(requestId: string): boolean;
+  deleteStructuredInputRequest(requestId: string): boolean;
+
   // ── Channel offsets (adapter watermarks) ──
   getChannelOffset(key: string): string;
   setChannelOffset(key: string, offset: string): void;
@@ -248,6 +327,7 @@ export interface StreamChatParams {
   conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
   files?: FileAttachment[];
   onRuntimeStatusChange?: (status: string) => void;
+  collaborationMode?: 'plan' | 'default';
 }
 
 export interface LLMProvider {
@@ -265,6 +345,7 @@ export interface PermissionResolution {
   behavior: 'allow' | 'deny';
   message?: string;
   updatedPermissions?: unknown[];
+  scope?: 'turn' | 'session';
 }
 
 export interface PermissionGateway {
@@ -273,6 +354,7 @@ export interface PermissionGateway {
    * Returns true if the permission was found and resolved.
    */
   resolvePendingPermission(permissionRequestId: string, resolution: PermissionResolution): boolean;
+  resolvePendingStructuredInput?(requestId: string, resolution: StructuredInputResponse): boolean;
 }
 
 // ── Host Interface: Lifecycle Hooks ──────────────────────────

@@ -21,9 +21,9 @@
 - `CTI_CLAUDE_DEFAULT_MODEL`
 - `CTI_CODEX_DEFAULT_MODEL`
 - `CTI_CLAUDE_CODE_EXECUTABLE`
-- `CTI_CODEX_API_KEY`
-- `CTI_CODEX_BASE_URL`
 - `CTI_AUTO_APPROVE`
+
+Codex 直接复用本地 `codex` CLI 和 `~/.codex/config.toml`（或 `$CODEX_HOME/config.toml`）。
 
 还需要在飞书开放平台开启：
 - 长连接事件 `im.message.receive_v1`
@@ -85,7 +85,7 @@
 - 配置文件存在性
 - Feishu 必填环境变量
 - Claude CLI 可用性
-- Codex SDK / 鉴权是否可用
+- Codex CLI、`codex app-server` 与本地 config.toml 是否可用
 - daemon 进程状态
 - 飞书长连接事件配置提醒
 

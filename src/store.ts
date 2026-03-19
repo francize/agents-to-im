@@ -18,6 +18,8 @@ import type {
   PermissionLinkRecord,
   PlanWorkflowInput,
   PlanWorkflowRecord,
+  StructuredInputRequestInput,
+  StructuredInputRequestRecord,
   OutboundRefInput,
   UpsertChannelBindingInput,
 } from './bridge/host.js';
@@ -78,6 +80,7 @@ export class JsonFileStore implements BridgeStore {
   private messages = new Map<string, BridgeMessage[]>();
   private permissionLinks = new Map<string, PermissionLinkRecord>();
   private planWorkflows = new Map<string, PlanWorkflowRecord>();
+  private structuredInputRequests = new Map<string, StructuredInputRequestRecord>();
   private offsets = new Map<string, string>();
   private dedupKeys = new Map<string, number>();
   private locks = new Map<string, LockEntry>();
@@ -132,6 +135,14 @@ export class JsonFileStore implements BridgeStore {
       this.planWorkflows.set(id, workflow);
     }
 
+    const structuredInputs = readJson<Record<string, StructuredInputRequestRecord>>(
+      path.join(DATA_DIR, 'structured-inputs.json'),
+      {},
+    );
+    for (const [id, request] of Object.entries(structuredInputs)) {
+      this.structuredInputRequests.set(id, request);
+    }
+
     // Offsets
     const offsets = readJson<Record<string, string>>(
       path.join(DATA_DIR, 'offsets.json'),
@@ -179,6 +190,13 @@ export class JsonFileStore implements BridgeStore {
     writeJson(
       path.join(DATA_DIR, 'plan-workflows.json'),
       Object.fromEntries(this.planWorkflows),
+    );
+  }
+
+  private persistStructuredInputs(): void {
+    writeJson(
+      path.join(DATA_DIR, 'structured-inputs.json'),
+      Object.fromEntries(this.structuredInputRequests),
     );
   }
 
@@ -236,11 +254,15 @@ export class JsonFileStore implements BridgeStore {
     }
     if (!extPartial.title && legacyTitle) extPartial.title = legacyTitle;
     if (!extPartial.titleStatus && legacyTitleStatus) extPartial.titleStatus = legacyTitleStatus as TitleStatus;
+    if (!extPartial.codexThreadId && typeof record.sdk_session_id === 'string' && extPartial.runtime === 'codex') {
+      extPartial.codexThreadId = record.sdk_session_id;
+    }
     if (!extPartial.titleStatus) extPartial.titleStatus = 'pending';
     const ext: SessionExt = {
       runtime: extPartial.runtime || 'claude',
       ...(extPartial.title ? { title: extPartial.title } : {}),
       titleStatus: extPartial.titleStatus || 'pending',
+      ...(extPartial.codexThreadId ? { codexThreadId: extPartial.codexThreadId } : {}),
     };
     return {
       ...record,
@@ -432,6 +454,23 @@ export class JsonFileStore implements BridgeStore {
     this.persistBindings();
   }
 
+  getCodexThreadId(sessionId: string): string {
+    return this.sessions.get(sessionId)?.ext?.codexThreadId || '';
+  }
+
+  updateCodexThreadId(sessionId: string, threadId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.ext = {
+      ...(session.ext || {
+        runtime: (this.settings.get('bridge_default_runtime') as RuntimeName) || 'claude',
+        titleStatus: 'pending',
+      }),
+      codexThreadId: threadId,
+    };
+    this.persistSessions();
+  }
+
   updateSessionModel(sessionId: string, model: string): void {
     const s = this.sessions.get(sessionId);
     if (s) {
@@ -471,6 +510,7 @@ export class JsonFileStore implements BridgeStore {
           ...(session.ext || {}),
           runtime: defaultRuntime,
           titleStatus: session.ext?.titleStatus || 'pending',
+          ...(session.sdk_session_id && defaultRuntime === 'codex' ? { codexThreadId: session.sdk_session_id } : {}),
         };
         changed = true;
       }
@@ -555,6 +595,9 @@ export class JsonFileStore implements BridgeStore {
       permissionRequestId: link.permissionRequestId,
       chatId: link.chatId,
       messageId: link.messageId,
+      ...(typeof (link as PermissionLinkInput & { openMessageId?: string }).openMessageId === 'string'
+        ? { openMessageId: (link as PermissionLinkInput & { openMessageId?: string }).openMessageId }
+        : {}),
       resolved: false,
       suggestions: link.suggestions,
     };
@@ -600,6 +643,7 @@ export class JsonFileStore implements BridgeStore {
       ...(workflow.requestMessageId ? { requestMessageId: workflow.requestMessageId } : {}),
       ...(workflow.planMessageId ? { planMessageId: workflow.planMessageId } : {}),
       ...(workflow.actionCardMessageId ? { actionCardMessageId: workflow.actionCardMessageId } : {}),
+      ...(workflow.actionCardOpenMessageId ? { actionCardOpenMessageId: workflow.actionCardOpenMessageId } : {}),
       resolved: workflow.resolved ?? existing?.resolved ?? false,
       createdAt: existing?.createdAt || now(),
       updatedAt: now(),
@@ -660,6 +704,67 @@ export class JsonFileStore implements BridgeStore {
   deletePlanWorkflow(workflowId: string): boolean {
     const deleted = this.planWorkflows.delete(workflowId);
     if (deleted) this.persistPlanWorkflows();
+    return deleted;
+  }
+
+  upsertStructuredInputRequest(request: StructuredInputRequestInput): StructuredInputRequestRecord {
+    const existing = this.structuredInputRequests.get(request.requestId);
+    const record: StructuredInputRequestRecord = {
+      requestId: request.requestId,
+      channelType: request.channelType,
+      chatId: request.chatId,
+      codepilotSessionId: request.codepilotSessionId,
+      address: request.address,
+      routeKey: request.routeKey,
+      threadId: request.threadId,
+      turnId: request.turnId,
+      itemId: request.itemId,
+      questions: request.questions,
+      draftAnswers: request.draftAnswers ?? existing?.draftAnswers ?? {},
+      ...(request.messageId ? { messageId: request.messageId } : {}),
+      ...(request.openMessageId ? { openMessageId: request.openMessageId } : {}),
+      resolved: request.resolved ?? existing?.resolved ?? false,
+      createdAt: existing?.createdAt || now(),
+      updatedAt: now(),
+    };
+    this.structuredInputRequests.set(record.requestId, record);
+    this.persistStructuredInputs();
+    return { ...record };
+  }
+
+  getStructuredInputRequest(requestId: string): StructuredInputRequestRecord | null {
+    const record = this.structuredInputRequests.get(requestId);
+    return record ? { ...record } : null;
+  }
+
+  updateStructuredInputRequest(
+    requestId: string,
+    updates: Partial<Omit<StructuredInputRequestRecord, 'requestId' | 'channelType' | 'chatId' | 'codepilotSessionId' | 'createdAt'>>,
+  ): StructuredInputRequestRecord | null {
+    const current = this.structuredInputRequests.get(requestId);
+    if (!current) return null;
+    const next: StructuredInputRequestRecord = {
+      ...current,
+      ...updates,
+      updatedAt: now(),
+    };
+    this.structuredInputRequests.set(requestId, next);
+    this.persistStructuredInputs();
+    return { ...next };
+  }
+
+  markStructuredInputRequestResolved(requestId: string): boolean {
+    const record = this.structuredInputRequests.get(requestId);
+    if (!record || record.resolved) return false;
+    record.resolved = true;
+    record.updatedAt = now();
+    this.persistStructuredInputs();
+    return true;
+  }
+
+  deleteStructuredInputRequest(requestId: string): boolean {
+    const deleted = this.structuredInputRequests.delete(requestId);
+    if (deleted) this.persistStructuredInputs();
     return deleted;
   }
 

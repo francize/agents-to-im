@@ -5,7 +5,7 @@ import type { LLMProvider, StreamChatParams } from './bridge/host.js';
 import type { Config } from './config.js';
 import { CodexProvider } from './codex-provider.js';
 import { SDKLLMProvider, preflightCheck, resolveClaudeCliPath } from './llm-provider.js';
-import type { PendingPermissions } from './permission-gateway.js';
+import { PendingApprovals, type PendingPermissions, PendingStructuredInputs } from './permission-gateway.js';
 import type { RuntimeName } from './runtime-types.js';
 import { JsonFileStore } from './store.js';
 
@@ -30,12 +30,27 @@ export class MultiplexLLMProvider implements LLMProvider {
   private claudeProvider: SDKLLMProvider | null = null;
   private codexProvider: CodexProvider | null = null;
   private claudeCliPath: string | null = null;
+  private readonly pendingApprovals: PendingApprovals;
+  private readonly pendingStructuredInputs: PendingStructuredInputs;
+  private readonly config: Config;
 
   constructor(
     private readonly store: JsonFileStore,
     private readonly pendingPerms: PendingPermissions,
-    private readonly config: Config,
-  ) {}
+    pendingApprovals: PendingApprovals | Config,
+    pendingStructuredInputs?: PendingStructuredInputs,
+    config?: Config,
+  ) {
+    if (config) {
+      this.pendingApprovals = pendingApprovals as PendingApprovals;
+      this.pendingStructuredInputs = pendingStructuredInputs || new PendingStructuredInputs();
+      this.config = config;
+      return;
+    }
+    this.pendingApprovals = new PendingApprovals();
+    this.pendingStructuredInputs = new PendingStructuredInputs();
+    this.config = pendingApprovals as Config;
+  }
 
   private getSessionRuntime(sessionId: string): RuntimeName {
     return this.store.getSessionExt(sessionId)?.runtime || this.config.legacyRuntime || 'claude';
@@ -60,7 +75,7 @@ export class MultiplexLLMProvider implements LLMProvider {
 
   private async getCodexProvider(): Promise<CodexProvider> {
     if (this.codexProvider) return this.codexProvider;
-    const provider = new CodexProvider(this.pendingPerms);
+    const provider = new CodexProvider(this.pendingApprovals, this.pendingStructuredInputs);
     await provider.prepare();
     this.codexProvider = provider;
     return provider;
@@ -73,6 +88,13 @@ export class MultiplexLLMProvider implements LLMProvider {
 
   async ensureRuntimeAvailable(runtime: RuntimeName): Promise<void> {
     await this.getProvider(runtime);
+  }
+
+  async ensureCodexNativePlanAvailable(): Promise<void> {
+    const provider = await this.getCodexProvider();
+    if (!(await provider.supportsNativePlan())) {
+      throw new Error('本地 Codex 版本不支持原生 plan 模式');
+    }
   }
 
   private streamWithRuntime(runtime: RuntimeName, params: StreamChatParams): ReadableStream<string> {
@@ -146,5 +168,9 @@ export class MultiplexLLMProvider implements LLMProvider {
     }
     const normalized = normalizeGeneratedTitle(text);
     return normalized || null;
+  }
+
+  async dispose(): Promise<void> {
+    await this.codexProvider?.close();
   }
 }

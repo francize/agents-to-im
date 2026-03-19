@@ -28,6 +28,9 @@
   - 其他输入只返回帮助文案
 - 群聊：
   - 普通对话
+  - `/mode plan|code|ask`
+  - `/plan`
+  - `/plan <需求>`
   - `/reset`
   - `/perm allow|allow_session|deny <id>`
   - 其他斜杠命令统一拒绝
@@ -36,7 +39,7 @@
 
 - Node.js >= 20
 - Claude 会话需要已安装并认证 Claude Code CLI
-- Codex 会话需要安装 `@openai/codex-sdk`
+- Codex 会话需要本地 `codex` CLI，且已完成认证并支持 `codex app-server`
 - 飞书/Lark 自建应用已开启机器人能力
 - 事件订阅方式使用长连接
 - 事件至少包含：
@@ -68,11 +71,9 @@
 - `CTI_CLAUDE_DEFAULT_MODEL`
 - `CTI_CODEX_DEFAULT_MODEL`
 - `CTI_CLAUDE_CODE_EXECUTABLE`
-- `CTI_CODEX_API_KEY`
-- `CTI_CODEX_BASE_URL`
 - `CTI_AUTO_APPROVE`
 
-Codex 会话默认直接复用用户本地 `~/.codex/config.toml` 的 trusted 目录、sandbox、approval policy 和默认模型行为；`CTI_CODEX_*` 只是 bridge 侧补充覆盖，不是主配置源。
+Codex 会话默认直接复用用户本地 `~/.codex/config.toml` 或 `$CODEX_HOME/config.toml` 的认证、trusted 目录、sandbox、approval policy 和默认模型行为；bridge 只保留 `CTI_CODEX_DEFAULT_MODEL` 作为可选默认模型覆盖。
 
 ## 快速开始
 

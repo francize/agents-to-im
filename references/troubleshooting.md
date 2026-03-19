@@ -12,7 +12,7 @@
 3. 确认 `~/.agents-to-im/config.env` 存在且包含 `CTI_FEISHU_APP_ID`、`CTI_FEISHU_APP_SECRET`
 4. 确认至少一个 runtime 可用：
    - Claude：`claude --version`
-   - Codex：检查 `CTI_CODEX_API_KEY` 或 `OPENAI_API_KEY`
+   - Codex：检查 `codex --version`、`codex app-server --help` 与 `~/.codex/config.toml`
 5. 查看日志：`/agents-to-im logs 200`
 
 常见原因：
