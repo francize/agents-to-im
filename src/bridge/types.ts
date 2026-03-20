@@ -178,6 +178,8 @@ export interface PermissionLink {
 export interface PreviewCapabilities {
   supported: boolean;
   privateOnly: boolean;
+  /** How the preview should turn into the final visible reply. */
+  finalDelivery?: 'separate_message' | 'replace_preview' | 'segment_replace_preview';
 }
 
 /** Mutable state for an in-flight streaming preview */

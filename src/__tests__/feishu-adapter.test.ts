@@ -192,6 +192,90 @@ describe('FeishuAdapter', () => {
     assert.equal(patchCalls, 2);
   });
 
+  it('finalizes a CardKit preview in place without sending a second reply', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-cardkit',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+
+    let createCalls = 0;
+    let replyCalls = 0;
+    let streamCalls = 0;
+    let updateCalls = 0;
+    let settingsCalls = 0;
+    let finalSettings = '';
+    const adapter = new FeishuAdapter() as any;
+    adapter.lastIncomingMessageId.set('group-cardkit:main', 'incoming-1');
+    adapter.restClient = {
+      cardkit: {
+        v1: {
+          card: {
+            create: async () => {
+              createCalls += 1;
+              return { code: 0, data: { card_id: 'card-1' } };
+            },
+            update: async () => {
+              updateCalls += 1;
+              return { code: 0, data: {} };
+            },
+            settings: async (payload: { data: { settings: string } }) => {
+              settingsCalls += 1;
+              finalSettings = payload.data.settings;
+              return { code: 0, data: {} };
+            },
+          },
+          cardElement: {
+            content: async () => {
+              streamCalls += 1;
+              return { code: 0, data: {} };
+            },
+          },
+        },
+      },
+      im: {
+        message: {
+          reply: async () => {
+            replyCalls += 1;
+            return { code: 0, data: { message_id: 'preview-card-msg' } };
+          },
+          create: async () => {
+            throw new Error('unexpected create');
+          },
+          patch: async () => {
+            throw new Error('unexpected patch');
+          },
+        },
+      },
+    };
+
+    const previewResult = await adapter.sendPreview({ channelType: 'feishu', chatId: 'group-cardkit' }, 'partial', 99);
+    const finalResult = await adapter.send({
+      address: { channelType: 'feishu', chatId: 'group-cardkit' },
+      text: 'final answer',
+      parseMode: 'Markdown',
+    });
+
+    assert.equal(previewResult, 'sent');
+    assert.equal(finalResult.ok, true);
+    assert.equal(finalResult.messageId, 'preview-card-msg');
+    assert.equal(createCalls, 1);
+    assert.equal(replyCalls, 1);
+    assert.equal(streamCalls, 1);
+    assert.equal(updateCalls, 1);
+    assert.equal(settingsCalls, 1);
+    assert.equal(JSON.parse(finalSettings).streaming_mode, false);
+  });
+
   it('sends permission cards as schema 2.0 without deprecated action tags', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});
@@ -562,6 +646,8 @@ describe('FeishuAdapter', () => {
 
     const card = JSON.parse(payloadContent);
     assert.equal(result.ok, true);
+    assert.doesNotMatch(payloadContent, /"tag":"note"/);
+    assert.doesNotMatch(payloadContent, /"tag":"action"/);
     assert.equal(card.header.title.content, '补充信息');
     assert.equal(card.schema, '2.0');
     assert.equal(card.body.elements[0].tag, 'form');

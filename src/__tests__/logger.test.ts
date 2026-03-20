@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { maskSecrets } from '../logger.js';
+import { formatLogTimestamp, maskSecrets } from '../logger.js';
 
 describe('maskSecrets', () => {
   it('masks token=value patterns', () => {
@@ -57,5 +57,13 @@ describe('maskSecrets', () => {
     const input = 'token="my-secret-token"';
     const result = maskSecrets(input);
     assert.ok(!result.includes('my-secret-token'));
+  });
+});
+
+describe('formatLogTimestamp', () => {
+  it('uses local time with an explicit timezone offset', () => {
+    const formatted = formatLogTimestamp(new Date('2026-03-19T09:30:00.123Z'));
+    assert.match(formatted, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/);
+    assert.ok(!formatted.endsWith('Z'));
   });
 });

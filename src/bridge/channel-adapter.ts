@@ -83,6 +83,11 @@ export abstract class BaseChannelAdapter {
   /**
    * Return preview capabilities for a given chat.
    * Returning null means streaming preview is not available for this chat.
+   * `finalDelivery=replace_preview` means the adapter can turn the preview
+   * artifact itself into the final reply in place once per turn.
+   * `finalDelivery=segment_replace_preview` means each completed response
+   * segment should finalize the current preview artifact in place, then start
+   * a fresh preview cycle for the next segment.
    */
   getPreviewCapabilities?(_address: ChannelAddress): PreviewCapabilities | null;
 

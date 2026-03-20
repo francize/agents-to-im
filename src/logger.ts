@@ -31,6 +31,23 @@ function openLogStream(): fs.WriteStream {
   return fs.createWriteStream(LOG_PATH, { flags: 'a' });
 }
 
+export function formatLogTimestamp(date: Date): string {
+  const pad = (value: number, width = 2): string => String(value).padStart(width, '0');
+  const year = date.getFullYear();
+  const month = pad(date.getMonth() + 1);
+  const day = pad(date.getDate());
+  const hours = pad(date.getHours());
+  const minutes = pad(date.getMinutes());
+  const seconds = pad(date.getSeconds());
+  const millis = pad(date.getMilliseconds(), 3);
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const absoluteOffset = Math.abs(offsetMinutes);
+  const offsetHours = pad(Math.floor(absoluteOffset / 60));
+  const offsetRemainder = pad(absoluteOffset % 60);
+  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}.${millis}${sign}${offsetHours}:${offsetRemainder}`;
+}
+
 function rotateIfNeeded(): void {
   try {
     const stat = fs.statSync(LOG_PATH);
@@ -64,7 +81,7 @@ export function setupLogger(): void {
   logStream = openLogStream();
 
   const write = (level: string, args: unknown[]) => {
-    const timestamp = new Date().toISOString();
+    const timestamp = formatLogTimestamp(new Date());
     const message = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
     const formatted = `[${timestamp}] [${level}] ${message}`;
     const masked = maskSecrets(formatted);

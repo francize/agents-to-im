@@ -458,7 +458,7 @@ describe('bridge-manager plan workflow', () => {
     assert.match(adapter.sent[0].text, /当前运行时请求补充信息/);
   });
 
-  it('rotates preview drafts per segment and merges a one-character lead segment', async () => {
+  it('keeps one final delivery for replace_preview channels and merges a one-character lead segment', async () => {
     const store = new JsonFileStore(makeSettings());
     initBridgeContext({
       store,
@@ -497,7 +497,11 @@ describe('bridge-manager plan workflow', () => {
 
     const previewUpdates: string[] = [];
     const previewEnds: number[] = [];
-    (adapter as any).getPreviewCapabilities = () => ({ supported: true, privateOnly: false });
+    (adapter as any).getPreviewCapabilities = () => ({
+      supported: true,
+      privateOnly: false,
+      finalDelivery: 'replace_preview',
+    });
     (adapter as any).sendPreview = async (_address: unknown, text: string, draftId: number) => {
       previewUpdates.push(`${draftId}:${text}`);
       return 'sent';
@@ -514,6 +518,77 @@ describe('bridge-manager plan workflow', () => {
       timestamp: Date.now(),
     });
 
+    await waitFor(() => adapter.sent.length === 1);
+
+    assert.equal(
+      adapter.sent[0].text,
+      '我已经确认技术方案并开始生成页面。\n\n接下来补齐剩余内容。',
+    );
+    assert.ok(previewUpdates.length > 0);
+    assert.ok(!previewUpdates.some((entry) => entry.endsWith(':我')));
+    assert.deepEqual(previewEnds.length, 1);
+  });
+
+  it('finalizes each completed segment in place for segment_replace_preview channels', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text', data: '我' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '我' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text', data: '已经确认技术方案并开始生成页面。' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '已经确认技术方案并开始生成页面。' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text', data: '接下来补齐剩余内容。' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '接下来补齐剩余内容。' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-segmented-preview' }) })}\n`);
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-segmented-preview',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    const previewUpdates: string[] = [];
+    const previewEnds: number[] = [];
+    (adapter as any).getPreviewCapabilities = () => ({
+      supported: true,
+      privateOnly: false,
+      finalDelivery: 'segment_replace_preview',
+    });
+    (adapter as any).sendPreview = async (_address: unknown, text: string, draftId: number) => {
+      previewUpdates.push(`${draftId}:${text}`);
+      return 'sent';
+    };
+    (adapter as any).endPreview = (_address: unknown, draftId: number) => {
+      previewEnds.push(draftId);
+    };
+
+    await start();
+    adapter.push({
+      messageId: 'msg-segmented-preview',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-segmented-preview', threadId: 'thread-1' },
+      text: '继续',
+      timestamp: Date.now(),
+    });
+
     await waitFor(() => adapter.sent.length === 2);
 
     assert.deepEqual(
@@ -525,6 +600,7 @@ describe('bridge-manager plan workflow', () => {
     );
     assert.ok(previewUpdates.length > 0);
     assert.ok(!previewUpdates.some((entry) => entry.endsWith(':我')));
-    assert.ok(previewEnds.length >= 2);
+    assert.equal(previewEnds.length, 2);
+    assert.notEqual(previewEnds[0], previewEnds[1]);
   });
 });

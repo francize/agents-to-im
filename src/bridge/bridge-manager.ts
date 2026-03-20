@@ -641,6 +641,8 @@ async function handleMessage(
   }
 
   const streamCfg = previewState ? getStreamConfig(adapter.channelType) : null;
+  const previewFinalDelivery = caps?.finalDelivery || 'separate_message';
+  const previewFinalizesPerSegment = previewFinalDelivery === 'segment_replace_preview';
 
   // Build the onPartialText callback (or undefined if preview not supported)
   const onPartialText = (previewState && streamCfg) ? (fullText: string) => {
@@ -690,7 +692,9 @@ async function handleMessage(
   let streamedSegmentCount = 0;
   let streamedSegmentDelivery: SendResult | null = null;
 
-  const onResponseSegment = previewState ? async (segmentText: string) => {
+  const onResponseSegment = (previewState && (
+    previewFinalDelivery === 'separate_message' || previewFinalizesPerSegment
+  )) ? async (segmentText: string) => {
     const normalized = segmentText.trim();
     if (!normalized) return;
     const ps = previewState!;
@@ -788,7 +792,68 @@ async function handleMessage(
     const remainingSegments = result.responseSegments
       .filter((segment) => segment.trim())
       .slice(streamedSegmentCount);
-    if (remainingSegments.length > 1) {
+    if (previewState && previewFinalDelivery === 'replace_preview') {
+      const finalResponseText = result.responseText || remainingSegments.join('\n\n').trim();
+      if (finalResponseText) {
+        responseDelivery = await deliverResponse(
+          adapter,
+          msg.address,
+          finalResponseText,
+          binding.codepilotSessionId,
+          msg.messageId,
+        );
+        if (responseDelivery.ok) {
+          adapter.endPreview?.(msg.address, previewState.draftId);
+          previewClosed = true;
+        }
+      } else if (result.hasError) {
+        const errorResponse: OutboundMessage = {
+          address: msg.address,
+          text: `<b>Error:</b> ${escapeHtml(result.errorMessage)}`,
+          parseMode: 'HTML',
+          replyToMessageId: msg.messageId,
+        };
+        await deliver(adapter, errorResponse);
+      }
+    } else if (previewState && previewFinalizesPerSegment) {
+      if (remainingSegments.length > 0) {
+        for (const segment of remainingSegments) {
+          const nextDelivery = await deliverResponse(
+            adapter,
+            msg.address,
+            segment,
+            binding.codepilotSessionId,
+            msg.messageId,
+          );
+          responseDelivery = nextDelivery;
+          adapter.endPreview?.(msg.address, previewState.draftId);
+          resetPreviewState(previewState);
+          if (!nextDelivery.ok) break;
+        }
+      } else if (streamedSegmentDelivery) {
+        responseDelivery = streamedSegmentDelivery;
+      } else if (result.responseText) {
+        responseDelivery = await deliverResponse(
+          adapter,
+          msg.address,
+          result.responseText,
+          binding.codepilotSessionId,
+          msg.messageId,
+        );
+        if (responseDelivery.ok) {
+          adapter.endPreview?.(msg.address, previewState.draftId);
+          previewClosed = true;
+        }
+      } else if (result.hasError) {
+        const errorResponse: OutboundMessage = {
+          address: msg.address,
+          text: `<b>Error:</b> ${escapeHtml(result.errorMessage)}`,
+          parseMode: 'HTML',
+          replyToMessageId: msg.messageId,
+        };
+        await deliver(adapter, errorResponse);
+      }
+    } else if (remainingSegments.length > 1) {
       const [firstSegment, ...restSegments] = remainingSegments;
       if (firstSegment) {
         responseDelivery = await deliverResponse(adapter, msg.address, firstSegment, binding.codepilotSessionId, msg.messageId);
@@ -948,7 +1013,8 @@ async function handleMessage(
         clearTimeout(previewState.throttleTimer);
         previewState.throttleTimer = null;
       }
-      if (!previewClosed) {
+      const hasActivePreviewDraft = !!(previewState.lastSentText || previewState.pendingText || previewState.lastSentAt > 0);
+      if (!previewClosed && hasActivePreviewDraft) {
         adapter.endPreview?.(msg.address, previewState.draftId);
       }
     }

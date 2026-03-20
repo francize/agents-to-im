@@ -5,6 +5,7 @@ SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PID_FILE="$CTI_HOME/runtime/bridge.pid"
 STATUS_FILE="$CTI_HOME/runtime/status.json"
 LOG_FILE="$CTI_HOME/logs/bridge.log"
+RESTART_SETTLE_SECONDS="${CTI_RESTART_SETTLE_SECONDS:-12}"
 
 # ── Common helpers ──
 
@@ -187,6 +188,10 @@ case "${1:-help}" in
       fi
     fi
     rm -f "$PID_FILE"
+    if [ "${RESTART_SETTLE_SECONDS}" -gt 0 ] 2>/dev/null; then
+      echo "Waiting ${RESTART_SETTLE_SECONDS}s for external connections to settle..."
+      sleep "${RESTART_SETTLE_SECONDS}"
+    fi
     bash "$0" start
     ;;
 
