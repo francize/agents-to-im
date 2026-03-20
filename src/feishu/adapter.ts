@@ -344,6 +344,7 @@ function buildStructuredInputQuestionElements(request: StructuredInputRequestInf
 function buildResolvedStructuredInputElements(
   request: StructuredInputRequestInfo,
   note: string,
+  answers?: StructuredInputResponse['answers'],
 ): Array<Record<string, unknown>> {
   const elements: Array<Record<string, unknown>> = [
     {
@@ -355,11 +356,23 @@ function buildResolvedStructuredInputElements(
     },
   ];
   for (const question of request.questions) {
+    const submitted = answers?.[question.id]?.answers
+      ?.map((answer) => answer.trim())
+      .filter(Boolean) || [];
     elements.push({
       tag: 'div',
       text: {
         tag: 'lark_md',
         content: `**${question.header || question.id}**\n${question.question}`,
+      },
+    });
+    elements.push({
+      tag: 'div',
+      text: {
+        tag: 'plain_text',
+        content: submitted.length > 0
+          ? `已提交：${submitted.join(' / ')}`
+          : '已提交：未记录答案',
       },
     });
   }
@@ -368,12 +381,13 @@ function buildResolvedStructuredInputElements(
 
 function buildStructuredInputCard(
   request: StructuredInputRequestInfo,
-  options?: { resolved?: boolean; note?: string },
+  options?: { resolved?: boolean; note?: string; answers?: StructuredInputResponse['answers'] },
 ): Record<string, unknown> {
   const elements = options?.resolved
     ? buildResolvedStructuredInputElements(
         request,
         options.note || '该问答已完成，Codex 正在继续执行。',
+        options.answers,
       )
     : buildStructuredInputQuestionElements(request);
 
@@ -786,6 +800,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         }, {
           resolved: true,
           note: '该问答已完成，Codex 正在继续执行。',
+          answers: request.draftAnswers,
         }),
       );
     } catch (error) {
@@ -1431,6 +1446,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!hasAnswers) {
       return { toast: { type: 'warning', content: '请至少填写一个答案' } };
     }
+
+    store.updateStructuredInputRequest(requestId, { draftAnswers: answers.answers });
 
     if (!store.markStructuredInputRequestResolved(requestId)) {
       return { toast: { type: 'warning', content: '问答已经提交过了' } };

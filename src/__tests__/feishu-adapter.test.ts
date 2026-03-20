@@ -731,11 +731,13 @@ describe('FeishuAdapter', () => {
 
     const adapter = new FeishuAdapter() as any;
     let patchCalls = 0;
+    let patchedCard: Record<string, unknown> | null = null;
     adapter.restClient = {
       im: {
         message: {
-          patch: async () => {
+          patch: async (payload: { data: { content: string } }) => {
             patchCalls += 1;
+            patchedCard = JSON.parse(payload.data.content) as Record<string, unknown>;
             return { code: 0, data: {} };
           },
         },
@@ -768,6 +770,13 @@ describe('FeishuAdapter', () => {
         },
       },
     });
+    assert.ok(patchedCard);
+    const resolvedCard = patchedCard as { body?: { elements?: Array<Record<string, unknown>> } };
+    const bodyElements = resolvedCard.body?.elements || [];
+    assert.equal(bodyElements[0]?.tag, 'div');
+    assert.equal(bodyElements[1]?.tag, 'div');
+    assert.equal(bodyElements[2]?.tag, 'div');
+    assert.equal((bodyElements[2]?.text as { content?: string } | undefined)?.content, '已提交：极简');
   });
 
   it('skips empty preview updates instead of sending invalid empty CardKit content', async () => {
