@@ -11,6 +11,10 @@ RESTART_SETTLE_SECONDS="${CTI_RESTART_SETTLE_SECONDS:-12}"
 
 ensure_dirs() { mkdir -p "$CTI_HOME"/{data,logs,runtime,data/messages}; }
 
+load_config_env() {
+  [ -f "$CTI_HOME/config.env" ] && set -a && source "$CTI_HOME/config.env" && set +a
+}
+
 ensure_built() {
   local need_build=0
   if [ ! -f "$SKILL_DIR/dist/daemon.mjs" ]; then
@@ -74,6 +78,114 @@ show_failure_help() {
   echo "  3. Rebuild bundle:   cd \"$SKILL_DIR\" && npm run build"
 }
 
+feishu_ws_endpoint_code() {
+  if [ -z "${CTI_FEISHU_APP_ID:-}" ] || [ -z "${CTI_FEISHU_APP_SECRET:-}" ]; then
+    echo "skip"
+    return 0
+  fi
+
+  node - <<'NODE'
+const https = require('https');
+
+const base = process.env.CTI_FEISHU_DOMAIN || 'https://open.feishu.cn';
+const url = new URL('/callback/ws/endpoint', base);
+const body = JSON.stringify({
+  AppID: process.env.CTI_FEISHU_APP_ID,
+  AppSecret: process.env.CTI_FEISHU_APP_SECRET,
+});
+
+const req = https.request(
+  url,
+  {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'content-length': Buffer.byteLength(body),
+      locale: 'zh',
+    },
+  },
+  (res) => {
+    let data = '';
+    res.on('data', (chunk) => {
+      data += chunk;
+    });
+    res.on('end', () => {
+      try {
+        const parsed = JSON.parse(data);
+        process.stdout.write(String(parsed.code ?? 'unknown'));
+      } catch {
+        process.stdout.write('parse_error');
+      }
+    });
+  },
+);
+
+req.on('error', () => {
+  process.stdout.write('request_error');
+});
+
+req.write(body);
+req.end();
+NODE
+}
+
+wait_for_feishu_ws_slot() {
+  local timeout="${CTI_FEISHU_WS_SLOT_TIMEOUT_SECONDS:-90}"
+  local interval="${CTI_FEISHU_WS_SLOT_POLL_SECONDS:-3}"
+  local start_ts
+  local code
+  start_ts=$(date +%s)
+
+  while true; do
+    code=$(feishu_ws_endpoint_code)
+    case "$code" in
+      0|skip)
+        return 0
+        ;;
+      1000040350)
+        if [ $(( $(date +%s) - start_ts )) -ge "$timeout" ]; then
+          echo "Feishu WS slot is still occupied after ${timeout}s (code: ${code})."
+          echo "Another bridge instance or a stale long connection is still using this Feishu app."
+          echo "Wait a bit longer, or stop the other instance before retrying."
+          return 1
+        fi
+        echo "Feishu WS slot is still occupied (code: ${code}). Waiting ${interval}s..."
+        sleep "$interval"
+        ;;
+      *)
+        echo "Warning: unable to verify Feishu WS slot (code: ${code}). Continuing start."
+        return 0
+        ;;
+    esac
+  done
+}
+
+current_run_id() {
+  [ -f "$STATUS_FILE" ] && grep -o '"runId"[[:space:]]*:[[:space:]]*"[^"]*"' "$STATUS_FILE" 2>/dev/null | head -1 | sed 's/.*: *"//;s/"$//'
+}
+
+current_run_log_slice() {
+  local run_id="$1"
+  [ -n "$run_id" ] || return 1
+  [ -f "$LOG_FILE" ] || return 1
+  awk "/Starting bridge \\(run_id: ${run_id//\//\\/}\\)/,0" "$LOG_FILE"
+}
+
+current_run_ws_health() {
+  local run_id="$1"
+  local slice
+  slice=$(current_run_log_slice "$run_id" 2>/dev/null || true)
+  [ -n "$slice" ] || { echo "unknown"; return 0; }
+
+  if printf '%s\n' "$slice" | rg -q '1000040350|connect failed|unable to connect to the server after trying|PingInterval'; then
+    echo "error"
+  elif printf '%s\n' "$slice" | rg -q '\[ws\].*ws client ready'; then
+    echo "ready"
+  else
+    echo "starting"
+  fi
+}
+
 wait_until_stopped() {
   for _ in $(seq 1 10); do
     if ! supervisor_is_running && ! supervisor_is_managed; then
@@ -120,7 +232,10 @@ case "${1:-help}" in
 
     # Source config.env BEFORE clean_env so that CTI_ANTHROPIC_PASSTHROUGH
     # and other CTI_* flags are available when clean_env checks them.
-    [ -f "$CTI_HOME/config.env" ] && set -a && source "$CTI_HOME/config.env" && set +a
+    load_config_env
+    if ! wait_for_feishu_ws_slot; then
+      exit 1
+    fi
 
     clean_env
     echo "Starting bridge..."
@@ -210,6 +325,22 @@ case "${1:-help}" in
         echo "Bridge status: process alive but status.json not reporting running"
       fi
       cat "$STATUS_FILE" 2>/dev/null
+      echo
+      RUN_ID=$(current_run_id)
+      case "$(current_run_ws_health "$RUN_ID")" in
+        ready)
+          echo "Feishu WS health: ready"
+          ;;
+        error)
+          echo "Feishu WS health: error detected in current run logs"
+          ;;
+        starting)
+          echo "Feishu WS health: waiting for readiness signal"
+          ;;
+        *)
+          echo "Feishu WS health: unknown"
+          ;;
+      esac
     else
       echo "Bridge is not running"
       [ -f "$PID_FILE" ] && rm -f "$PID_FILE"
