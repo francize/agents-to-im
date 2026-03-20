@@ -454,8 +454,88 @@ describe('bridge-manager plan workflow', () => {
       timestamp: Date.now(),
     });
 
-    await waitFor(() => adapter.sent.length >= 1);
-    assert.match(adapter.sent[0].text, /当前运行时请求补充信息/);
+    await waitFor(() => adapter.sent.length >= 2);
+    assert.match(adapter.sent[0].text || '', /继续前还需要确认 文件位置/);
+    assert.match(adapter.sent[1].text || '', /当前运行时请求补充信息/);
+  });
+
+  it('sends a short process preface before a structured input card when no assistant output was visible yet', async () => {
+    const store = new JsonFileStore(makeSettings());
+    let structuredRequest: { requestId?: string } | null = null;
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'structured_input_request',
+              data: JSON.stringify({
+                requestId: 'req-preface-1',
+                threadId: 'thread-preface-1',
+                turnId: 'turn-preface-1',
+                itemId: 'item-preface-1',
+                questions: [
+                  {
+                    id: 'q1',
+                    header: '文件位置',
+                    question: '这个单文件 HTML 要放在哪里？',
+                    isOther: true,
+                    isSecret: false,
+                    options: [{ label: '根目录', description: '推荐' }],
+                  },
+                  {
+                    id: 'q2',
+                    header: '语言',
+                    question: '自我介绍页面用什么语言？',
+                    isOther: true,
+                    isSecret: false,
+                    options: [{ label: '中文', description: '推荐' }],
+                  },
+                ],
+              }),
+            })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-preface-1' }) })}\n`);
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-structured-preface',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    (adapter as any).sendStructuredInputRequest = async (_address: unknown, request: { requestId?: string }) => {
+      structuredRequest = request;
+      return { ok: true, messageId: 'structured-preface-msg' };
+    };
+
+    await start();
+    adapter.push({
+      messageId: 'msg-structured-preface',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-structured-preface' },
+      text: '继续',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length === 1 && structuredRequest !== null);
+
+    assert.match(adapter.sent[0].text || '', /继续前还需要确认 文件位置、语言/);
+    const deliveredRequest = structuredRequest || { requestId: undefined };
+    assert.equal(deliveredRequest.requestId, 'req-preface-1');
   });
 
   it('keeps one final delivery for replace_preview channels and merges a one-character lead segment', async () => {
@@ -602,5 +682,94 @@ describe('bridge-manager plan workflow', () => {
     assert.ok(!previewUpdates.some((entry) => entry.endsWith(':我')));
     assert.equal(previewEnds.length, 2);
     assert.notEqual(previewEnds[0], previewEnds[1]);
+  });
+
+  it('waits for an in-flight preview before finalizing a segment so the same text is not delivered twice', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'text',
+              data: '需求是做一个仅包含单个 html 文件的简易自我介绍网页；当前还在 Plan Mode，我先检查仓库里的约束文件和现有目录结构。',
+            })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'text_segment',
+              data: '需求是做一个仅包含单个 html 文件的简易自我介绍网页；当前还在 Plan Mode，我先检查仓库里的约束文件和现有目录结构。',
+            })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-preview-race' }) })}\n`);
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-preview-race',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    const previewCreates: string[] = [];
+    const finalizedInPlace: string[] = [];
+    const separateMessages: string[] = [];
+    const activePreviewByChat = new Map<string, string>();
+    let messageSeq = 0;
+
+    (adapter as any).getPreviewCapabilities = () => ({
+      supported: true,
+      privateOnly: false,
+      finalDelivery: 'segment_replace_preview',
+    });
+    (adapter as any).sendPreview = async (address: { chatId: string }, text: string, draftId: number) => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      previewCreates.push(`${draftId}:${text}`);
+      activePreviewByChat.set(address.chatId, text);
+      return 'sent';
+    };
+    (adapter as any).send = async (message: OutboundMessage): Promise<SendResult> => {
+      const activePreview = activePreviewByChat.get(message.address.chatId);
+      if (activePreview) {
+        finalizedInPlace.push(message.text || '');
+        activePreviewByChat.delete(message.address.chatId);
+        messageSeq += 1;
+        return { ok: true, messageId: `preview-final-${messageSeq}` };
+      }
+      separateMessages.push(message.text || '');
+      messageSeq += 1;
+      return { ok: true, messageId: `sent-${messageSeq}` };
+    };
+    (adapter as any).endPreview = (address: { chatId: string }) => {
+      activePreviewByChat.delete(address.chatId);
+    };
+
+    await start();
+    adapter.push({
+      messageId: 'msg-preview-race',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-preview-race', threadId: 'thread-1' },
+      text: '继续',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => previewCreates.length === 1 && finalizedInPlace.length === 1);
+
+    assert.deepEqual(separateMessages, []);
+    assert.deepEqual(finalizedInPlace, [
+      '需求是做一个仅包含单个 html 文件的简易自我介绍网页；当前还在 Plan Mode，我先检查仓库里的约束文件和现有目录结构。',
+    ]);
+    assert.equal(previewCreates.length, 1);
   });
 });

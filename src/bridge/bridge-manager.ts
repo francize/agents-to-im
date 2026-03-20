@@ -92,6 +92,17 @@ function resolveCodexCollaborationMode(
   return undefined;
 }
 
+function buildStructuredInputPreface(request: StructuredInputRequestInfo): string {
+  const headers = request.questions
+    .map((question) => question.header.trim())
+    .filter(Boolean)
+    .slice(0, 3);
+  if (headers.length > 0) {
+    return `我先梳理了这个请求，继续前还需要确认 ${headers.join('、')}。你补充后我再继续。`;
+  }
+  return '我先梳理了这个请求，继续前还需要你补充一些关键信息。你回答下面问题后我再继续。';
+}
+
 /**
  * Check if a message looks like a numeric permission shortcut (1/2/3) for
  * feishu/qq channels WITH at least one pending permission in that chat.
@@ -110,7 +121,7 @@ function isNumericPermissionShortcut(channelType: string, rawText: string, chatI
   return pending.length > 0; // any pending → route to inline path
 }
 
-/** Fire-and-forget: send a preview draft. Only degrades on permanent failure. */
+/** Queue a preview draft update. Only degrades on permanent failure. */
 function flushPreview(
   adapter: BaseChannelAdapter,
   state: StreamingPreviewState,
@@ -125,13 +136,36 @@ function flushPreview(
 
   state.lastSentText = text;
   state.lastSentAt = Date.now();
-
-  adapter.sendPreview(state.address, text, state.draftId).then(result => {
-    if (result === 'degrade') state.degraded = true;
-    // 'skip' — transient failure, next flush will retry naturally
-  }).catch(() => {
-    // Network error — transient, don't degrade
+  const draftId = state.draftId;
+  const send = async (): Promise<void> => {
+    try {
+      const result = await adapter.sendPreview!(state.address, text, draftId);
+      if (state.draftId !== draftId) return;
+      if (result === 'degrade') state.degraded = true;
+      // 'skip' — transient failure, next flush will retry naturally
+    } catch {
+      // Network error — transient, don't degrade
+    }
+  };
+  const previous = state.inFlightSend;
+  const next = (previous
+    ? previous.catch(() => undefined).then(send)
+    : send()
+  ).finally(() => {
+    if (state.inFlightSend === next) {
+      state.inFlightSend = null;
+    }
   });
+  state.inFlightSend = next;
+}
+
+async function settlePreview(state: StreamingPreviewState | null): Promise<void> {
+  if (!state?.inFlightSend) return;
+  try {
+    await state.inFlightSend;
+  } catch {
+    // best effort
+  }
 }
 
 function resetPreviewState(state: StreamingPreviewState): void {
@@ -143,6 +177,7 @@ function resetPreviewState(state: StreamingPreviewState): void {
   state.lastSentText = '';
   state.lastSentAt = 0;
   state.pendingText = '';
+  state.inFlightSend = null;
 }
 
 // ── Channel-aware rendering dispatch ──────────────────────────
@@ -637,6 +672,7 @@ async function handleMessage(
       degraded: false,
       throttleTimer: null,
       pendingText: '',
+      inFlightSend: null,
     };
   }
 
@@ -691,6 +727,7 @@ async function handleMessage(
   let previewClosed = false;
   let streamedSegmentCount = 0;
   let streamedSegmentDelivery: SendResult | null = null;
+  let hasVisibleAssistantOutput = false;
 
   const onResponseSegment = (previewState && (
     previewFinalDelivery === 'separate_message' || previewFinalizesPerSegment
@@ -702,6 +739,7 @@ async function handleMessage(
       clearTimeout(ps.throttleTimer);
       ps.throttleTimer = null;
     }
+    await settlePreview(ps);
     const delivery = await deliverResponse(
       adapter,
       msg.address,
@@ -712,6 +750,7 @@ async function handleMessage(
     if (delivery.ok) {
       streamedSegmentCount += 1;
       streamedSegmentDelivery = delivery;
+      hasVisibleAssistantOutput = true;
     }
     adapter.endPreview?.(msg.address, ps.draftId);
     resetPreviewState(ps);
@@ -740,6 +779,22 @@ async function handleMessage(
       permissionModeOverride: planWorkflowMeta?.permissionMode,
       collaborationModeOverride: resolveCodexCollaborationMode(binding, planWorkflowMeta),
     }, async (request: StructuredInputRequestInfo) => {
+      const hasPreviewOutput = !!(
+        previewState &&
+        (previewState.lastSentText.trim() || previewState.pendingText.trim() || previewState.lastSentAt > 0)
+      );
+      if (!hasVisibleAssistantOutput && !hasPreviewOutput) {
+        const preface = await deliverResponse(
+          adapter,
+          msg.address,
+          buildStructuredInputPreface(request),
+          binding.codepilotSessionId,
+          msg.messageId,
+        );
+        if (preface.ok) {
+          hasVisibleAssistantOutput = true;
+        }
+      }
       if (adapter.sendStructuredInputRequest) {
         try {
           const sent = await adapter.sendStructuredInputRequest(msg.address, request, msg.messageId);
@@ -789,6 +844,7 @@ async function handleMessage(
 
     // Send response text — render via channel-appropriate format
     let responseDelivery: SendResult | null = null;
+    await settlePreview(previewState);
     const remainingSegments = result.responseSegments
       .filter((segment) => segment.trim())
       .slice(streamedSegmentCount);
@@ -805,6 +861,7 @@ async function handleMessage(
         if (responseDelivery.ok) {
           adapter.endPreview?.(msg.address, previewState.draftId);
           previewClosed = true;
+          hasVisibleAssistantOutput = true;
         }
       } else if (result.hasError) {
         const errorResponse: OutboundMessage = {
@@ -861,11 +918,17 @@ async function handleMessage(
           adapter.endPreview?.(msg.address, previewState.draftId);
           previewClosed = true;
         }
+        if (responseDelivery.ok) {
+          hasVisibleAssistantOutput = true;
+        }
       }
       if (!responseDelivery || responseDelivery.ok) {
         for (const segment of restSegments) {
           const nextDelivery = await deliverResponse(adapter, msg.address, segment, binding.codepilotSessionId, msg.messageId);
           responseDelivery = nextDelivery;
+          if (nextDelivery.ok) {
+            hasVisibleAssistantOutput = true;
+          }
           if (!nextDelivery.ok) break;
         }
       }
@@ -877,10 +940,16 @@ async function handleMessage(
         binding.codepilotSessionId,
         msg.messageId,
       );
+      if (responseDelivery.ok) {
+        hasVisibleAssistantOutput = true;
+      }
     } else if (streamedSegmentDelivery) {
       responseDelivery = streamedSegmentDelivery;
     } else if (result.responseText) {
       responseDelivery = await deliverResponse(adapter, msg.address, result.responseText, binding.codepilotSessionId, msg.messageId);
+      if (responseDelivery.ok) {
+        hasVisibleAssistantOutput = true;
+      }
     } else if (result.hasError) {
       const errorResponse: OutboundMessage = {
         address: msg.address,
@@ -1013,6 +1082,7 @@ async function handleMessage(
         clearTimeout(previewState.throttleTimer);
         previewState.throttleTimer = null;
       }
+      await settlePreview(previewState);
       const hasActivePreviewDraft = !!(previewState.lastSentText || previewState.pendingText || previewState.lastSentAt > 0);
       if (!previewClosed && hasActivePreviewDraft) {
         adapter.endPreview?.(msg.address, previewState.draftId);

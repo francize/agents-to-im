@@ -292,13 +292,21 @@ async function consumeStream(
   let planBody = '';
   let bufferedLeadingSegment = '';
 
+  const mergeBufferedLeadingSegment = (text: string): string => {
+    const normalized = text.trim();
+    if (!bufferedLeadingSegment) return normalized;
+    return normalized.startsWith(bufferedLeadingSegment)
+      ? normalized
+      : `${bufferedLeadingSegment}${normalized}`.trim();
+  };
+
   const shouldBufferLeadingSegment = (text: string): boolean => {
     const compact = text.replace(/\s+/g, '');
     return !bufferedLeadingSegment && responseSegments.length === 0 && compact.length > 0 && compact.length <= 2;
   };
 
   const currentPreviewText = (): string => {
-    const merged = `${bufferedLeadingSegment}${currentText}`.trim();
+    const merged = mergeBufferedLeadingSegment(currentText);
     if (!bufferedLeadingSegment && shouldBufferLeadingSegment(currentText)) {
       return '';
     }
@@ -308,7 +316,7 @@ async function consumeStream(
   const appendTextSegment = async (text: string): Promise<void> => {
     const normalized = text.trim();
     if (!normalized) return;
-    const merged = bufferedLeadingSegment ? `${bufferedLeadingSegment}${normalized}`.trim() : normalized;
+    const merged = mergeBufferedLeadingSegment(normalized);
     bufferedLeadingSegment = '';
     contentBlocks.push({ type: 'text', text: merged });
     responseSegments.push(merged);
@@ -335,14 +343,25 @@ async function consumeStream(
       bufferedLeadingSegment = normalized;
       return;
     }
+    // Codex app-server can emit tool events before the corresponding
+    // agentMessage item completes. We may flush `currentText` at the tool
+    // boundary and later receive a `text_segment` completion for the same
+    // exact text. Avoid double-emitting identical consecutive segments.
+    if (typeof preferredText === 'string') {
+      const merged = mergeBufferedLeadingSegment(normalized);
+      if (merged && responseSegments.at(-1) === merged) {
+        bufferedLeadingSegment = '';
+        return;
+      }
+    }
     await appendTextSegment(normalized);
   };
 
-  const flushTextBoundary = async (): Promise<void> => {
+  const flushTextBoundary = async (flushBuffered = false): Promise<void> => {
     if (currentText.trim()) {
       await finalizeTextSegment();
     }
-    if (bufferedLeadingSegment) {
+    if (flushBuffered && bufferedLeadingSegment) {
       await flushBufferedLeadingSegment();
     }
   };
@@ -549,7 +568,7 @@ async function consumeStream(
     }
 
     // Flush remaining text
-    await flushTextBoundary();
+    await flushTextBoundary(true);
     const renderedPlan = renderPlanMarkdown(planExplanation, planSteps, planBody);
     if (renderedPlan && responseSegments.at(-1) !== renderedPlan) {
       await appendTextSegment(renderedPlan);
@@ -587,10 +606,10 @@ async function consumeStream(
     };
   } catch (e) {
     // Best-effort save on stream error
-    finalizeTextSegment();
+    await flushTextBoundary(true);
     const renderedPlan = renderPlanMarkdown(planExplanation, planSteps, planBody);
     if (renderedPlan && responseSegments.at(-1) !== renderedPlan) {
-      appendTextSegment(renderedPlan);
+      await appendTextSegment(renderedPlan);
     }
     if (contentBlocks.length > 0) {
       const hasToolBlocks = contentBlocks.some(

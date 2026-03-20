@@ -191,6 +191,7 @@ export interface StreamingPreviewState {
   degraded: boolean;         // set true after API failure → skip further previews
   throttleTimer: ReturnType<typeof setTimeout> | null;
   pendingText: string;       // latest accumulated text (may not yet be sent due to throttle)
+  inFlightSend: Promise<void> | null;
 }
 
 // ── Config ─────────────────────────────────────────────────────

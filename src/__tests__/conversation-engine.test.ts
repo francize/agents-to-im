@@ -148,4 +148,139 @@ describe('conversation-engine', () => {
       '接下来会直接生成文件。',
     ]);
   });
+
+  it('keeps a very short leading segment buffered across tool boundaries until the canonical completion arrives', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(sseEvent('text', '我'));
+            controller.enqueue(sseEvent('tool_use', {
+              id: 'tool-1',
+              name: 'Bash',
+              input: { command: 'pwd', cwd: '/tmp/test-cwd' },
+            }));
+            controller.enqueue(sseEvent('tool_result', {
+              tool_use_id: 'tool-1',
+              content: '/tmp/test-cwd',
+              is_error: false,
+            }));
+            controller.enqueue(sseEvent('text_segment', '我已经确认当前工作区根目录可直接放一个独立 html 文件。'));
+            controller.enqueue(sseEvent('result', { session_id: 'thread-leading-boundary' }));
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-leading-boundary',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    const seenSegments: string[] = [];
+    const result = await processMessage(
+      binding,
+      '继续',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async (segment) => {
+        seenSegments.push(segment);
+      },
+    );
+
+    assert.deepEqual(result.responseSegments, [
+      '我已经确认当前工作区根目录可直接放一个独立 html 文件。',
+    ]);
+    assert.deepEqual(seenSegments, [
+      '我已经确认当前工作区根目录可直接放一个独立 html 文件。',
+    ]);
+  });
+
+  it('dedupes completed text_segment when a tool boundary already flushed the same text', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            const text = '我会先看一下当前目录和仓库内的协作说明，然后直接把目标仓库 clone 到当前目录下。';
+            controller.enqueue(sseEvent('text', text));
+            controller.enqueue(sseEvent('tool_use', {
+              id: 'tool-1',
+              name: 'Bash',
+              input: { command: 'git clone ...', cwd: '/tmp/test-cwd' },
+            }));
+            controller.enqueue(sseEvent('tool_result', {
+              tool_use_id: 'tool-1',
+              content: 'cloning...',
+              is_error: false,
+            }));
+            controller.enqueue(sseEvent('text_segment', text));
+            controller.enqueue(sseEvent('result', { session_id: 'thread-dup-1' }));
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-segments-dedupe',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    const seenSegments: string[] = [];
+    const result = await processMessage(
+      binding,
+      '继续',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async (segment) => {
+        seenSegments.push(segment);
+      },
+    );
+
+    assert.deepEqual(result.responseSegments, [
+      '我会先看一下当前目录和仓库内的协作说明，然后直接把目标仓库 clone 到当前目录下。',
+    ]);
+    assert.deepEqual(seenSegments, [
+      '我会先看一下当前目录和仓库内的协作说明，然后直接把目标仓库 clone 到当前目录下。',
+    ]);
+  });
 });
