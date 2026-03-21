@@ -1185,7 +1185,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         inbound.address,
         runtime === 'codex'
           ? existing.status === 'awaiting_confirmation'
-            ? '当前群已有待确认的原生 PLAN 结果。请先点击上一张计划卡片中的“执行 / 继续 / 取消”，或使用 `/mode ...` / `/reset` 覆盖。'
+            ? '当前群已有待确认的原生 PLAN 结果。请点击上一张计划卡片中的“是，实施此计划”，或直接在原线程回复告诉 Codex 如何调整；也可以使用 `/mode ...` / `/reset` 覆盖。'
             : '当前群已有等待中的原生 PLAN 请求。请先在原线程继续输入，或使用 `/mode ...` / `/reset` 覆盖。'
           : '当前群已有进行中的 PLAN 流程。请先点击上一张计划卡片中的“执行 / 继续 / 取消”，或使用 `/mode ...` / `/reset` 覆盖。',
         inbound.messageId,
@@ -1314,6 +1314,21 @@ export class FeishuAdapter extends BaseChannelAdapter {
         await this.sendAsPost(inbound.address, '当前 PLAN 请求正在处理中，请等待本轮计划完成。', inbound.messageId);
         return true;
       case 'awaiting_confirmation':
+        if (runtime === 'codex') {
+          const requestText = inbound.text.trim();
+          store.updatePlanWorkflow(workflow.workflowId, {
+            status: 'planning',
+            requestText,
+            address: inbound.address,
+            routeKey,
+            requestMessageId: inbound.messageId,
+            actionCardMessageId: '',
+            actionCardOpenMessageId: '',
+            resolved: true,
+          });
+          this.enqueue(this.buildNativePlanRequestInbound(inbound.address, inbound.messageId, workflow.workflowId, requestText));
+          return true;
+        }
         await this.sendAsPost(inbound.address, '请先点击上一张计划卡片中的“执行 / 继续 / 取消”。', inbound.messageId);
         return true;
       default:

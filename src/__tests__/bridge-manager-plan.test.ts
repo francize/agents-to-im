@@ -272,12 +272,97 @@ describe('bridge-manager plan workflow', () => {
     assert.match(adapter.sent[0].text, /先确认范围/);
     assert.match(adapter.sent[0].text, /再开始实施/);
     assert.equal(adapter.sent[1].cardHeader?.title, '原生计划已生成');
+    assert.match(adapter.sent[1].text || '', /直接在群聊回复告诉 Codex 如何调整/);
     assert.deepEqual(
       adapter.sent[1].inlineButtons?.[0].map((button) => button.callbackData),
-      ['plan:execute:wf-native', 'plan:continue:wf-native', 'plan:cancel:wf-native'],
+      ['plan:execute:wf-native'],
+    );
+    assert.deepEqual(
+      adapter.sent[1].inlineButtons?.[0].map((button) => button.text),
+      ['是，实施此计划'],
     );
     assert.equal(store.getPlanWorkflow('wf-native')?.status, 'awaiting_confirmation');
     assert.equal(store.getPlanWorkflow('wf-native')?.actionCardMessageId, 'sent-2');
+  });
+
+  it('falls back to a plain text hint when sending the native confirmation card throws', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text', data: '# 原生计划\\n\\n1. 先确认范围\\n2. 再开始实施' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-native-fallback-1' }) })}\n`);
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-native-fallback',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+    store.upsertPlanWorkflow({
+      workflowId: 'wf-native-fallback',
+      bindingId: binding.id,
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-native-fallback',
+      codepilotSessionId: session.id,
+      status: 'planning',
+      previousMode: 'code',
+      requestText: '先给我方案再实施',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-native-fallback', threadId: 'thread-1' },
+      routeKey: 'chat-native-fallback:thread:thread-1',
+      requestMessageId: 'msg-native-fallback-1',
+      resolved: true,
+    });
+
+    const originalSend = adapter.send.bind(adapter);
+    adapter.send = async (message) => {
+      if (message.cardHeader?.title === '原生计划已生成') {
+        throw new Error('502 Bad Gateway');
+      }
+      return originalSend(message);
+    };
+
+    await start();
+    adapter.push({
+      messageId: 'msg-native-fallback-1',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-native-fallback', threadId: 'thread-1' },
+      text: '先给我方案再实施',
+      timestamp: Date.now(),
+      bridgeMeta: {
+        planWorkflow: {
+          kind: 'native_plan_request',
+          workflowId: 'wf-native-fallback',
+          promptText: 'NATIVE PLAN PROMPT',
+          storedUserText: '先给我方案再实施',
+          permissionMode: 'plan',
+        },
+      },
+    });
+
+    await waitFor(() => adapter.sent.length === 2);
+
+    assert.match(adapter.sent[0].text || '', /原生计划/);
+    assert.match(adapter.sent[1].text || '', /确认卡发送失败/);
+    assert.match(adapter.sent[1].text || '', /直接在本线程回复/);
+    assert.equal(store.getPlanWorkflow('wf-native-fallback')?.status, 'awaiting_input');
+    assert.equal(store.getPlanWorkflow('wf-native-fallback')?.resolved, true);
   });
 
   it('sends explicit collaborationMode=default for codex code-mode turns', async () => {

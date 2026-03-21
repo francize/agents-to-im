@@ -878,6 +878,74 @@ describe('FeishuAdapter', () => {
     assert.match(replies[0], /另一条线程/);
   });
 
+  it('treats codex replies after native plan confirmation as plan adjustments instead of blocking on the card', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-plan-adjust',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5-codex',
+    });
+    store.upsertPlanWorkflow({
+      workflowId: 'wf-adjust',
+      bindingId: binding.id,
+      channelType: 'feishu',
+      chatId: 'group-plan-adjust',
+      codepilotSessionId: session.id,
+      status: 'awaiting_confirmation',
+      previousMode: 'code',
+      requestText: '先做个方案',
+      address: { channelType: 'feishu', chatId: 'group-plan-adjust', threadId: 'thread-1' },
+      routeKey: 'group-plan-adjust:thread:thread-1',
+      requestMessageId: 'user-1',
+      planMessageId: 'plan-msg-1',
+      actionCardMessageId: 'card-msg-1',
+      actionCardOpenMessageId: 'open-card-1',
+      resolved: false,
+    });
+
+    const replies: string[] = [];
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        message: {
+          create: async () => ({ code: 0, data: { message_id: 'msg-1' } }),
+          reply: async (payload: { data: { content: string } }) => {
+            replies.push(payload.data.content);
+            return { code: 0, data: { message_id: 'msg-2' } };
+          },
+        },
+      },
+    };
+
+    await adapter.handleGroupMessage(
+      { id: 'ou_123', type: 'open_id' },
+      {
+        messageId: 'user-2',
+        address: { channelType: 'feishu', chatId: 'group-plan-adjust', threadId: 'thread-1' },
+        text: 'html 语言改成英文',
+        timestamp: Date.now(),
+      },
+    );
+
+    assert.equal(replies.length, 0);
+    assert.equal((adapter as any).queue.length, 1);
+    assert.equal((adapter as any).queue[0].bridgeMeta.planWorkflow.kind, 'native_plan_request');
+    assert.equal((adapter as any).queue[0].bridgeMeta.planWorkflow.collaborationMode, 'plan');
+    assert.equal((adapter as any).queue[0].text, 'html 语言改成英文');
+    assert.equal(store.getPlanWorkflow('wf-adjust')?.status, 'planning');
+    assert.equal(store.getPlanWorkflow('wf-adjust')?.requestText, 'html 语言改成英文');
+    assert.equal(store.getPlanWorkflow('wf-adjust')?.resolved, true);
+    assert.equal(store.getPlanWorkflow('wf-adjust')?.actionCardMessageId, '');
+  });
+
   it('executes confirmed plan cards by switching back to code and queueing a synthetic execution request', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});

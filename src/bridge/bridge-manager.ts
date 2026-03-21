@@ -8,7 +8,7 @@
  */
 
 import type { StructuredInputRequestInfo } from './host.js';
-import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewState } from './types.js';
+import type { BridgeStatus, InboundMessage, OutboundMessage, SendResult, StreamingPreviewState } from './types.js';
 import { createAdapter, getRegisteredTypes } from './channel-adapter.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
 import * as router from './channel-router.js';
@@ -182,7 +182,7 @@ function resetPreviewState(state: StreamingPreviewState): void {
 
 // ── Channel-aware rendering dispatch ──────────────────────────
 
-import type { ChannelAddress, SendResult } from './types.js';
+import type { ChannelAddress } from './types.js';
 
 /**
  * Render response text and deliver via the appropriate channel format.
@@ -964,24 +964,31 @@ async function handleMessage(
       workflowId: string,
       title: string,
       text: string,
+      buttons: NonNullable<OutboundMessage['inlineButtons']> = [[
+        { text: '执行', callbackData: `plan:execute:${workflowId}` },
+        { text: '继续', callbackData: `plan:continue:${workflowId}` },
+        { text: '取消', callbackData: `plan:cancel:${workflowId}` },
+      ]],
     ): Promise<boolean> => {
       const workflow = store.getPlanWorkflow(workflowId);
       if (!workflow) return false;
-      const actionCard = await deliver(adapter, {
-        address: msg.address,
-        text,
-        parseMode: 'Markdown',
-        inlineButtons: [[
-          { text: '执行', callbackData: `plan:execute:${workflow.workflowId}` },
-          { text: '继续', callbackData: `plan:continue:${workflow.workflowId}` },
-          { text: '取消', callbackData: `plan:cancel:${workflow.workflowId}` },
-        ]],
-        replyToMessageId: responseDelivery?.messageId || msg.messageId,
-        cardHeader: {
-          title,
-          template: 'blue',
-        },
-      }, { sessionId: binding.codepilotSessionId });
+      let actionCard: SendResult;
+      try {
+        actionCard = await deliver(adapter, {
+          address: msg.address,
+          text,
+          parseMode: 'Markdown',
+          inlineButtons: buttons,
+          replyToMessageId: responseDelivery?.messageId || msg.messageId,
+          cardHeader: {
+            title,
+            template: 'blue',
+          },
+        }, { sessionId: binding.codepilotSessionId });
+      } catch (error) {
+        console.warn('[bridge-manager] Failed to send plan confirmation card:', error);
+        return false;
+      }
       if (!actionCard.ok) return false;
       store.updatePlanWorkflow(workflow.workflowId, {
         status: 'awaiting_confirmation',
@@ -1040,7 +1047,10 @@ async function handleMessage(
             const sent = await sendPlanConfirmationCard(
               workflow.workflowId,
               '原生计划已生成',
-              'Codex 已输出方案。确认后开始实施，或继续保持 PLAN 流程。',
+              'Codex 已输出方案。若需要调整，请直接在群聊回复告诉 Codex 如何调整；若确认无误，点击“是，实施此计划”开始实施。',
+              [[
+                { text: '是，实施此计划', callbackData: `plan:execute:${workflow.workflowId}` },
+              ]],
             );
             if (!sent) {
               store.updatePlanWorkflow(workflow.workflowId, {
@@ -1049,7 +1059,7 @@ async function handleMessage(
               });
               await deliver(adapter, {
                 address: msg.address,
-                text: '原生计划已生成，但确认卡发送失败。请重新执行 `/plan`，或直接切换 `/mode code` 继续。',
+                text: '原生计划已生成，但确认卡发送失败。若要继续调整，请直接在本线程回复；若要开始实施，请切换 `/mode code` 后继续，或重新执行 `/plan`。',
                 parseMode: 'Markdown',
                 replyToMessageId: responseDelivery?.messageId || msg.messageId,
               }, { sessionId: binding.codepilotSessionId });
