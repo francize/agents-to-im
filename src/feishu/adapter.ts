@@ -29,6 +29,7 @@ import { JsonFileStore } from '../store.js';
 
 const STREAM_ELEMENT_ID = 'stream_content';
 const TYPING_EMOJI = 'Typing';
+const STREAM_PLACEHOLDER_TEXT = '🤖 努力回答中...';
 const PLAN_SUFFIX = ' [PLAN]';
 const STRUCTURED_INPUT_PREFIX = 'structured-input';
 export const FEISHU_REQUIRED_APP_SCOPES = [
@@ -156,10 +157,10 @@ function buildStreamingCardSkeleton(): Record<string, unknown> {
       update_multi: true,
       streaming_mode: true,
       summary: {
-        content: 'Thinking...',
+        content: STREAM_PLACEHOLDER_TEXT,
         i18n_content: {
-          zh_cn: '思考中...',
-          en_us: 'Thinking...',
+          zh_cn: STREAM_PLACEHOLDER_TEXT,
+          en_us: 'Working on it...',
         },
       },
     },
@@ -167,7 +168,7 @@ function buildStreamingCardSkeleton(): Record<string, unknown> {
       elements: [
         {
           tag: 'markdown',
-          content: '',
+          content: STREAM_PLACEHOLDER_TEXT,
           element_id: STREAM_ELEMENT_ID,
         },
       ],
@@ -747,6 +748,20 @@ export class FeishuAdapter extends BaseChannelAdapter {
       }
       return 'degrade';
     }
+  }
+
+  async primePreview(address: ChannelAddress, draftId: number): Promise<'sent' | 'skip' | 'degrade'> {
+    if (!this.restClient) return 'skip';
+    const routeKey = routeKeyForAddress(address);
+    const key = previewKey(routeKey, draftId);
+    if (this.previewArtifacts.has(key)) {
+      return 'sent';
+    }
+    const createdArtifact = await this.createPreviewArtifact(address, draftId, '');
+    if (!createdArtifact) return 'degrade';
+    this.previewArtifacts.set(key, createdArtifact);
+    this.activePreviewByRoute.set(routeKey, key);
+    return 'sent';
   }
 
   endPreview(address: ChannelAddress, draftId: number): void {
@@ -1679,7 +1694,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
     } catch (error) {
       console.warn('[feishu-adapter] CardKit preview unavailable, falling back to message patch:', error);
       try {
-        const sendResult = await this.sendInteractiveCard(address, buildSimpleCard(text), replyToMessageId);
+        const fallbackText = text.trim() ? text : STREAM_PLACEHOLDER_TEXT;
+        const sendResult = await this.sendInteractiveCard(address, buildSimpleCard(fallbackText), replyToMessageId);
         return {
           key: previewKey(routeKey, draftId),
           routeKey,

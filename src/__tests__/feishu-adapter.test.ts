@@ -276,6 +276,73 @@ describe('FeishuAdapter', () => {
     assert.equal(JSON.parse(finalSettings).streaming_mode, false);
   });
 
+  it('primes an empty CardKit preview and reuses it for the next streamed update', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-cardkit-prime',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+
+    let createCalls = 0;
+    let replyCalls = 0;
+    let streamCalls = 0;
+    let createdCardPayload = '';
+    const adapter = new FeishuAdapter() as any;
+    adapter.lastIncomingMessageId.set('group-cardkit-prime:main', 'incoming-1');
+    adapter.restClient = {
+      cardkit: {
+        v1: {
+          card: {
+            create: async (payload: { data: { data: string } }) => {
+              createCalls += 1;
+              createdCardPayload = payload.data.data;
+              return { code: 0, data: { card_id: 'card-prime-1' } };
+            },
+          },
+          cardElement: {
+            content: async () => {
+              streamCalls += 1;
+              return { code: 0, data: {} };
+            },
+          },
+        },
+      },
+      im: {
+        message: {
+          reply: async () => {
+            replyCalls += 1;
+            return { code: 0, data: { message_id: 'preview-prime-msg' } };
+          },
+          create: async () => {
+            throw new Error('unexpected create');
+          },
+          patch: async () => {
+            throw new Error('unexpected patch');
+          },
+        },
+      },
+    };
+
+    const primeResult = await adapter.primePreview({ channelType: 'feishu', chatId: 'group-cardkit-prime' }, 77);
+    const previewResult = await adapter.sendPreview({ channelType: 'feishu', chatId: 'group-cardkit-prime' }, 'partial', 77);
+
+    assert.equal(primeResult, 'sent');
+    assert.equal(previewResult, 'sent');
+    assert.equal(createCalls, 1);
+    assert.equal(replyCalls, 1);
+    assert.equal(streamCalls, 1);
+    assert.match(createdCardPayload, /🤖 努力回答中\.\.\./);
+  });
+
   it('sends permission cards as schema 2.0 without deprecated action tags', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});

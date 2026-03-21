@@ -186,6 +186,8 @@ export interface PreviewCapabilities {
 export interface StreamingPreviewState {
   draftId: number;           // non-zero 31-bit random integer, reused within one answer cycle
   address: ChannelAddress;
+  placeholderPrimed: boolean;// preview artifact exists, but no real text has been streamed into it yet
+  primeTimer: ReturnType<typeof setTimeout> | null;
   lastSentText: string;      // last text actually sent as draft
   lastSentAt: number;        // timestamp (ms) of last sent draft
   degraded: boolean;         // set true after API failure → skip further previews

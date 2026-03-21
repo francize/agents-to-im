@@ -99,6 +99,13 @@ export abstract class BaseChannelAdapter {
   sendPreview?(_address: ChannelAddress, _text: string, _draftId: number): Promise<'sent' | 'skip' | 'degrade'>;
 
   /**
+   * Create an empty preview artifact ahead of the next streamed segment.
+   * Useful for channels that can show a "still responding" card before new
+   * text arrives. The artifact will later be updated via sendPreview().
+   */
+  primePreview?(_address: ChannelAddress, _draftId: number): Promise<'sent' | 'skip' | 'degrade'>;
+
+  /**
    * Signal the end of a preview cycle. The final message is sent via the
    * normal delivery path, so this is typically a no-op.
    */

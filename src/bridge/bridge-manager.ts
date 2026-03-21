@@ -40,12 +40,13 @@ interface StreamConfig {
   intervalMs: number;
   minDeltaChars: number;
   maxChars: number;
+  primeDelayMs: number;
 }
 
 /** Default stream config per channel type. */
 const STREAM_DEFAULTS: Record<string, StreamConfig> = {
-  telegram: { intervalMs: 700, minDeltaChars: 20, maxChars: 3900 },
-  discord: { intervalMs: 1500, minDeltaChars: 40, maxChars: 1900 },
+  telegram: { intervalMs: 700, minDeltaChars: 20, maxChars: 3900, primeDelayMs: 900 },
+  discord: { intervalMs: 1500, minDeltaChars: 40, maxChars: 1900, primeDelayMs: 900 },
 };
 
 function getStreamConfig(channelType = 'telegram'): StreamConfig {
@@ -55,7 +56,15 @@ function getStreamConfig(channelType = 'telegram'): StreamConfig {
   const intervalMs = parseInt(store.getSetting(`${prefix}interval_ms`) || '', 10) || defaults.intervalMs;
   const minDeltaChars = parseInt(store.getSetting(`${prefix}min_delta_chars`) || '', 10) || defaults.minDeltaChars;
   const maxChars = parseInt(store.getSetting(`${prefix}max_chars`) || '', 10) || defaults.maxChars;
-  return { intervalMs, minDeltaChars, maxChars };
+  const primeDelayMs = parseInt(store.getSetting(`${prefix}prime_delay_ms`) || '', 10) || defaults.primeDelayMs;
+  return { intervalMs, minDeltaChars, maxChars, primeDelayMs };
+}
+
+function clearPrimeTimer(state: StreamingPreviewState): void {
+  if (state.primeTimer) {
+    clearTimeout(state.primeTimer);
+    state.primeTimer = null;
+  }
 }
 
 function getPlanWorkflowMeta(msg: InboundMessage): NonNullable<InboundMessage['bridgeMeta']>['planWorkflow'] | null {
@@ -134,6 +143,7 @@ function flushPreview(
     : state.pendingText;
   if (!text.trim()) return;
 
+  state.placeholderPrimed = false;
   state.lastSentText = text;
   state.lastSentAt = Date.now();
   const draftId = state.draftId;
@@ -159,6 +169,69 @@ function flushPreview(
   state.inFlightSend = next;
 }
 
+function primePreview(
+  adapter: BaseChannelAdapter,
+  state: StreamingPreviewState,
+): void {
+  if (state.degraded || state.placeholderPrimed || !adapter.primePreview) return;
+
+  const draftId = state.draftId;
+  const send = async (): Promise<void> => {
+    try {
+      const result = await adapter.primePreview!(state.address, draftId);
+      if (state.draftId !== draftId) return;
+      if (result === 'sent') state.placeholderPrimed = true;
+      if (result === 'degrade') state.degraded = true;
+    } catch {
+      // Network error — transient, don't degrade
+    }
+  };
+  const previous = state.inFlightSend;
+  const next = (previous
+    ? previous.catch(() => undefined).then(send)
+    : send()
+  ).finally(() => {
+    if (state.inFlightSend === next) {
+      state.inFlightSend = null;
+    }
+  });
+  state.inFlightSend = next;
+}
+
+function schedulePrimePreview(
+  adapter: BaseChannelAdapter,
+  state: StreamingPreviewState,
+  delayMs: number,
+): void {
+  clearPrimeTimer(state);
+  if (
+    state.degraded
+    || state.placeholderPrimed
+    || state.lastSentText.trim()
+    || state.pendingText.trim()
+    || state.lastSentAt > 0
+    || !adapter.primePreview
+  ) {
+    return;
+  }
+
+  const draftId = state.draftId;
+  state.primeTimer = setTimeout(() => {
+    state.primeTimer = null;
+    if (
+      state.degraded
+      || state.draftId !== draftId
+      || state.placeholderPrimed
+      || state.lastSentText.trim()
+      || state.pendingText.trim()
+      || state.lastSentAt > 0
+    ) {
+      return;
+    }
+    primePreview(adapter, state);
+  }, delayMs);
+}
+
 async function settlePreview(state: StreamingPreviewState | null): Promise<void> {
   if (!state?.inFlightSend) return;
   try {
@@ -173,7 +246,9 @@ function resetPreviewState(state: StreamingPreviewState): void {
     clearTimeout(state.throttleTimer);
     state.throttleTimer = null;
   }
+  clearPrimeTimer(state);
   state.draftId = generateDraftId();
+  state.placeholderPrimed = false;
   state.lastSentText = '';
   state.lastSentAt = 0;
   state.pendingText = '';
@@ -667,6 +742,8 @@ async function handleMessage(
     previewState = {
       draftId: generateDraftId(),
       address: msg.address,
+      placeholderPrimed: false,
+      primeTimer: null,
       lastSentText: '',
       lastSentAt: 0,
       degraded: false,
@@ -685,6 +762,7 @@ async function handleMessage(
     const ps = previewState!;
     const cfg = streamCfg!;
     if (ps.degraded) return;
+    clearPrimeTimer(ps);
 
     // Truncate to maxChars + ellipsis
     ps.pendingText = fullText.length > cfg.maxChars
@@ -735,6 +813,7 @@ async function handleMessage(
     const normalized = segmentText.trim();
     if (!normalized) return;
     const ps = previewState!;
+    clearPrimeTimer(ps);
     if (ps.throttleTimer) {
       clearTimeout(ps.throttleTimer);
       ps.throttleTimer = null;
@@ -754,6 +833,9 @@ async function handleMessage(
     }
     adapter.endPreview?.(msg.address, ps.draftId);
     resetPreviewState(ps);
+    if (delivery.ok) {
+      schedulePrimePreview(adapter, ps, streamCfg!.primeDelayMs);
+    }
   } : undefined;
 
   try {
@@ -779,9 +861,17 @@ async function handleMessage(
       permissionModeOverride: planWorkflowMeta?.permissionMode,
       collaborationModeOverride: resolveCodexCollaborationMode(binding, planWorkflowMeta),
     }, async (request: StructuredInputRequestInfo) => {
+      if (previewState) {
+        clearPrimeTimer(previewState);
+      }
       const hasPreviewOutput = !!(
         previewState &&
-        (previewState.lastSentText.trim() || previewState.pendingText.trim() || previewState.lastSentAt > 0)
+        (
+          previewState.placeholderPrimed
+          || previewState.lastSentText.trim()
+          || previewState.pendingText.trim()
+          || previewState.lastSentAt > 0
+        )
       );
       if (!hasVisibleAssistantOutput && !hasPreviewOutput) {
         const preface = await deliverResponse(
@@ -1092,8 +1182,14 @@ async function handleMessage(
         clearTimeout(previewState.throttleTimer);
         previewState.throttleTimer = null;
       }
+      clearPrimeTimer(previewState);
       await settlePreview(previewState);
-      const hasActivePreviewDraft = !!(previewState.lastSentText || previewState.pendingText || previewState.lastSentAt > 0);
+      const hasActivePreviewDraft = !!(
+        previewState.placeholderPrimed
+        || previewState.lastSentText
+        || previewState.pendingText
+        || previewState.lastSentAt > 0
+      );
       if (!previewClosed && hasActivePreviewDraft) {
         adapter.endPreview?.(msg.address, previewState.draftId);
       }
