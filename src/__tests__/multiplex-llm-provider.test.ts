@@ -92,4 +92,39 @@ describe('MultiplexLLMProvider', () => {
     const title = await provider.generateTitle(session.id, '帮我改一下 provider', '我会先做 runtime 路由');
     assert.equal(title, 'Refactor Plan');
   });
+
+  it('exposes runtime capability matrix without changing streamChat interface', () => {
+    const store = new JsonFileStore(makeSettings());
+    const claudeSession = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+    });
+    const codexSession = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+    });
+    const provider = new MultiplexLLMProvider(store, new PendingPermissions(), {
+      defaultWorkDir: '/tmp',
+      defaultMode: 'code',
+    });
+
+    assert.deepEqual(provider.getSessionCapabilities(claudeSession.id), {
+      nativePlanProtocol: false,
+      askUserQuestion: true,
+      structuredInput: true,
+      approvalKinds: 'permission_callback',
+      activityGranularity: 'basic',
+      resumeKinds: ['sdkSessionId'],
+      elicitation: true,
+    });
+    assert.deepEqual(provider.getSessionCapabilities(codexSession.id), {
+      nativePlanProtocol: true,
+      askUserQuestion: false,
+      structuredInput: true,
+      approvalKinds: 'rich',
+      activityGranularity: 'rich',
+      resumeKinds: ['sdkSessionId', 'runtimeThreadId'],
+      elicitation: false,
+    });
+  });
 });

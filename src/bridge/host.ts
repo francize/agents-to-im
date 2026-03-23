@@ -7,6 +7,7 @@
  */
 
 import type { SessionExt } from '../runtime-types.js';
+import type { ClaudePlanAllowedPrompt } from '../claude-plan-exit.js';
 import type { ChannelAddress, ChannelBinding, ChannelType } from './types.js';
 
 // ── Bridge-local types (replacing @/types imports) ────────────
@@ -186,6 +187,10 @@ export interface PlanWorkflowInput {
   planMessageId?: string;
   actionCardMessageId?: string;
   actionCardOpenMessageId?: string;
+  approvalRequestId?: string;
+  planText?: string;
+  planFilePath?: string;
+  allowedPrompts?: ClaudePlanAllowedPrompt[] | null;
   resolved?: boolean;
 }
 
@@ -199,6 +204,7 @@ export interface PlanWorkflowRecord extends Omit<PlanWorkflowInput, 'workflowId'
 export interface StructuredInputOption {
   label: string;
   description: string;
+  preview?: string;
 }
 
 export interface StructuredInputQuestion {
@@ -207,6 +213,8 @@ export interface StructuredInputQuestion {
   question: string;
   isOther: boolean;
   isSecret: boolean;
+  multiSelect?: boolean;
+  responseKey?: string;
   options: StructuredInputOption[] | null;
 }
 
@@ -389,6 +397,7 @@ export interface PermissionResolution {
   message?: string;
   updatedPermissions?: unknown[];
   scope?: 'turn' | 'session';
+  interrupt?: boolean;
 }
 
 export interface PermissionGateway {

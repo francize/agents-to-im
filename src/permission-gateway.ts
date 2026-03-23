@@ -2,12 +2,16 @@ export interface PermissionResult {
   behavior: 'allow' | 'deny';
   message?: string;
   scope?: 'turn' | 'session';
+  updatedPermissions?: unknown[];
+  interrupt?: boolean;
 }
 
 export interface PermissionResolution {
   behavior: 'allow' | 'deny';
   message?: string;
   scope?: 'turn' | 'session';
+  updatedPermissions?: unknown[];
+  interrupt?: boolean;
 }
 
 export interface StructuredInputResolution {
@@ -19,7 +23,7 @@ export class PendingPermissions {
     resolve: (r: PermissionResult) => void;
     timer: NodeJS.Timeout;
   }>();
-  private timeoutMs = 5 * 60 * 1000; // 5 minutes
+  private timeoutMs = 15 * 60 * 1000; // 15 minutes
 
   waitFor(toolUseID: string): Promise<PermissionResult> {
     return new Promise((resolve) => {
@@ -36,12 +40,17 @@ export class PendingPermissions {
     if (!entry) return false;
     clearTimeout(entry.timer);
     if (resolution.behavior === 'allow') {
-      entry.resolve({ behavior: 'allow', scope: resolution.scope });
+      entry.resolve({
+        behavior: 'allow',
+        scope: resolution.scope,
+        updatedPermissions: resolution.updatedPermissions,
+      });
     } else {
       entry.resolve({
         behavior: 'deny',
         message: resolution.message || 'Denied by user',
         scope: resolution.scope,
+        interrupt: resolution.interrupt,
       });
     }
     this.pending.delete(permissionRequestId);
@@ -86,7 +95,7 @@ export class PendingApprovals {
     const entry = this.pending.get(requestId);
     if (!entry) return false;
     clearTimeout(entry.timer);
-    entry.resolve(resolution);
+      entry.resolve(resolution);
     this.pending.delete(requestId);
     return true;
   }

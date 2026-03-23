@@ -9,6 +9,37 @@ import { PendingApprovals, type PendingPermissions, PendingStructuredInputs } fr
 import type { RuntimeName } from './runtime-types.js';
 import { JsonFileStore } from './store.js';
 
+export interface ProviderCapabilities {
+  nativePlanProtocol: boolean;
+  askUserQuestion: boolean;
+  structuredInput: boolean;
+  approvalKinds: 'rich' | 'permission_callback';
+  activityGranularity: 'rich' | 'basic';
+  resumeKinds: Array<'sdkSessionId' | 'runtimeThreadId'>;
+  elicitation: boolean;
+}
+
+const RUNTIME_CAPABILITIES: Record<RuntimeName, ProviderCapabilities> = {
+  claude: {
+    nativePlanProtocol: false,
+    askUserQuestion: true,
+    structuredInput: true,
+    approvalKinds: 'permission_callback',
+    activityGranularity: 'basic',
+    resumeKinds: ['sdkSessionId'],
+    elicitation: true,
+  },
+  codex: {
+    nativePlanProtocol: true,
+    askUserQuestion: false,
+    structuredInput: true,
+    approvalKinds: 'rich',
+    activityGranularity: 'rich',
+    resumeKinds: ['sdkSessionId', 'runtimeThreadId'],
+    elicitation: false,
+  },
+};
+
 function parseSSELine(line: string): { type: string; data: string } | null {
   if (!line.startsWith('data: ')) return null;
   try {
@@ -56,6 +87,14 @@ export class MultiplexLLMProvider implements LLMProvider {
     return this.store.getSessionExt(sessionId)?.runtime || this.config.legacyRuntime || 'claude';
   }
 
+  getRuntimeCapabilities(runtime: RuntimeName): ProviderCapabilities {
+    return { ...RUNTIME_CAPABILITIES[runtime] };
+  }
+
+  getSessionCapabilities(sessionId: string): ProviderCapabilities {
+    return this.getRuntimeCapabilities(this.getSessionRuntime(sessionId));
+  }
+
   private async getClaudeProvider(): Promise<SDKLLMProvider> {
     if (this.claudeProvider) return this.claudeProvider;
     const cliPath = this.config.claudeCliExecutable || resolveClaudeCliPath();
@@ -69,7 +108,12 @@ export class MultiplexLLMProvider implements LLMProvider {
       throw new Error(`Claude CLI preflight check failed: ${check.error}`);
     }
     this.claudeCliPath = cliPath;
-    this.claudeProvider = new SDKLLMProvider(this.pendingPerms, cliPath, this.config.autoApprove);
+    this.claudeProvider = new SDKLLMProvider(
+      this.pendingPerms,
+      this.pendingStructuredInputs,
+      cliPath,
+      this.config.autoApprove,
+    );
     return this.claudeProvider;
   }
 

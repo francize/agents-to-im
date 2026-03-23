@@ -204,6 +204,100 @@ describe('bridge-manager plan workflow', () => {
     assert.equal(store.getPlanWorkflow('wf-1')?.actionCardMessageId, 'sent-2');
   });
 
+  it('treats Claude ExitPlanMode as a dedicated plan approval instead of a generic permission card', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'permission_request',
+              data: JSON.stringify({
+                permissionRequestId: 'perm-exit-1',
+                toolName: 'ExitPlanMode',
+                toolInput: {
+                  plan: '# 计划\\n\\n1. 创建 HTML\\n2. 浏览器打开并截图',
+                  allowedPrompts: [{ tool: 'Bash', prompt: '在浏览器中打开 HTML 文件' }],
+                },
+              }),
+            })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-exit-1' }) })}\n`);
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-exit',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+    store.upsertPlanWorkflow({
+      workflowId: 'wf-exit',
+      bindingId: binding.id,
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-exit',
+      codepilotSessionId: session.id,
+      status: 'planning',
+      previousMode: 'code',
+      requestText: '生成单文件页面',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-exit', threadId: 'thread-1' },
+      routeKey: 'chat-exit:thread:thread-1',
+      requestMessageId: 'msg-exit-1',
+      resolved: true,
+    });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-exit-1',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-exit', threadId: 'thread-1' },
+      text: '生成单文件页面',
+      timestamp: Date.now(),
+      bridgeMeta: {
+        planWorkflow: {
+          kind: 'plan_request',
+          workflowId: 'wf-exit',
+          promptText: 'PLAN PROMPT',
+          storedUserText: '生成单文件页面',
+          permissionMode: 'plan',
+        },
+      },
+    });
+
+    await waitFor(() => adapter.sent.length === 1);
+
+    assert.equal(adapter.sent[0].cardHeader?.title, '计划已就绪');
+    assert.deepEqual(
+      adapter.sent[0].inlineButtons?.flat().map((button) => button.callbackData),
+      [
+        'planexit:approve:bypass:wf-exit',
+        'planexit:approve:manual:wf-exit',
+        'planexit:clear:bypass:wf-exit',
+      ],
+    );
+    assert.doesNotMatch(JSON.stringify(adapter.sent[0].rawCard || {}), /继续规划|claude_plan_feedback/i);
+    assert.doesNotMatch(JSON.stringify(adapter.sent[0].rawCard || {}), /"tag":"form"/i);
+    assert.equal(store.getPlanWorkflow('wf-exit')?.status, 'awaiting_confirmation');
+    assert.equal(store.getPlanWorkflow('wf-exit')?.approvalRequestId, 'perm-exit-1');
+    assert.match(store.getPlanWorkflow('wf-exit')?.planText || '', /创建 HTML/);
+    assert.deepEqual(store.getPlanWorkflow('wf-exit')?.allowedPrompts, [
+      { tool: 'Bash', prompt: '在浏览器中打开 HTML 文件' },
+    ]);
+  });
+
   it('turns a native_plan_request synthetic message into a native plan reply plus a confirmation card', async () => {
     const store = new JsonFileStore(makeSettings());
     const llmCalls: Array<Record<string, unknown>> = [];

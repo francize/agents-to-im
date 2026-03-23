@@ -25,6 +25,12 @@ import {
   htmlToFeishuMarkdown,
   preprocessFeishuMarkdown,
 } from '../bridge/markdown/feishu.js';
+import {
+  CLAUDE_PLAN_FOLLOW_UP_REJECT_MESSAGE,
+  buildClaudePlanExecutionPrompt,
+  buildClaudePlanFollowUpPrompt,
+  buildClaudePlanModeUpdates,
+} from '../claude-plan-exit.js';
 
 import type { MultiplexLLMProvider } from '../multiplex-llm-provider.js';
 import type { RuntimeName } from '../runtime-types.js';
@@ -461,7 +467,7 @@ function buildStructuredInputQuestionElements(request: StructuredInputRequestInf
   const elements: Array<Record<string, unknown>> = [
     {
       tag: 'markdown',
-      content: 'Codex 需要你补充一些信息后才能继续。',
+      content: '继续前需要你补充一些信息。',
     },
   ];
 
@@ -471,7 +477,7 @@ function buildStructuredInputQuestionElements(request: StructuredInputRequestInf
       content: `**${question.header || question.id}**\n${question.question}`,
     });
 
-    if (question.options?.length) {
+    if (question.options?.length && !question.multiSelect) {
       elements.push({
         tag: 'select_static',
         name: buildStructuredFieldName(request.requestId, question.id, 'answer'),
@@ -490,22 +496,44 @@ function buildStructuredInputQuestionElements(request: StructuredInputRequestInf
       });
     }
 
-    if (!question.options?.length || question.isOther) {
+    if (question.options?.length && question.multiSelect) {
+      const optionLines = question.options.map((option, index) => {
+        const summary = option.description ? `：${option.description}` : '';
+        return `${index + 1}. ${option.label}${summary}`;
+      });
+      elements.push({
+        tag: 'markdown',
+        content: ['可选项：', ...optionLines].join('\n'),
+      });
+    }
+
+    if (!question.options?.length || question.isOther || question.multiSelect) {
       elements.push({
         tag: 'input',
         name: buildStructuredFieldName(request.requestId, question.id, 'other'),
         width: 'fill',
         placeholder: {
           tag: 'plain_text',
-          content: question.options?.length ? '可补充自定义答案' : '请输入答案',
+          content: question.multiSelect
+            ? '如需多个答案，请用逗号分隔；也可直接填写自定义内容'
+            : question.options?.length
+              ? '可补充自定义答案'
+              : '请输入答案',
         },
       });
     }
 
-    if (question.options?.length && question.isOther) {
+    if (question.options?.length && question.isOther && !question.multiSelect) {
       elements.push({
         tag: 'markdown',
         content: '如果预设选项都不合适，可填写上面的自定义输入框。',
+      });
+    }
+
+    if (question.options?.length && question.multiSelect) {
+      elements.push({
+        tag: 'markdown',
+        content: '如果需要多个预设选项，请在输入框中使用英文逗号分隔；若都不合适，也可以直接填写自定义答案。',
       });
     }
   }
@@ -595,7 +623,7 @@ function buildStructuredInputCard(
   const elements = options?.resolved
     ? buildResolvedStructuredInputElements(
         request,
-        options.note || '该问答已完成，Codex 正在继续执行。',
+        options.note || '该问答已完成，正在继续执行。',
         options.answers,
       )
     : buildStructuredInputQuestionElements(request);
@@ -620,17 +648,54 @@ function buildStructuredInputCard(
 }
 
 function buildStructuredInputFallbackText(request: StructuredInputRequestInfo): string {
-  const lines: string[] = ['Codex 需要你补充一些信息后才能继续。', ''];
+  const lines: string[] = ['继续前需要你补充一些信息。', ''];
   request.questions.forEach((question, index) => {
     lines.push(`${index + 1}. ${question.header || question.id}`);
     lines.push(question.question);
     if (question.options?.length) {
       lines.push(`可选项：${question.options.map((option) => option.label).join(' / ')}`);
+      if (question.multiSelect) {
+        lines.push('如果需要多个选项，请使用逗号分隔输入。');
+      }
     }
     lines.push('');
   });
-  lines.push('当前交互卡发送失败，请转到本地 Codex 继续，或稍后重试。');
+  lines.push('当前交互卡发送失败，请转到本地命令行继续，或稍后重试。');
   return lines.join('\n').trim();
+}
+
+function normalizeStructuredAnswers(
+  question: StructuredInputRequestInfo['questions'][number],
+  selected: string[],
+  other: string[],
+): string[] {
+  const values = [...selected, ...other]
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (values.length === 0) return [];
+  if (!question.multiSelect) {
+    return Array.from(new Set(values));
+  }
+
+  const optionLabels = new Set(
+    (question.options || [])
+      .map((option) => option.label.trim())
+      .filter(Boolean),
+  );
+  const normalized: string[] = [];
+  for (const value of values) {
+    const parts = value.split(',').map((part) => part.trim()).filter(Boolean);
+    if (
+      parts.length > 1
+      && optionLabels.size > 0
+      && parts.every((part) => optionLabels.has(part))
+    ) {
+      normalized.push(...parts);
+      continue;
+    }
+    normalized.push(value);
+  }
+  return Array.from(new Set(normalized));
 }
 
 function extractStructuredAnswers(
@@ -645,7 +710,7 @@ function extractStructuredAnswers(
   for (const question of request.questions) {
     const selected = collectTextFragments(record[buildStructuredFieldName(request.requestId, question.id, 'answer')]);
     const other = collectTextFragments(record[buildStructuredFieldName(request.requestId, question.id, 'other')]);
-    const resolved = [...selected, ...other];
+    const resolved = normalizeStructuredAnswers(question, selected, other);
     if (resolved.length > 0) {
       answers[question.id] = { answers: resolved };
     }
@@ -1001,7 +1066,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (hasSecret) {
       await this.sendAsPost(
         address,
-        '当前问题包含敏感输入，飞书群聊不适合采集。请转到本地 Codex 继续。',
+        '当前问题包含敏感输入，飞书群聊不适合采集。请转到本地命令行继续。',
         replyToMessageId,
       );
       getBridgeContext().permissions.resolvePendingStructuredInput?.(request.requestId, { answers: {} });
@@ -1033,7 +1098,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
           questions: request.questions,
         }, {
           resolved: true,
-          note: '该问答已完成，Codex 正在继续执行。',
+          note: '该问答已完成，正在继续执行。',
           answers: request.draftAnswers,
         }),
       );
@@ -1295,6 +1360,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (callbackData.startsWith('input:')) {
       return this.handleStructuredInputCardAction(event, callbackData);
     }
+    if (callbackData.startsWith('planexit:')) {
+      return this.handleClaudePlanExitCardAction(event, callbackData);
+    }
     if (callbackData.startsWith('plan:')) {
       return this.handlePlanCardAction(event, callbackData);
     }
@@ -1511,7 +1579,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
           ? existing.status === 'awaiting_confirmation'
             ? '当前群已有待确认的原生 PLAN 结果。请点击上一张计划卡片中的“是，实施此计划”，或直接在原线程回复告诉 Codex 如何调整；也可以使用 `/mode ...` / `/reset` 覆盖。'
             : '当前群已有等待中的原生 PLAN 请求。请先在原线程继续输入，或使用 `/mode ...` / `/reset` 覆盖。'
-          : '当前群已有进行中的 PLAN 流程。请先点击上一张计划卡片中的“执行 / 继续 / 取消”，或使用 `/mode ...` / `/reset` 覆盖。',
+          : existing.status === 'awaiting_confirmation'
+            ? '当前群已有待确认的 Claude PLAN 结果。请点击上一张计划卡片中的执行选项，或直接在原线程回复告诉 Claude 如何调整；也可以使用 `/mode ...` / `/reset` 覆盖。'
+            : '当前群已有进行中的 Claude PLAN 流程。请先在原线程继续输入，或使用 `/mode ...` / `/reset` 覆盖。',
         inbound.messageId,
       );
       return;
@@ -1653,14 +1723,53 @@ export class FeishuAdapter extends BaseChannelAdapter {
           this.enqueue(this.buildNativePlanRequestInbound(inbound.address, inbound.messageId, workflow.workflowId, requestText));
           return true;
         }
-        await this.sendAsPost(inbound.address, '请先点击上一张计划卡片中的“执行 / 继续 / 取消”。', inbound.messageId);
+        {
+          const requestText = inbound.text.trim();
+          console.log(
+            `[feishu-adapter] Claude PLAN follow-up reply captured for workflow ${workflow.workflowId}; ` +
+            'stopping pending ExitPlanMode and enqueueing a fresh planning turn',
+          );
+          store.updatePlanWorkflow(workflow.workflowId, {
+            status: 'planning',
+            requestText,
+            address: inbound.address,
+            routeKey,
+            requestMessageId: inbound.messageId,
+            actionCardMessageId: '',
+            actionCardOpenMessageId: '',
+            approvalRequestId: '',
+            resolved: true,
+          });
+          if (workflow.approvalRequestId) {
+            getBridgeContext().permissions.resolvePendingPermission?.(workflow.approvalRequestId, {
+              behavior: 'deny',
+              message: CLAUDE_PLAN_FOLLOW_UP_REJECT_MESSAGE,
+              interrupt: true,
+            });
+          }
+          this.enqueue(this.buildPlanRequestInbound(
+            inbound.address,
+            inbound.messageId,
+            workflow.workflowId,
+            requestText,
+            { promptText: buildClaudePlanFollowUpPrompt(requestText) },
+          ));
+        }
         return true;
       default:
         return false;
     }
   }
 
-  private buildPlanRequestInbound(address: ChannelAddress, messageId: string, workflowId: string, requestText: string): InboundMessage {
+  private buildPlanRequestInbound(
+    address: ChannelAddress,
+    messageId: string,
+    workflowId: string,
+    requestText: string,
+    options?: {
+      promptText?: string;
+    },
+  ): InboundMessage {
     return {
       messageId,
       address,
@@ -1670,7 +1779,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         planWorkflow: {
           kind: 'plan_request',
           workflowId,
-          promptText: buildPlanningPrompt(requestText),
+          promptText: options?.promptText || buildPlanningPrompt(requestText),
           storedUserText: requestText,
           permissionMode: 'plan',
         },
@@ -1697,7 +1806,16 @@ export class FeishuAdapter extends BaseChannelAdapter {
     };
   }
 
-  private buildPlanExecutionInbound(address: ChannelAddress, messageId: string, workflowId: string, requestText: string): InboundMessage {
+  private buildPlanExecutionInbound(
+    address: ChannelAddress,
+    messageId: string,
+    workflowId: string,
+    requestText: string,
+    options?: {
+      permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions';
+      planText?: string;
+    },
+  ): InboundMessage {
     const storedUserText = `执行已确认计划：${requestText}`;
     return {
       messageId,
@@ -1708,9 +1826,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
         planWorkflow: {
           kind: 'plan_execute',
           workflowId,
-          promptText: buildPlanExecutionPrompt(requestText),
+          promptText: buildClaudePlanExecutionPrompt(requestText, options?.planText),
           storedUserText,
-          permissionMode: 'acceptEdits',
+          permissionMode: options?.permissionMode || 'acceptEdits',
           collaborationMode: 'default',
         },
       },
@@ -1773,7 +1891,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         void this.resolveStructuredInputRequest(requestId);
         getBridgeContext().permissions.resolvePendingStructuredInput?.(requestId, { answers: {} });
       });
-      return { toast: { type: 'warning', content: '该问题涉及敏感输入，请转到本地 Codex 继续' } };
+      return { toast: { type: 'warning', content: '该问题涉及敏感输入，请转到本地命令行继续' } };
     }
 
     const answers = extractStructuredAnswers(
@@ -1864,6 +1982,136 @@ export class FeishuAdapter extends BaseChannelAdapter {
         store.updatePlanWorkflow(workflowId, { resolved: false });
         return { toast: { type: 'warning', content: 'Unsupported action' } };
     }
+  }
+
+  private async handleClaudePlanExitCardAction(
+    event: lark.InteractiveCardActionEvent,
+    callbackData: string,
+  ): Promise<{ toast: { type: string; content: string } }> {
+    const parts = callbackData.split(':');
+    const action = parts[1];
+    const variant = parts[2];
+    const workflowId = parts.slice(3).join(':') || parts.slice(2).join(':');
+    if (!workflowId || !action) {
+      return { toast: { type: 'warning', content: 'Unsupported action' } };
+    }
+
+    const store = this.getStore();
+    const workflow = store.getPlanWorkflow(workflowId);
+    if (!workflow) {
+      return { toast: { type: 'warning', content: 'Claude plan workflow not found' } };
+    }
+
+    const knownIds = [
+      workflow.actionCardMessageId,
+      workflow.actionCardOpenMessageId,
+    ].filter((value): value is string => !!value);
+    if (knownIds.length > 1 && !knownIds.includes(event.open_message_id)) {
+      return { toast: { type: 'warning', content: 'Claude plan card is stale' } };
+    }
+    if (workflow.status !== 'awaiting_confirmation' || !workflow.approvalRequestId) {
+      return { toast: { type: 'warning', content: 'Claude plan is no longer waiting for confirmation' } };
+    }
+    if (!store.markPlanWorkflowResolved(workflowId)) {
+      return { toast: { type: 'warning', content: 'Claude plan action already handled' } };
+    }
+
+    const binding = store.getChannelBinding(this.channelType, workflow.chatId);
+    const allowedPrompts = workflow.allowedPrompts || [];
+
+    const resolvePermission = (
+      resolution: Parameters<typeof getBridgeContext> extends never
+        ? never
+        : {
+            behavior: 'allow' | 'deny';
+            message?: string;
+            updatedPermissions?: unknown[];
+            interrupt?: boolean;
+          },
+    ): boolean => getBridgeContext().permissions.resolvePendingPermission(workflow.approvalRequestId!, resolution);
+
+    if (action === 'approve' && (variant === 'manual' || variant === 'bypass')) {
+      if (binding) {
+        store.updateChannelBinding(binding.id, { mode: 'code' });
+      }
+      store.deletePlanWorkflow(workflowId);
+      await this.syncChatName(workflow.chatId);
+      const resolved = resolvePermission({
+        behavior: 'allow',
+        updatedPermissions: buildClaudePlanModeUpdates(
+          variant === 'bypass' ? 'bypassPermissions' : 'default',
+          allowedPrompts,
+        ),
+      });
+      if (!resolved) {
+        if (!binding) {
+          return { toast: { type: 'warning', content: 'Claude plan request is no longer pending' } };
+        }
+        this.enqueue(this.buildPlanExecutionInbound(
+          workflow.address,
+          workflow.requestMessageId || workflow.planMessageId || workflow.actionCardMessageId || workflow.workflowId,
+          workflowId,
+          workflow.requestText,
+          {
+            permissionMode: variant === 'bypass' ? 'bypassPermissions' : 'default',
+            planText: workflow.planText,
+          },
+        ));
+      }
+      return {
+        toast: {
+          type: 'success',
+          content: variant === 'bypass' ? '开始执行，后续权限将自动放行' : '开始执行，后续编辑仍需人工审批',
+        },
+      };
+    }
+
+    if (action === 'clear' && variant === 'bypass') {
+      if (!binding) {
+        store.updatePlanWorkflow(workflowId, { resolved: false });
+        return { toast: { type: 'warning', content: '会话绑定不存在' } };
+      }
+
+      const session = store.createRuntimeSession({
+        runtime: 'claude',
+        model: binding.model,
+        cwd: binding.workingDirectory,
+      });
+      store.upsertChannelBinding({
+        channelType: this.channelType,
+        chatId: workflow.chatId,
+        codepilotSessionId: session.id,
+        workingDirectory: binding.workingDirectory,
+        model: binding.model,
+      });
+      const updatedBinding = store.getChannelBinding(this.channelType, workflow.chatId);
+      if (updatedBinding) {
+        store.updateChannelBinding(updatedBinding.id, { mode: 'code', sdkSessionId: '' });
+      }
+      store.deletePlanWorkflow(workflowId);
+      await this.syncChatName(workflow.chatId);
+
+      resolvePermission({
+        behavior: 'deny',
+        message: 'The user approved the plan but wants execution to restart in a fresh session with cleared context. Stop planning here.',
+        interrupt: true,
+      });
+
+      this.enqueue(this.buildPlanExecutionInbound(
+        workflow.address,
+        workflow.requestMessageId || workflow.planMessageId || workflow.actionCardMessageId || workflow.workflowId,
+        workflowId,
+        workflow.requestText,
+        {
+          permissionMode: 'bypassPermissions',
+          planText: workflow.planText,
+        },
+      ));
+      return { toast: { type: 'success', content: '已清空上下文，并在新会话中开始执行' } };
+    }
+
+    store.updatePlanWorkflow(workflowId, { resolved: false });
+    return { toast: { type: 'warning', content: 'Unsupported action' } };
   }
 
   private async createSessionGroup(runtime: RuntimeName, sender: SenderIdentity): Promise<string> {

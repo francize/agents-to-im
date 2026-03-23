@@ -2,10 +2,13 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  buildAskUserQuestionResponse,
   isAuthError,
   classifyAuthError,
   isNonClaudeModel,
+  mapSdkMessageToActivityEvent,
   parseCliMajorVersion,
+  parseAskUserQuestionRequest,
   handleMessage,
 } from '../llm-provider.js';
 import type { StreamState } from '../llm-provider.js';
@@ -27,6 +30,10 @@ function makeFakeController() {
 
 function freshState(): StreamState {
   return { hasReceivedResult: false, hasStreamedText: false, lastAssistantText: '' };
+}
+
+function parseChunk(chunk: string): { type: string; data: string } {
+  return JSON.parse(chunk.replace(/^data:\s*/, ''));
 }
 
 // ── classifyAuthError ──
@@ -228,6 +235,87 @@ describe('handleMessage state tracking', () => {
     assert.equal(state.hasReceivedResult, true);
   });
 
+  it('falls back to Unknown error when SDK error result has no messages', () => {
+    const { controller, chunks } = makeFakeController();
+    const state = freshState();
+
+    handleMessage({
+      type: 'result',
+      subtype: 'error_during_execution',
+      errors: [],
+      is_error: true,
+      session_id: 'sess-1',
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+      duration_ms: 1,
+      duration_api_ms: 1,
+      num_turns: 1,
+      stop_reason: null,
+      total_cost_usd: 0,
+      modelUsage: {},
+      permission_denials: [],
+      uuid: 'uuid-1',
+    } as any, controller, state);
+
+    assert.equal(state.hasReceivedResult, true);
+    assert.equal(chunks.length, 1);
+    assert.deepEqual(parseChunk(chunks[0] || ''), {
+      type: 'error',
+      data: 'Unknown error',
+    });
+  });
+
+  it('surfaces success-subtype business errors from synthetic assistant results', () => {
+    const { controller, chunks } = makeFakeController();
+    const state = freshState();
+
+    handleMessage({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'text',
+            text: 'Failed to authenticate. API Error: 401 OAuth token has expired.',
+          },
+        ],
+      },
+    } as any, controller, state);
+
+    handleMessage({
+      type: 'result',
+      subtype: 'success',
+      is_error: true,
+      result: 'Failed to authenticate. API Error: 401 OAuth token has expired.',
+      session_id: 'sess-1',
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+      duration_ms: 1,
+      duration_api_ms: 1,
+      num_turns: 1,
+      stop_reason: 'stop_sequence',
+      total_cost_usd: 0,
+      modelUsage: {},
+      permission_denials: [],
+      uuid: 'uuid-2',
+    } as any, controller, state);
+
+    assert.equal(state.hasReceivedResult, true);
+    assert.equal(chunks.length, 2);
+    assert.deepEqual(parseChunk(chunks[0] || ''), {
+      type: 'error',
+      data: 'Failed to authenticate. API Error: 401 OAuth token has expired.',
+    });
+    assert.equal(parseChunk(chunks[1] || '').type, 'result');
+  });
+
   it('sets hasReceivedResult on error result', () => {
     const { controller } = makeFakeController();
     const state = freshState();
@@ -258,6 +346,139 @@ describe('handleMessage state tracking', () => {
     assert.equal(state.lastAssistantText, 'Let me check');
     assert.equal(chunks.length, 1); // only tool_use, no text
     assert.ok(chunks[0].includes('tool_use'));
+  });
+
+  it('maps compacting/task progress SDK messages into activity events', () => {
+    const compacting = mapSdkMessageToActivityEvent({
+      type: 'system',
+      subtype: 'status',
+      status: 'compacting',
+      session_id: 'sess-1',
+    } as any);
+    const taskProgress = mapSdkMessageToActivityEvent({
+      type: 'system',
+      subtype: 'task_progress',
+      task_id: 'task-1',
+      description: '正在分析仓库',
+      last_tool_name: 'Read',
+      usage: { total_tokens: 1, tool_uses: 1, duration_ms: 1 },
+      session_id: 'sess-1',
+    } as any);
+
+    assert.deepEqual(compacting, {
+      kind: 'lightweight_activity',
+      id: 'claude-status:sess-1:compacting',
+      status: 'running',
+      text: '正在压缩上下文…',
+      source: 'claude-sdk',
+    });
+    assert.deepEqual(taskProgress, {
+      kind: 'lightweight_activity',
+      id: 'claude-task:task-1',
+      status: 'running',
+      text: '正在分析仓库 · Read',
+      source: 'task_progress',
+    });
+  });
+
+  it('parses AskUserQuestion payloads into structured input requests', () => {
+    const request = parseAskUserQuestionRequest('tool-use-1', {
+      questions: [
+        {
+          question: '要启用哪些特性？',
+          header: '特性',
+          multiSelect: true,
+          options: [
+            { label: 'A', description: 'A 功能', preview: 'preview-a' },
+            { label: 'B', description: 'B 功能' },
+          ],
+        },
+      ],
+    });
+
+    assert.deepEqual(request, {
+      requestId: 'tool-use-1',
+      threadId: '',
+      turnId: '',
+      itemId: '',
+      questions: [
+        {
+          id: 'q1',
+          header: '特性',
+          question: '要启用哪些特性？',
+          isOther: true,
+          isSecret: false,
+          multiSelect: true,
+          responseKey: '要启用哪些特性？',
+          options: [
+            { label: 'A', description: 'A 功能', preview: 'preview-a' },
+            { label: 'B', description: 'B 功能' },
+          ],
+        },
+      ],
+    });
+  });
+
+  it('builds AskUserQuestion responses keyed by original question text', () => {
+    const response = buildAskUserQuestionResponse({
+      requestId: 'tool-use-2',
+      threadId: '',
+      turnId: '',
+      itemId: '',
+      questions: [
+        {
+          id: 'q1',
+          header: '框架',
+          question: '使用哪个框架？',
+          responseKey: '使用哪个框架？',
+          isOther: true,
+          isSecret: false,
+          options: [{ label: 'React', description: '推荐' }],
+        },
+        {
+          id: 'q2',
+          header: '特性',
+          question: '启用哪些特性？',
+          responseKey: '启用哪些特性？',
+          isOther: true,
+          isSecret: false,
+          multiSelect: true,
+          options: [
+            { label: 'A', description: 'A 功能' },
+            { label: 'B', description: 'B 功能' },
+          ],
+        },
+      ],
+    }, {
+      answers: {
+        q1: { answers: ['React'] },
+        q2: { answers: ['A', 'B'] },
+      },
+    });
+
+    assert.deepEqual(response, {
+      questions: [
+        {
+          question: '使用哪个框架？',
+          header: '框架',
+          options: [{ label: 'React', description: '推荐' }],
+          multiSelect: false,
+        },
+        {
+          question: '启用哪些特性？',
+          header: '特性',
+          options: [
+            { label: 'A', description: 'A 功能' },
+            { label: 'B', description: 'B 功能' },
+          ],
+          multiSelect: true,
+        },
+      ],
+      answers: {
+        '使用哪个框架？': 'React',
+        '启用哪些特性？': 'A, B',
+      },
+    });
   });
 });
 

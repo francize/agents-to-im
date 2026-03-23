@@ -104,7 +104,7 @@ export interface BridgeMessageMeta {
     workflowId: string;
     promptText: string;
     storedUserText?: string;
-    permissionMode?: 'plan' | 'default' | 'acceptEdits';
+    permissionMode?: 'plan' | 'default' | 'acceptEdits' | 'bypassPermissions';
     collaborationMode?: 'plan' | 'default';
   };
 }

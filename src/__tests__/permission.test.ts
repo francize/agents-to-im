@@ -24,6 +24,22 @@ describe('PendingPermissions', () => {
     assert.equal(result.message, 'Not allowed');
   });
 
+  it('deny resolution preserves interrupt for control-flow style rejections', async () => {
+    const pp = new PendingPermissions();
+    const promise = pp.waitFor('req-interrupt');
+
+    pp.resolve('req-interrupt', {
+      behavior: 'deny',
+      message: 'Stop this turn',
+      interrupt: true,
+    });
+
+    const result = await promise;
+    assert.equal(result.behavior, 'deny');
+    assert.equal(result.message, 'Stop this turn');
+    assert.equal(result.interrupt, true);
+  });
+
   it('resolve returns false for unknown id', () => {
     const pp = new PendingPermissions();
     assert.equal(pp.resolve('unknown', { behavior: 'allow' }), false);
@@ -33,6 +49,22 @@ describe('PendingPermissions', () => {
     const pp = new PendingPermissions();
     pp.waitFor('req-3');
     assert.equal(pp.resolve('req-3', { behavior: 'allow' }), true);
+  });
+
+  it('allow resolution preserves updatedPermissions for allow_session flows', async () => {
+    const pp = new PendingPermissions();
+    const promise = pp.waitFor('req-session');
+
+    pp.resolve('req-session', {
+      behavior: 'allow',
+      scope: 'session',
+      updatedPermissions: [{ type: 'addRules', rules: ['Bash(npm test)'] }],
+    });
+
+    const result = await promise;
+    assert.equal(result.behavior, 'allow');
+    assert.equal(result.scope, 'session');
+    assert.deepEqual(result.updatedPermissions, [{ type: 'addRules', rules: ['Bash(npm test)'] }]);
   });
 
   it('denyAll resolves all pending', async () => {

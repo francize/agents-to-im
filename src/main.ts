@@ -76,7 +76,7 @@ async function main(): Promise<void> {
   const gateway = {
     resolvePendingPermission: (
       id: string,
-      resolution: { behavior: 'allow' | 'deny'; message?: string; updatedPermissions?: unknown[] },
+      resolution: { behavior: 'allow' | 'deny'; message?: string; updatedPermissions?: unknown[]; interrupt?: boolean },
     ) => (
       pendingPerms.resolve(id, resolution)
       || pendingApprovals.resolve(id, resolution)

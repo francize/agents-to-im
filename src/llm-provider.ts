@@ -8,9 +8,20 @@
 import fs from 'node:fs';
 import { execSync } from 'node:child_process';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { SDKMessage, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
-import type { LLMProvider, StreamChatParams, FileAttachment } from './bridge/host.js';
-import type { PendingPermissions } from './permission-gateway.js';
+import type {
+  SDKMessage,
+  PermissionResult as ClaudePermissionResult,
+  PermissionUpdate,
+} from '@anthropic-ai/claude-agent-sdk';
+import type {
+  ActivityEvent,
+  FileAttachment,
+  LLMProvider,
+  StreamChatParams,
+  StructuredInputRequestInfo,
+  StructuredInputResponse,
+} from './bridge/host.js';
+import type { PendingPermissions, PendingStructuredInputs } from './permission-gateway.js';
 
 import { sseEvent } from './sse-utils.js';
 
@@ -410,17 +421,225 @@ export interface StreamState {
   lastAssistantText: string;
 }
 
+interface ClaudeAskUserQuestionOptionLike {
+  label: string;
+  description: string;
+  preview?: string;
+}
+
+interface ClaudeAskUserQuestionQuestionLike {
+  question: string;
+  header: string;
+  options?: ClaudeAskUserQuestionOptionLike[];
+  multiSelect?: boolean;
+}
+
+interface ClaudeAskUserQuestionInputLike {
+  questions?: ClaudeAskUserQuestionQuestionLike[];
+}
+
+function parseAskUserQuestionOptions(
+  value: unknown,
+): StructuredInputRequestInfo['questions'][number]['options'] {
+  if (!Array.isArray(value)) return null;
+  const options = value
+    .filter((option): option is ClaudeAskUserQuestionOptionLike => !!option && typeof option === 'object')
+    .map((option) => ({
+      label: typeof option.label === 'string' ? option.label.trim() : '',
+      description: typeof option.description === 'string' ? option.description.trim() : '',
+      ...(typeof option.preview === 'string' && option.preview.trim()
+        ? { preview: option.preview }
+        : {}),
+    }))
+    .filter((option) => option.label.length > 0);
+  return options.length > 0 ? options : null;
+}
+
+export function parseAskUserQuestionRequest(
+  requestId: string,
+  input: Record<string, unknown>,
+): StructuredInputRequestInfo | null {
+  const payload = input as ClaudeAskUserQuestionInputLike;
+  if (!Array.isArray(payload.questions) || payload.questions.length === 0) {
+    return null;
+  }
+
+  const questions = payload.questions
+    .filter((question): question is ClaudeAskUserQuestionQuestionLike => !!question && typeof question === 'object')
+    .map((question, index) => {
+      const prompt = typeof question.question === 'string' ? question.question.trim() : '';
+      if (!prompt) return null;
+      return {
+        id: `q${index + 1}`,
+        header: typeof question.header === 'string' && question.header.trim()
+          ? question.header.trim()
+          : `问题 ${index + 1}`,
+        question: prompt,
+        isOther: true,
+        isSecret: false,
+        multiSelect: question.multiSelect === true,
+        responseKey: prompt,
+        options: parseAskUserQuestionOptions(question.options),
+      };
+    })
+    .filter((question): question is NonNullable<typeof question> => question !== null);
+
+  if (questions.length === 0) {
+    return null;
+  }
+
+  return {
+    requestId,
+    threadId: '',
+    turnId: '',
+    itemId: '',
+    questions,
+  };
+}
+
+function normalizeStructuredAnswer(
+  question: StructuredInputRequestInfo['questions'][number],
+  values: string[] | undefined,
+): string | null {
+  const normalized = (values || [])
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (normalized.length === 0) return null;
+  if (question.multiSelect) {
+    return normalized.join(', ');
+  }
+  return normalized[0] || null;
+}
+
+export function buildAskUserQuestionResponse(
+  request: StructuredInputRequestInfo,
+  resolution: StructuredInputResponse,
+): Record<string, unknown> | null {
+  const answers: Record<string, string> = {};
+  for (const question of request.questions) {
+    const answer = normalizeStructuredAnswer(question, resolution.answers[question.id]?.answers);
+    if (!answer) continue;
+    answers[question.responseKey || question.question] = answer;
+  }
+
+  if (Object.keys(answers).length === 0) {
+    return null;
+  }
+
+  return {
+    questions: request.questions.map((question) => ({
+      question: question.responseKey || question.question,
+      header: question.header,
+      options: (question.options || []).map((option) => ({
+        label: option.label,
+        description: option.description,
+        ...(option.preview ? { preview: option.preview } : {}),
+      })),
+      multiSelect: question.multiSelect === true,
+    })),
+    answers,
+  };
+}
+
+export function mapSdkMessageToActivityEvent(msg: SDKMessage): ActivityEvent | null {
+  if (msg.type === 'system') {
+    switch (msg.subtype) {
+      case 'status':
+        if (msg.status === 'compacting') {
+          return {
+            kind: 'lightweight_activity',
+            id: `claude-status:${msg.session_id}:compacting`,
+            status: 'running',
+            text: '正在压缩上下文…',
+            source: 'claude-sdk',
+          };
+        }
+        return null;
+      case 'task_started':
+        return {
+          kind: 'lightweight_activity',
+          id: `claude-task:${msg.task_id}`,
+          status: 'running',
+          text: msg.description,
+          source: msg.task_type || 'task_started',
+        };
+      case 'task_progress':
+        return {
+          kind: 'lightweight_activity',
+          id: `claude-task:${msg.task_id}`,
+          status: 'running',
+          text: msg.last_tool_name
+            ? `${msg.description} · ${msg.last_tool_name}`
+            : msg.description,
+          source: 'task_progress',
+        };
+      case 'task_notification':
+        return {
+          kind: 'lightweight_activity',
+          id: `claude-task:${msg.task_id}`,
+          status: msg.status === 'failed' ? 'failed' : 'completed',
+          text: msg.summary,
+          source: msg.status,
+        };
+      case 'elicitation_complete':
+        return {
+          kind: 'lightweight_activity',
+          id: `claude-elicitation:${msg.session_id}:${msg.elicitation_id}`,
+          status: 'completed',
+          text: `MCP 输入请求已完成：${msg.mcp_server_name}`,
+          source: 'elicitation_complete',
+        };
+      default:
+        return null;
+    }
+  }
+
+  switch (msg.type) {
+    case 'tool_progress':
+      return {
+        kind: 'lightweight_activity',
+        id: `claude-tool:${msg.tool_use_id}`,
+        status: 'running',
+        text: `正在执行 ${msg.tool_name}…`,
+        source: 'tool_progress',
+      };
+    case 'tool_use_summary':
+      return {
+        kind: 'lightweight_activity',
+        id: `claude-tool-summary:${msg.uuid}`,
+        status: 'completed',
+        text: msg.summary,
+        source: 'tool_use_summary',
+      };
+    default:
+      return null;
+  }
+}
+
+function enqueueActivityEvent(
+  controller: ReadableStreamDefaultController<string>,
+  event: ActivityEvent,
+): void {
+  controller.enqueue(sseEvent('activity_event', event));
+}
+
 export class SDKLLMProvider implements LLMProvider {
   private cliPath: string | undefined;
   private autoApprove: boolean;
 
-  constructor(private pendingPerms: PendingPermissions, cliPath?: string, autoApprove = false) {
+  constructor(
+    private pendingPerms: PendingPermissions,
+    private pendingStructuredInputs: PendingStructuredInputs,
+    cliPath?: string,
+    autoApprove = false,
+  ) {
     this.cliPath = cliPath;
     this.autoApprove = autoApprove;
   }
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
     const pendingPerms = this.pendingPerms;
+    const pendingStructuredInputs = this.pendingStructuredInputs;
     const cliPath = this.cliPath;
     const autoApprove = this.autoApprove;
 
@@ -457,8 +676,17 @@ export class SDKLLMProvider implements LLMProvider {
               model,
               resume: params.sdkSessionId || undefined,
               abortController: params.abortController,
-              permissionMode: (params.permissionMode as 'default' | 'acceptEdits' | 'plan') || undefined,
+              permissionMode: (params.permissionMode as 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan') || undefined,
+              allowDangerouslySkipPermissions: true,
               includePartialMessages: true,
+              // Keep user-level Claude auth/billing settings available while still
+              // allowing project settings to override repo-local behavior.
+              settingSources: ['user', 'project'],
+              toolConfig: {
+                askUserQuestion: {
+                  previewFormat: 'markdown',
+                },
+              },
               env: cleanEnv,
               stderr: (data: string) => {
                 stderrBuf += data;
@@ -466,11 +694,55 @@ export class SDKLLMProvider implements LLMProvider {
                   stderrBuf = stderrBuf.slice(-MAX_STDERR);
                 }
               },
+              onElicitation: async (request: { serverName: string; mode?: 'form' | 'url'; message: string }) => {
+                const detail = request.mode === 'url'
+                  ? '当前飞书桥暂不支持 URL 授权输入，请转到本地 Claude Code 继续。'
+                  : '当前飞书桥暂不支持 MCP 结构化输入，请转到本地 Claude Code 继续。';
+                enqueueActivityEvent(controller, {
+                  kind: 'lightweight_activity',
+                  id: `claude-elicitation-declined:${request.serverName}:${Date.now()}`,
+                  status: 'failed',
+                  text: `${request.message} ${detail}`.trim(),
+                  source: 'mcp_elicitation',
+                });
+                return { action: 'decline' as const };
+              },
               canUseTool: async (
                   toolName: string,
                   input: Record<string, unknown>,
                   opts: { toolUseID: string; suggestions?: string[] },
-                ): Promise<PermissionResult> => {
+                ): Promise<ClaudePermissionResult> => {
+                  if (toolName === 'AskUserQuestion') {
+                    const request = parseAskUserQuestionRequest(opts.toolUseID, input);
+                    if (!request) {
+                      enqueueActivityEvent(controller, {
+                        kind: 'lightweight_activity',
+                        id: `claude-ask-user-question:${opts.toolUseID}`,
+                        status: 'failed',
+                        text: '收到了无法识别的 AskUserQuestion 请求，已拒绝本轮澄清输入。',
+                        source: 'ask_user_question',
+                      });
+                      return {
+                        behavior: 'deny' as const,
+                        message: 'Unsupported AskUserQuestion payload',
+                      };
+                    }
+
+                    controller.enqueue(sseEvent('structured_input_request', request));
+                    const resolution = await pendingStructuredInputs.waitFor(request.requestId);
+                    const updatedInput = buildAskUserQuestionResponse(request, resolution);
+                    if (updatedInput) {
+                      return {
+                        behavior: 'allow' as const,
+                        updatedInput,
+                      };
+                    }
+                    return {
+                      behavior: 'deny' as const,
+                      message: 'User input request timed out',
+                    };
+                  }
+
                   // Auto-approve if configured (useful for channels without
                   // interactive permission UI, e.g. Feishu WebSocket mode)
                   if (autoApprove) {
@@ -491,11 +763,18 @@ export class SDKLLMProvider implements LLMProvider {
                   const result = await pendingPerms.waitFor(opts.toolUseID);
 
                   if (result.behavior === 'allow') {
-                    return { behavior: 'allow' as const, updatedInput: input };
+                    return {
+                      behavior: 'allow' as const,
+                      updatedInput: input,
+                      ...(Array.isArray(result.updatedPermissions)
+                        ? { updatedPermissions: result.updatedPermissions as PermissionUpdate[] }
+                        : {}),
+                    };
                   }
                   return {
                     behavior: 'deny' as const,
                     message: result.message || 'Denied by user',
+                    ...(result.interrupt ? { interrupt: true } : {}),
                   };
                 },
             };
@@ -593,6 +872,11 @@ export function handleMessage(
   controller: ReadableStreamDefaultController<string>,
   state: StreamState,
 ): void {
+  const activity = mapSdkMessageToActivityEvent(msg);
+  if (activity) {
+    enqueueActivityEvent(controller, activity);
+  }
+
   switch (msg.type) {
     case 'stream_event': {
       const event = msg.event;
@@ -671,6 +955,13 @@ export function handleMessage(
     case 'result': {
       state.hasReceivedResult = true;
       if (msg.subtype === 'success') {
+        if (msg.is_error) {
+          const errorText = [
+            typeof msg.result === 'string' ? msg.result.trim() : '',
+            state.lastAssistantText.trim(),
+          ].find((value) => value.length > 0) || 'Unknown error';
+          controller.enqueue(sseEvent('error', errorText));
+        }
         controller.enqueue(
           sseEvent('result', {
             session_id: msg.session_id,
@@ -686,11 +977,15 @@ export function handleMessage(
         );
       } else {
         // Error result from SDK (distinct from transport errors in catch)
-        const errors =
+        const errors = (
           'errors' in msg && Array.isArray(msg.errors)
-            ? msg.errors.join('; ')
-            : 'Unknown error';
-        controller.enqueue(sseEvent('error', errors));
+            ? msg.errors
+            : []
+        )
+          .map((error) => (typeof error === 'string' ? error.trim() : ''))
+          .filter(Boolean)
+          .join('; ');
+        controller.enqueue(sseEvent('error', errors || 'Unknown error'));
       }
       break;
     }

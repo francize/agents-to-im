@@ -16,6 +16,48 @@ import { deliver } from './delivery-layer.js';
 import { getBridgeContext } from './context.js';
 import { escapeHtml } from './adapters/telegram-utils.js';
 
+function summarizeToolInput(toolName: string, toolInput: Record<string, unknown>): string[] {
+  if (toolName === 'Bash') {
+    const command = typeof toolInput.command === 'string' ? toolInput.command.trim() : '';
+    const description = typeof toolInput.description === 'string' ? toolInput.description.trim() : '';
+    return [
+      command ? `**命令**：\`${command}\`` : '',
+      description ? `**说明**：${description}` : '',
+    ].filter(Boolean);
+  }
+
+  const filePath = typeof toolInput.file_path === 'string'
+    ? toolInput.file_path.trim()
+    : typeof toolInput.filePath === 'string'
+      ? toolInput.filePath.trim()
+      : '';
+  if (filePath) {
+    return [`**文件**：\`${filePath}\``];
+  }
+
+  const query = typeof toolInput.query === 'string' ? toolInput.query.trim() : '';
+  if (query) {
+    return [`**参数**：${query}`];
+  }
+
+  const keys = Object.entries(toolInput)
+    .filter(([, value]) => value !== undefined && value !== null && `${value}`.trim() !== '')
+    .slice(0, 3)
+    .map(([key, value]) => `**${key}**：\`${String(value).slice(0, 120)}\``);
+
+  return keys;
+}
+
+function buildPermissionMarkdown(toolName: string, toolInput: Record<string, unknown>): string {
+  const lines = [
+    '继续前需要你的授权。',
+    '',
+    `**工具**：\`${toolName}\``,
+    ...summarizeToolInput(toolName, toolInput),
+  ];
+  return lines.join('\n');
+}
+
 /**
  * Dedup recent permission forwards to prevent duplicate cards.
  * Key: permissionRequestId, value: timestamp. Entries expire after 30s.
@@ -87,27 +129,24 @@ export async function forwardPermissionRequest(
 
     result = await deliver(adapter, qqMessage, { sessionId });
   } else {
-    const text = [
-      `<b>Permission Required</b>`,
-      ``,
-      `Tool: <code>${escapeHtml(toolName)}</code>`,
-      `<pre>${escapeHtml(truncatedInput)}</pre>`,
-      ``,
-      `Choose an action:`,
-    ].join('\n');
+    const text = buildPermissionMarkdown(toolName, toolInput);
 
     const message: OutboundMessage = {
       address,
       text,
-      parseMode: 'HTML',
+      parseMode: 'Markdown',
       inlineButtons: [
         [
-          { text: 'Allow', callbackData: `perm:allow:${permissionRequestId}` },
-          { text: 'Allow Session', callbackData: `perm:allow_session:${permissionRequestId}` },
-          { text: 'Deny', callbackData: `perm:deny:${permissionRequestId}` },
+          { text: '本次允许', callbackData: `perm:allow:${permissionRequestId}` },
+          { text: '本会话允许', callbackData: `perm:allow_session:${permissionRequestId}` },
+          { text: '拒绝', callbackData: `perm:deny:${permissionRequestId}` },
         ],
       ],
       replyToMessageId,
+      cardHeader: {
+        title: '需要授权',
+        template: 'orange',
+      },
     };
 
     result = await deliver(adapter, message, { sessionId });

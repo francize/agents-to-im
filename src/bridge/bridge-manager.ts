@@ -28,6 +28,13 @@ import { deliver, deliverRendered } from './delivery-layer.js';
 import { markdownToTelegramChunks } from './markdown/telegram.js';
 import { markdownToDiscordChunks } from './markdown/discord.js';
 import { getBridgeContext } from './context.js';
+import {
+  buildClaudePlanExecutionPrompt,
+  buildClaudePlanModeUpdates,
+  parseClaudeAllowedPrompts,
+  parseClaudePlanFilePath,
+  parseClaudePlanText,
+} from '../claude-plan-exit.js';
 import { escapeHtml } from './adapters/telegram-utils.js';
 import {
   validateWorkingDirectory,
@@ -109,6 +116,152 @@ function resolveCodexCollaborationMode(
     return 'default';
   }
   return undefined;
+}
+
+function isClaudePlanExitPermission(perm: engine.PermissionRequestInfo): boolean {
+  return perm.toolName === 'ExitPlanMode';
+}
+
+function truncateClaudePlanCardText(text: string, maxChars = 7000): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  return `${trimmed.slice(0, maxChars).trim()}\n\n...`;
+}
+
+function buildClaudePlanExitButtons(
+  workflowId: string,
+  showClearContext: boolean,
+): NonNullable<OutboundMessage['inlineButtons']> {
+  const primary = [
+    { text: '继续执行（绕过权限）', callbackData: `planexit:approve:bypass:${workflowId}` },
+    { text: '继续执行（手动审批）', callbackData: `planexit:approve:manual:${workflowId}` },
+  ];
+  const secondary = showClearContext
+    ? [{ text: '清空上下文后执行', callbackData: `planexit:clear:bypass:${workflowId}` }]
+    : [];
+  return secondary.length > 0 ? [primary, secondary] : [primary];
+}
+
+function buildClaudePlanExitFallbackText(
+  planText: string,
+  allowedPrompts: Array<{ tool: string; prompt: string }>,
+  showClearContext: boolean,
+): string {
+  const lines = [
+    'Claude 已经写好计划，确认后会退出 PLAN 并继续执行。',
+    '',
+    truncateClaudePlanCardText(planText || 'Claude 已生成计划，请确认是否继续。'),
+  ];
+  if (allowedPrompts.length > 0) {
+    lines.push('', '**执行时会申请的提示级权限**');
+    for (const item of allowedPrompts) {
+      lines.push(`- ${item.tool}: ${item.prompt}`);
+    }
+  }
+  lines.push('', '如需继续规划，请直接在本线程回复你希望调整的地方。');
+  if (showClearContext) {
+    lines.push('也可以选择“清空上下文后执行”，桥会以新会话重新开始实施。');
+  }
+  return lines.join('\n');
+}
+
+function buildClaudePlanExitCard(
+  workflowId: string,
+  planText: string,
+  allowedPrompts: Array<{ tool: string; prompt: string }>,
+  showClearContext: boolean,
+): Record<string, unknown> {
+  const elements: Array<Record<string, unknown>> = [
+    {
+      tag: 'markdown',
+      content: 'Claude 已经写好计划。确认后会退出 PLAN，并按所选模式继续执行。',
+    },
+    {
+      tag: 'markdown',
+      content: truncateClaudePlanCardText(planText || 'Claude 已生成计划，请确认是否继续。'),
+    },
+  ];
+
+  if (allowedPrompts.length > 0) {
+    elements.push({
+      tag: 'markdown',
+      content: [
+        '**执行时会申请的提示级权限**',
+        ...allowedPrompts.map((item) => `- ${item.tool}: ${item.prompt}`),
+      ].join('\n'),
+    });
+  }
+
+  elements.push(
+    {
+      tag: 'markdown',
+      content: showClearContext
+        ? '如需继续规划，请直接在本线程回复你希望 Claude 调整的地方。“清空上下文后执行”会结束当前 PLAN 会话，并用新会话按已确认计划开始实施。'
+        : '如需继续规划，请直接在本线程回复你希望 Claude 调整的地方。',
+    },
+    {
+      tag: 'column_set',
+      flex_mode: 'flow',
+      horizontal_spacing: '8px',
+      horizontal_align: 'left',
+      columns: [
+        {
+          tag: 'column',
+          width: 'auto',
+          elements: [
+            {
+              tag: 'button',
+              type: 'primary',
+              text: { tag: 'plain_text', content: '继续执行（绕过权限）' },
+              behaviors: [{ type: 'callback', value: { callback_data: `planexit:approve:bypass:${workflowId}` } }],
+            },
+          ],
+        },
+        {
+          tag: 'column',
+          width: 'auto',
+          elements: [
+            {
+              tag: 'button',
+              text: { tag: 'plain_text', content: '继续执行（手动审批）' },
+              behaviors: [{ type: 'callback', value: { callback_data: `planexit:approve:manual:${workflowId}` } }],
+            },
+          ],
+        },
+        ...(showClearContext
+          ? [{
+              tag: 'column',
+              width: 'auto',
+              elements: [
+                {
+                  tag: 'button',
+                  text: { tag: 'plain_text', content: '清空上下文后执行' },
+                  behaviors: [{ type: 'callback', value: { callback_data: `planexit:clear:bypass:${workflowId}` } }],
+                },
+              ],
+            }]
+          : []),
+      ],
+    },
+  );
+
+  return {
+    schema: '2.0',
+    config: {
+      update_multi: true,
+      width_mode: 'fill',
+    },
+    header: {
+      title: {
+        tag: 'plain_text',
+        content: '计划已就绪',
+      },
+      template: 'blue',
+    },
+    body: {
+      elements,
+    },
+  };
 }
 
 function buildStructuredInputPreface(request: StructuredInputRequestInfo): string {
@@ -1278,6 +1431,64 @@ async function handleMessage(
     const storedUserText = planWorkflowMeta?.storedUserText || text || (hasAttachments ? 'Describe this image.' : '');
 
     const result = await engine.processMessage(binding, promptText, async (perm) => {
+      const workflowId = planWorkflowMeta?.workflowId;
+      const workflow = workflowId ? store.getPlanWorkflow(workflowId) : null;
+      const isClaudePlanExit =
+        planWorkflowMeta?.kind === 'plan_request'
+        && workflow
+        && !isCodexRuntime(binding.codepilotSessionId)
+        && isClaudePlanExitPermission(perm);
+
+      if (isClaudePlanExit) {
+        const planText = parseClaudePlanText(perm.toolInput);
+        const planFilePath = parseClaudePlanFilePath(perm.toolInput);
+        const allowedPrompts = parseClaudeAllowedPrompts(perm.toolInput);
+        const showClearContext = true;
+        const approvalMessage: OutboundMessage = adapter.channelType === 'feishu'
+          ? {
+              address: msg.address,
+              text: '',
+              rawCard: buildClaudePlanExitCard(workflow.workflowId, planText, allowedPrompts, showClearContext),
+              replyToMessageId: msg.messageId,
+            }
+          : {
+              address: msg.address,
+              text: buildClaudePlanExitFallbackText(planText, allowedPrompts, showClearContext),
+              parseMode: 'Markdown',
+              inlineButtons: buildClaudePlanExitButtons(workflow.workflowId, showClearContext),
+              replyToMessageId: msg.messageId,
+              cardHeader: {
+                title: '计划已就绪',
+                template: 'blue',
+              },
+            };
+        const cardDelivery = await deliver(adapter, approvalMessage, { sessionId: binding.codepilotSessionId });
+
+        if (cardDelivery.ok) {
+          store.updatePlanWorkflow(workflow.workflowId, {
+            status: 'awaiting_confirmation',
+            approvalRequestId: perm.permissionRequestId,
+            planText,
+            planFilePath,
+            allowedPrompts,
+            actionCardMessageId: cardDelivery.messageId || '',
+            actionCardOpenMessageId: cardDelivery.openMessageId || '',
+            resolved: false,
+          });
+          return;
+        }
+
+        store.updatePlanWorkflow(workflow.workflowId, {
+          status: 'awaiting_confirmation',
+          approvalRequestId: perm.permissionRequestId,
+          planText,
+          planFilePath,
+          allowedPrompts,
+          resolved: false,
+        });
+        return;
+      }
+
       await broker.forwardPermissionRequest(
         adapter,
         msg.address,
@@ -1352,7 +1563,7 @@ async function handleMessage(
 
       await deliver(adapter, {
         address: msg.address,
-        text: '当前运行时请求补充信息，但该渠道尚未实现结构化问答卡。请转到本地 Codex 继续。',
+        text: '当前运行时请求补充信息，但该渠道尚未实现结构化问答卡。请转到本地命令行继续。',
         parseMode: 'plain',
         replyToMessageId: msg.messageId,
       }, { sessionId: binding.codepilotSessionId });
@@ -1531,7 +1742,11 @@ async function handleMessage(
     if (planWorkflowMeta?.kind === 'plan_request') {
       const workflow = store.getPlanWorkflow(planWorkflowMeta.workflowId);
       if (workflow) {
-        if (result.responseText) {
+        const handledByClaudeExitPlan = result.permissionRequests.some(isClaudePlanExitPermission);
+        if (handledByClaudeExitPlan) {
+          // Claude SDK already surfaced its native plan-exit approval. Do not
+          // stack the legacy bridge-owned execute/continue/cancel card on top.
+        } else if (result.responseText) {
           const sent = await sendPlanConfirmationCard(
             workflow.workflowId,
             '计划已生成',
