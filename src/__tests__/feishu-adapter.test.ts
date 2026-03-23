@@ -395,6 +395,73 @@ describe('FeishuAdapter', () => {
     assert.match(patchedPayloads[0], /🤖 已搜索网页/);
   });
 
+  it('recovers an activity card after a gateway timeout by reusing the same UUID and patching the original message', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+
+    const replyUuids: string[] = [];
+    const replyPayloads: string[] = [];
+    const patchedPayloads: string[] = [];
+    let firstAttempt = true;
+    const adapter = new FeishuAdapter() as any;
+    adapter.lastIncomingMessageId.set('group-activity-timeout:main', 'incoming-timeout-1');
+    adapter.restClient = {
+      im: {
+        message: {
+          reply: async (payload: { data: { content: string; uuid: string } }) => {
+            replyUuids.push(payload.data.uuid);
+            replyPayloads.push(payload.data.content);
+            if (firstAttempt) {
+              firstAttempt = false;
+              throw new Error('Request failed with status code 504');
+            }
+            return { code: 0, data: { message_id: 'activity-timeout-msg-1', open_message_id: 'open-timeout-1' } };
+          },
+          patch: async (payload: { data: { content: string } }) => {
+            patchedPayloads.push(payload.data.content);
+            return { code: 0, data: {} };
+          },
+        },
+      },
+    };
+
+    const running = await adapter.upsertActivityEvent(
+      { channelType: 'feishu', chatId: 'group-activity-timeout' },
+      {
+        kind: 'command_execution',
+        id: 'command:turn-timeout:cmd-1',
+        turnId: 'turn-timeout',
+        status: 'running',
+        command: 'sed -n 1,220p /Users/shesong/codes/index.html',
+        cwd: '/Users/shesong/codes',
+      },
+    );
+    const completed = await adapter.upsertActivityEvent(
+      { channelType: 'feishu', chatId: 'group-activity-timeout' },
+      {
+        kind: 'command_execution',
+        id: 'command:turn-timeout:cmd-1',
+        turnId: 'turn-timeout',
+        status: 'completed',
+        command: 'sed -n 1,220p /Users/shesong/codes/index.html',
+        cwd: '/Users/shesong/codes',
+        output: '<html lang=\"en\">',
+        exitCode: 0,
+      },
+    );
+
+    assert.equal(running.ok, false);
+    assert.equal(completed.ok, true);
+    assert.equal(replyUuids.length, 2);
+    assert.equal(replyUuids[0], replyUuids[1]);
+    assert.equal(replyPayloads.length, 2);
+    assert.equal(patchedPayloads.length, 1);
+    assert.match(replyPayloads[0], /执行命令/);
+    assert.match(replyPayloads[0], /进行中/);
+    assert.match(replyPayloads[1], /已完成/);
+    assert.match(patchedPayloads[0], /已完成/);
+  });
+
   it('renders command and file activity cards with fixed titles and concise details', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});

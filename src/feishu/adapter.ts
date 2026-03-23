@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import * as lark from '@larksuiteoapi/node-sdk';
 
@@ -99,6 +99,11 @@ interface ActivityArtifact {
   kind: ActivityEvent['kind'];
 }
 
+interface PendingActivitySend {
+  requestUuid: string;
+  needsRecoveryPatch: boolean;
+}
+
 type StructuredActionEvent = lark.InteractiveCardActionEvent & {
   action: lark.InteractiveCardActionEvent['action'] & {
     form_value?: Record<string, unknown>;
@@ -131,6 +136,11 @@ function previewKey(routeKey: string, draftId: number): string {
 
 function activityKey(routeKey: string, activityId: string): string {
   return `${routeKey}:activity:${activityId}`;
+}
+
+function stableMessageUuid(scope: string, key: string): string {
+  const hash = createHash('sha256').update(`${scope}:${key}`).digest('hex').slice(0, 40);
+  return `${scope}-${hash}`.slice(0, 50);
 }
 
 function sanitizeTitleFallback(text: string): string {
@@ -716,6 +726,13 @@ function assertLarkOk(response: { code?: number; msg?: string }, context: string
   }
 }
 
+function isRecoverableMessageSendError(error: unknown): boolean {
+  const text = error instanceof Error
+    ? `${error.message}\n${error.stack || ''}`
+    : String(error);
+  return /status code 504|gateway timeout|code=2200|etimedout/i.test(text);
+}
+
 function isNonEmptyString(value: string | undefined): value is string {
   return typeof value === 'string' && value.length > 0;
 }
@@ -740,6 +757,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private previewArtifacts = new Map<string, PreviewArtifact>();
   private activePreviewByRoute = new Map<string, string>();
   private activityArtifacts = new Map<string, ActivityArtifact>();
+  private pendingActivitySends = new Map<string, PendingActivitySend>();
   private pendingTitles = new Set<string>();
   private outboundMessageQueues = new Map<string, Promise<void>>();
   private lastOutboundMessageAt = new Map<string, number>();
@@ -824,6 +842,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     this.previewArtifacts.clear();
     this.activePreviewByRoute.clear();
     this.activityArtifacts.clear();
+    this.pendingActivitySends.clear();
     this.pendingTitles.clear();
     this.outboundMessageQueues.clear();
     this.lastOutboundMessageAt.clear();
@@ -1044,20 +1063,41 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
 
     const targetReplyId = replyToMessageId || this.lastIncomingMessageId.get(routeKey);
-    const sent = await this.sendInteractiveCard(address, card, targetReplyId);
-    this.activityArtifacts.set(key, {
-      key,
-      routeKey,
-      activityId: event.id,
-      messageId: sent.messageId,
-      openMessageId: sent.openMessageId,
-      kind: event.kind,
-    });
-    return {
-      ok: true,
-      messageId: sent.messageId,
-      openMessageId: sent.openMessageId,
-    };
+    const pending = this.pendingActivitySends.get(key);
+    const requestUuid = pending?.requestUuid || stableMessageUuid('activity', key);
+    try {
+      const sent = await this.sendInteractiveCard(address, card, targetReplyId, requestUuid);
+      this.activityArtifacts.set(key, {
+        key,
+        routeKey,
+        activityId: event.id,
+        messageId: sent.messageId,
+        openMessageId: sent.openMessageId,
+        kind: event.kind,
+      });
+      this.pendingActivitySends.delete(key);
+      if (pending?.needsRecoveryPatch) {
+        await this.patchInteractiveCard(sent.messageId, card);
+      }
+      return {
+        ok: true,
+        messageId: sent.messageId,
+        openMessageId: sent.openMessageId,
+      };
+    } catch (error) {
+      if (isRecoverableMessageSendError(error)) {
+        this.pendingActivitySends.set(key, {
+          requestUuid,
+          needsRecoveryPatch: true,
+        });
+        console.warn('[feishu-adapter] Activity card send timed out; keeping idempotent UUID for recovery:', error);
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+      throw error;
+    }
   }
 
   async send(message: OutboundMessage): Promise<SendResult> {
@@ -2039,8 +2079,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
     address: ChannelAddress,
     card: Record<string, unknown> | lark.InteractiveCard,
     replyToMessageId?: string,
+    requestUuid?: string,
   ): Promise<{ messageId: string; openMessageId?: string }> {
-    const response = await this.sendLarkMessage(address, 'interactive', JSON.stringify(card), replyToMessageId);
+    const response = await this.sendLarkMessage(address, 'interactive', JSON.stringify(card), replyToMessageId, requestUuid);
     assertLarkOk(response, 'im.message.sendInteractiveCard');
     return {
       messageId: response.data?.message_id || '',
@@ -2053,15 +2094,17 @@ export class FeishuAdapter extends BaseChannelAdapter {
     msgType: 'interactive' | 'post',
     content: string,
     replyToMessageId?: string,
+    requestUuid?: string,
   ): Promise<{ code?: number; msg?: string; data?: { message_id?: string; open_message_id?: string; chat_id?: string } }> {
     return this.enqueueOutboundMessage(address.chatId, async () => {
+      const uuid = requestUuid || randomUUID().slice(0, 50);
       if (replyToMessageId) {
         return this.restClient!.im.message.reply({
           path: { message_id: replyToMessageId },
           data: {
             msg_type: msgType,
             content,
-            uuid: randomUUID().slice(0, 50),
+            uuid,
             ...(address.threadId ? { reply_in_thread: true } : {}),
           },
         });
@@ -2074,7 +2117,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
           receive_id: receiveId,
           msg_type: msgType,
           content,
-          uuid: randomUUID().slice(0, 50),
+          uuid,
         },
       });
     });
