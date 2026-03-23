@@ -293,6 +293,225 @@ describe('CodexProvider', () => {
     assert.equal(events.find((event) => event.type === 'text_segment')?.data, '我会先查看项目约束。');
   });
 
+  it('maps command/file/context and legacy runtime notifications into activity_event SSE payloads', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const fake = new FakeCodexClient({
+      'thread/start': async () => ({ thread: { id: 'thread-activity-map' }, model: 'gpt-5.4' }),
+      'turn/start': async () => {
+        queueMicrotask(() => {
+          fake.emit({
+            kind: 'notification',
+            method: 'turn/started',
+            params: {
+              threadId: 'thread-activity-map',
+              turn: { id: 'turn-activity-map' },
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'thread/tokenUsage/updated',
+            params: {
+              threadId: 'thread-activity-map',
+              tokenUsage: {
+                last: {
+                  inputTokens: 12,
+                  outputTokens: 5,
+                  cachedInputTokens: 2,
+                },
+              },
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'item/started',
+            params: {
+              threadId: 'thread-activity-map',
+              turnId: 'turn-activity-map',
+              item: {
+                type: 'commandExecution',
+                id: 'cmd-1',
+                command: 'pwd',
+                cwd: '/tmp/test-cwd',
+              },
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'item/commandExecution/outputDelta',
+            params: {
+              threadId: 'thread-activity-map',
+              turnId: 'turn-activity-map',
+              itemId: 'cmd-1',
+              command: 'pwd',
+              cwd: '/tmp/test-cwd',
+              delta: '/tmp/test-cwd',
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'item/completed',
+            params: {
+              threadId: 'thread-activity-map',
+              turnId: 'turn-activity-map',
+              item: {
+                type: 'commandExecution',
+                id: 'cmd-1',
+                turnId: 'turn-activity-map',
+                command: 'pwd',
+                cwd: '/tmp/test-cwd',
+                aggregatedOutput: '/tmp/test-cwd',
+                exitCode: 0,
+                durationMs: 18,
+              },
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'item/fileChange/outputDelta',
+            params: {
+              threadId: 'thread-activity-map',
+              turnId: 'turn-activity-map',
+              itemId: 'file-1',
+              summary: '正在修改 bridge-manager.ts',
+              changes: [{ kind: 'update', path: 'src/bridge/bridge-manager.ts' }],
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'item/completed',
+            params: {
+              threadId: 'thread-activity-map',
+              turnId: 'turn-activity-map',
+              item: {
+                type: 'fileChange',
+                id: 'file-1',
+                turnId: 'turn-activity-map',
+                changes: [{ kind: 'update', path: 'src/bridge/bridge-manager.ts' }],
+              },
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'codex/event/search',
+            params: {
+              threadId: 'thread-activity-map',
+              turnId: 'turn-activity-map',
+              query: 'cardkit streaming updates',
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'turn/completed',
+            params: {
+              threadId: 'thread-activity-map',
+              turn: { id: 'turn-activity-map', error: null },
+            },
+          });
+        });
+        return { turn: { id: 'turn-activity-map' } };
+      },
+    });
+
+    const provider = new CodexProvider();
+    (provider as any).client = fake;
+
+    const chunks = await collectStream(provider.streamChat({
+      prompt: '继续',
+      sessionId: 'session-activity-map',
+      model: 'gpt-5.4',
+    }));
+
+    const events = parseSSEChunks(chunks);
+    const activities = events
+      .filter((event) => event.type === 'activity_event')
+      .map((event) => JSON.parse(event.data));
+
+    assert.ok(activities.some((event) => event.kind === 'context_usage' && event.inputTokens === 12));
+    assert.ok(activities.some((event) => event.kind === 'command_execution' && event.status === 'running' && event.command === 'pwd'));
+    assert.ok(activities.some((event) => event.kind === 'command_execution' && event.status === 'completed' && event.exitCode === 0));
+    assert.ok(activities.some((event) => event.kind === 'file_change' && event.status === 'running'));
+    assert.ok(activities.some((event) => event.kind === 'file_change' && event.status === 'completed'));
+    assert.ok(activities.some((event) => event.kind === 'lightweight_activity' && /已搜索/.test(event.text)));
+  });
+
+  it('keeps started and completed command activities on the same fallback id when item ids are missing', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const fake = new FakeCodexClient({
+      'thread/start': async () => ({ thread: { id: 'thread-command-fallback' }, model: 'gpt-5.4' }),
+      'turn/start': async () => {
+        queueMicrotask(() => {
+          fake.emit({
+            kind: 'notification',
+            method: 'turn/started',
+            params: {
+              threadId: 'thread-command-fallback',
+              turn: { id: 'turn-command-fallback' },
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'item/started',
+            params: {
+              threadId: 'thread-command-fallback',
+              turnId: 'turn-command-fallback',
+              item: {
+                type: 'commandExecution',
+                command: 'sed -n 1,220p CLAUDE.md',
+                cwd: '/tmp/test-cwd',
+              },
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'item/completed',
+            params: {
+              threadId: 'thread-command-fallback',
+              turnId: 'turn-command-fallback',
+              item: {
+                type: 'commandExecution',
+                command: 'sed -n 1,220p CLAUDE.md',
+                cwd: '/tmp/test-cwd',
+                aggregatedOutput: 'ok',
+                exitCode: 0,
+              },
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'turn/completed',
+            params: {
+              threadId: 'thread-command-fallback',
+              turn: { id: 'turn-command-fallback', error: null },
+            },
+          });
+        });
+        return { turn: { id: 'turn-command-fallback' } };
+      },
+    });
+
+    const provider = new CodexProvider();
+    (provider as any).client = fake;
+
+    const chunks = await collectStream(provider.streamChat({
+      prompt: '继续',
+      sessionId: 'session-command-fallback',
+      model: 'gpt-5.4',
+    }));
+
+    const events = parseSSEChunks(chunks);
+    const commandActivities = events
+      .filter((event) => event.type === 'activity_event')
+      .map((event) => JSON.parse(event.data))
+      .filter((event) => event.kind === 'command_execution');
+
+    assert.equal(commandActivities.length, 2);
+    assert.equal(commandActivities[0].status, 'running');
+    assert.equal(commandActivities[1].status, 'completed');
+    assert.equal(commandActivities[0].id, 'command:turn-command-fallback');
+    assert.equal(commandActivities[1].id, 'command:turn-command-fallback');
+    assert.equal(commandActivities[1].turnId, 'turn-command-fallback');
+  });
+
   it('bridges structured user input requests back into app-server responses', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
     const pendingInputs = new PendingStructuredInputs();

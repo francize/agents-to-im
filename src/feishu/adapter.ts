@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import * as lark from '@larksuiteoapi/node-sdk';
 
 import type {
+  ActivityEvent,
   ChannelAddress,
   ChannelType,
   InboundMessage,
@@ -89,6 +90,15 @@ interface PreviewArtifact {
   mode: 'cardkit' | 'patch';
 }
 
+interface ActivityArtifact {
+  key: string;
+  routeKey: string;
+  activityId: string;
+  messageId: string;
+  openMessageId?: string;
+  kind: ActivityEvent['kind'];
+}
+
 type StructuredActionEvent = lark.InteractiveCardActionEvent & {
   action: lark.InteractiveCardActionEvent['action'] & {
     form_value?: Record<string, unknown>;
@@ -119,6 +129,10 @@ function previewKey(routeKey: string, draftId: number): string {
   return `${routeKey}:${draftId}`;
 }
 
+function activityKey(routeKey: string, activityId: string): string {
+  return `${routeKey}:activity:${activityId}`;
+}
+
 function sanitizeTitleFallback(text: string): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, 30) || '新会话';
 }
@@ -147,6 +161,188 @@ function buildSimpleCard(text: string): Record<string, unknown> {
       ],
     },
   };
+}
+
+function ensureRobotPrefix(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return '🤖 努力回答中...';
+  return trimmed.startsWith('🤖') ? trimmed : `🤖 ${trimmed}`;
+}
+
+function normalizeSingleLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function truncateActivityOutput(text: string, maxChars = 280): string {
+  const normalized = text.replace(/\s+\n/g, '\n').trim();
+  if (!normalized) return '';
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars - 3).trimEnd()}...`;
+}
+
+function escapeInlineCode(text: string): string {
+  return text.replace(/`/g, '\\`');
+}
+
+function formatActivityStatus(status: 'running' | 'completed' | 'failed'): string {
+  switch (status) {
+    case 'running':
+      return '进行中';
+    case 'failed':
+      return '失败';
+    case 'completed':
+    default:
+      return '已完成';
+  }
+}
+
+function buildActivityCardBase(elements: Array<Record<string, unknown>>, header?: {
+  title: string;
+  template?: NonNullable<lark.InteractiveCard['header']>['template'];
+}): Record<string, unknown> {
+  return {
+    schema: '2.0',
+    config: {
+      update_multi: true,
+      wide_screen_mode: true,
+      width_mode: 'fill',
+    },
+    ...(header
+      ? {
+          header: {
+            title: {
+              tag: 'plain_text',
+              content: header.title,
+            },
+            template: header.template || 'grey',
+          },
+        }
+      : {}),
+    body: {
+      elements,
+    },
+  };
+}
+
+function buildCollapsibleActivityCard(
+  title: string,
+  summary: string,
+  bodyMarkdown: string,
+  status: 'running' | 'completed' | 'failed',
+): Record<string, unknown> {
+  const tone = status === 'failed' ? 'red' : 'grey';
+  const panelTitle = summary.trim()
+    ? `**${title}** · ${summary.trim()}`
+    : `**${title}**`;
+  return buildActivityCardBase([
+    {
+      tag: 'collapsible_panel',
+      element_id: `panel_${title.replace(/[^a-zA-Z0-9]/g, '').slice(0, 12) || 'activity'}`,
+      expanded: false,
+      background_color: 'grey',
+      padding: '8px 12px 12px 12px',
+      vertical_spacing: '8px',
+      header: {
+        title: {
+          tag: 'markdown',
+          content: panelTitle,
+        },
+        background_color: 'grey',
+        width: 'fill',
+        vertical_align: 'center',
+        padding: '10px 12px 10px 12px',
+        icon: {
+          tag: 'standard_icon',
+          token: 'down-small-ccm_outlined',
+          size: '16px 16px',
+        },
+        icon_position: 'right',
+        icon_expanded_angle: -180,
+      },
+      border: {
+        color: tone,
+        corner_radius: '8px',
+      },
+      elements: [
+        {
+          tag: 'markdown',
+          content: bodyMarkdown,
+        },
+      ],
+    },
+  ]);
+}
+
+function buildLightweightActivityCard(event: Extract<ActivityEvent, { kind: 'lightweight_activity' }>): Record<string, unknown> {
+  return buildActivityCardBase([
+    {
+      tag: 'markdown',
+      content: ensureRobotPrefix(event.text),
+    },
+  ]);
+}
+
+function buildCommandExecutionCard(event: Extract<ActivityEvent, { kind: 'command_execution' }>): Record<string, unknown> {
+  const shortCommand = truncateActivityOutput(normalizeSingleLine(event.command), 72);
+  const summary = [formatActivityStatus(event.status), shortCommand ? `\`${escapeInlineCode(shortCommand)}\`` : '']
+    .filter(Boolean)
+    .join(' · ');
+  const lines = [
+    `**状态**：${formatActivityStatus(event.status)}`,
+  ];
+  if (event.command.trim()) {
+    lines.push(`**命令**：\`${escapeInlineCode(event.command)}\``);
+  }
+  if (event.cwd?.trim()) {
+    lines.push(`**目录**：\`${escapeInlineCode(event.cwd)}\``);
+  }
+  if (typeof event.exitCode === 'number') {
+    lines.push(`**退出码**：${event.exitCode}`);
+  }
+  if (typeof event.durationMs === 'number' && event.durationMs >= 0) {
+    lines.push(`**耗时**：${event.durationMs} ms`);
+  }
+  const output = truncateActivityOutput(event.output || '');
+  if (output) {
+    lines.push('', `**输出预览**`, '```text', output.replace(/```/g, '``` '), '```');
+  }
+  return buildCollapsibleActivityCard('执行命令', summary, lines.join('\n'), event.status);
+}
+
+function buildFileChangeCard(event: Extract<ActivityEvent, { kind: 'file_change' }>): Record<string, unknown> {
+  const changedCount = event.changes.length;
+  const summary = [formatActivityStatus(event.status), changedCount > 0 ? `${changedCount} 个文件` : normalizeSingleLine(event.summary || '')]
+    .filter(Boolean)
+    .join(' · ');
+  const lines = [
+    `**状态**：${formatActivityStatus(event.status)}`,
+  ];
+  if (event.summary?.trim()) {
+    lines.push(`**摘要**：${normalizeSingleLine(event.summary)}`);
+  }
+  if (event.changes.length > 0) {
+    lines.push('', '**文件**');
+    for (const change of event.changes.slice(0, 8)) {
+      lines.push(`- \`${change.path.replace(/`/g, '\\`')}\` (${change.kind})`);
+    }
+    if (event.changes.length > 8) {
+      lines.push(`- 另有 ${event.changes.length - 8} 项修改`);
+    }
+  }
+  return buildCollapsibleActivityCard('修改文件', summary, lines.join('\n'), event.status);
+}
+
+function buildActivityCard(event: ActivityEvent): Record<string, unknown> {
+  switch (event.kind) {
+    case 'lightweight_activity':
+      return buildLightweightActivityCard(event);
+    case 'command_execution':
+      return buildCommandExecutionCard(event);
+    case 'file_change':
+      return buildFileChangeCard(event);
+    case 'context_usage':
+      return buildSimpleCard('上下文使用量已更新');
+  }
 }
 
 function buildStreamingCardSkeleton(): Record<string, unknown> {
@@ -543,6 +739,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private typingReactions = new Map<string, string>();
   private previewArtifacts = new Map<string, PreviewArtifact>();
   private activePreviewByRoute = new Map<string, string>();
+  private activityArtifacts = new Map<string, ActivityArtifact>();
   private pendingTitles = new Set<string>();
   private outboundMessageQueues = new Map<string, Promise<void>>();
   private lastOutboundMessageAt = new Map<string, number>();
@@ -626,6 +823,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     this.chatQueues.clear();
     this.previewArtifacts.clear();
     this.activePreviewByRoute.clear();
+    this.activityArtifacts.clear();
     this.pendingTitles.clear();
     this.outboundMessageQueues.clear();
     this.lastOutboundMessageAt.clear();
@@ -821,6 +1019,45 @@ export class FeishuAdapter extends BaseChannelAdapter {
     } catch (error) {
       console.warn('[feishu-adapter] Failed to resolve structured input card:', error);
     }
+  }
+
+  async upsertActivityEvent(
+    address: ChannelAddress,
+    event: ActivityEvent,
+    replyToMessageId?: string,
+  ): Promise<SendResult> {
+    if (!this.restClient || event.kind === 'context_usage') {
+      return { ok: true };
+    }
+    const routeKey = routeKeyForAddress(address);
+    const key = activityKey(routeKey, event.id);
+    const artifact = this.activityArtifacts.get(key);
+    const card = buildActivityCard(event);
+
+    if (artifact?.messageId) {
+      await this.patchInteractiveCard(artifact.messageId, card);
+      return {
+        ok: true,
+        messageId: artifact.messageId,
+        openMessageId: artifact.openMessageId,
+      };
+    }
+
+    const targetReplyId = replyToMessageId || this.lastIncomingMessageId.get(routeKey);
+    const sent = await this.sendInteractiveCard(address, card, targetReplyId);
+    this.activityArtifacts.set(key, {
+      key,
+      routeKey,
+      activityId: event.id,
+      messageId: sent.messageId,
+      openMessageId: sent.openMessageId,
+      kind: event.kind,
+    });
+    return {
+      ok: true,
+      messageId: sent.messageId,
+      openMessageId: sent.openMessageId,
+    };
   }
 
   async send(message: OutboundMessage): Promise<SendResult> {

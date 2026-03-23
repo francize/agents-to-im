@@ -3,7 +3,13 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { CodexAppServerClient, type CodexServerMessage } from './codex-app-server-client.js';
-import type { LLMProvider, StreamChatParams, StructuredInputRequestInfo } from './bridge/host.js';
+import type {
+  ActivityEvent,
+  ActivityFileChangeEntry,
+  LLMProvider,
+  StreamChatParams,
+  StructuredInputRequestInfo,
+} from './bridge/host.js';
 import {
   PendingApprovals,
   PendingStructuredInputs,
@@ -281,6 +287,173 @@ function extractTurnId(message: CodexServerMessage): string {
   return typeof params.turnId === 'string' ? params.turnId : '';
 }
 
+function firstString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+function normalizeLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function extractFileChangeEntries(value: unknown): ActivityFileChangeEntry[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => {
+      const record = entry as JsonRecord;
+      const path = firstString(record.path, record.filePath, record.file);
+      if (!path) return null;
+      return {
+        kind: firstString(record.kind, record.type) || 'update',
+        path,
+      };
+    })
+    .filter((entry): entry is ActivityFileChangeEntry => !!entry);
+}
+
+function summarizeToolCall(name: string, input: unknown): string {
+  const normalized = name.toLowerCase();
+  const record = typeof input === 'object' && input ? input as JsonRecord : {};
+  const target = firstString(
+    record.url,
+    record.uri,
+    record.path,
+    record.file,
+    record.query,
+    record.pattern,
+    record.command,
+  );
+
+  if (normalized.includes('search')) {
+    return target ? `正在搜索 ${target}…` : '正在搜索资料…';
+  }
+  if (normalized.includes('read') || normalized.includes('cat')) {
+    return target ? `正在读取 ${target}…` : '正在读取文件…';
+  }
+  if (normalized.includes('list')) {
+    return target ? `正在列出 ${target}…` : '正在查看目录结构…';
+  }
+  if (normalized.includes('bash')) {
+    return target ? `正在执行命令 ${target}…` : '正在执行命令…';
+  }
+  return target ? `正在调用 ${name} (${target})…` : `正在调用 ${name}…`;
+}
+
+function buildLightweightActivity(
+  scopeId: string,
+  status: 'running' | 'completed' | 'failed',
+  text: string,
+  turnId?: string,
+  source?: string,
+): ActivityEvent | null {
+  const normalized = normalizeLine(text);
+  if (!normalized) return null;
+  return {
+    kind: 'lightweight_activity',
+    id: `lightweight:${scopeId}`,
+    turnId,
+    status,
+    text: normalized,
+    source,
+  };
+}
+
+function buildLegacyActivityEvent(
+  method: string,
+  params: JsonRecord,
+  threadId: string,
+  turnId: string,
+): ActivityEvent | null {
+  const scopeId = turnId || threadId || method;
+  switch (method) {
+    case 'codex/event/background_event': {
+      const text = firstString(params.message, params.title, params.detail, params.event);
+      return buildLightweightActivity(
+        scopeId,
+        'running',
+        text || '正在自动压缩背景信息…',
+        turnId || undefined,
+        'background',
+      );
+    }
+    case 'codex/event/read': {
+      const target = firstString(params.path, params.file, params.target);
+      return buildLightweightActivity(
+        scopeId,
+        'completed',
+        target ? `已读取 ${target}` : '已读取文件',
+        turnId || undefined,
+        'read',
+      );
+    }
+    case 'codex/event/search': {
+      const target = firstString(params.query, params.pattern, params.url);
+      return buildLightweightActivity(
+        scopeId,
+        'completed',
+        target ? `已搜索 ${target}` : '已完成搜索',
+        turnId || undefined,
+        'search',
+      );
+    }
+    case 'codex/event/list_files': {
+      const target = firstString(params.path, params.target);
+      return buildLightweightActivity(
+        scopeId,
+        'completed',
+        target ? `已查看 ${target} 的文件列表` : '已查看文件列表',
+        turnId || undefined,
+        'list_files',
+      );
+    }
+    case 'codex/event/exec_command_begin': {
+      const command = firstString(params.command, params.cmd);
+      return {
+        kind: 'command_execution',
+        id: firstString(params.itemId, params.commandId) || `command:${scopeId}`,
+        turnId: turnId || undefined,
+        status: 'running',
+        command,
+        cwd: firstString(params.cwd),
+      };
+    }
+    case 'codex/event/exec_command_output_delta': {
+      const command = firstString(params.command, params.cmd);
+      return {
+        kind: 'command_execution',
+        id: firstString(params.itemId, params.commandId) || `command:${scopeId}`,
+        turnId: turnId || undefined,
+        status: 'running',
+        command,
+        cwd: firstString(params.cwd),
+        output: firstString(params.delta, params.output),
+      };
+    }
+    case 'codex/event/exec_command_end': {
+      const command = firstString(params.command, params.cmd);
+      const exitCode = typeof params.exitCode === 'number'
+        ? params.exitCode
+        : typeof params.exit_code === 'number'
+          ? params.exit_code
+          : null;
+      return {
+        kind: 'command_execution',
+        id: firstString(params.itemId, params.commandId) || `command:${scopeId}`,
+        turnId: turnId || undefined,
+        status: exitCode === 0 || exitCode === null ? 'completed' : 'failed',
+        command,
+        cwd: firstString(params.cwd),
+        output: firstString(params.output),
+        exitCode,
+      };
+    }
+    default:
+      return null;
+  }
+}
+
 async function buildUserInput(
   prompt: string,
   files: StreamChatParams['files'],
@@ -448,11 +621,24 @@ export class CodexProvider implements LLMProvider {
             break;
           case 'thread/tokenUsage/updated':
             tokenUsage = mapTokenUsage((paramsRecord.tokenUsage as JsonRecord | undefined)?.last as TokenUsageBreakdown | undefined);
+            if (tokenUsage) {
+              controller.enqueue(sseEvent('activity_event', {
+                kind: 'context_usage',
+                id: `context:${activeTurnId || threadId}`,
+                turnId: activeTurnId || undefined,
+                inputTokens: tokenUsage.input_tokens,
+                outputTokens: tokenUsage.output_tokens,
+                cacheReadInputTokens: tokenUsage.cache_read_input_tokens,
+              } satisfies ActivityEvent));
+            }
             break;
           case 'turn/started':
             activeTurnId = typeof (paramsRecord.turn as JsonRecord | undefined)?.id === 'string'
               ? String((paramsRecord.turn as JsonRecord).id)
               : activeTurnId;
+            break;
+          case 'item/started':
+            this.handleStartedItem(controller, paramsRecord.item as JsonRecord | undefined, activeTurnId || extractTurnId(message));
             break;
           case 'item/agentMessage/delta':
             if (typeof paramsRecord.delta === 'string') {
@@ -464,6 +650,19 @@ export class CodexProvider implements LLMProvider {
             if (typeof paramsRecord.delta === 'string') {
               controller.enqueue(sseEvent('status', { reasoning: paramsRecord.delta }));
             }
+            break;
+          case 'item/commandExecution/outputDelta':
+          case 'item/command_execution/outputDelta':
+            this.handleCommandExecutionDelta(controller, paramsRecord, activeTurnId || extractTurnId(message));
+            break;
+          case 'item/fileChange/outputDelta':
+            this.handleFileChangeDelta(controller, paramsRecord, activeTurnId || extractTurnId(message));
+            break;
+          case 'item/toolCall/outputDelta':
+          case 'item/toolCall/output_delta':
+          case 'item/tool_call/outputDelta':
+          case 'item/tool_call/output_delta':
+            this.handleToolCallDelta(controller, paramsRecord, activeTurnId || extractTurnId(message));
             break;
           case 'turn/plan/updated':
             controller.enqueue(sseEvent('plan_state', paramsRecord));
@@ -477,11 +676,33 @@ export class CodexProvider implements LLMProvider {
             if (activeTurnId && extractTurnId(message) && extractTurnId(message) !== activeTurnId) {
               break;
             }
-            this.handleCompletedItem(controller, paramsRecord.item as JsonRecord);
+            this.handleCompletedItem(
+              controller,
+              paramsRecord.item as JsonRecord,
+              activeTurnId || extractTurnId(message),
+            );
             break;
           case 'serverRequest/resolved':
             controller.enqueue(sseEvent('server_request_resolved', paramsRecord));
             break;
+          case 'codex/event/exec_command_begin':
+          case 'codex/event/exec_command_output_delta':
+          case 'codex/event/exec_command_end':
+          case 'codex/event/background_event':
+          case 'codex/event/read':
+          case 'codex/event/search':
+          case 'codex/event/list_files': {
+            const legacyEvent = buildLegacyActivityEvent(
+              message.method,
+              paramsRecord,
+              threadId,
+              activeTurnId || extractTurnId(message),
+            );
+            if (legacyEvent) {
+              controller.enqueue(sseEvent('activity_event', legacyEvent));
+            }
+            break;
+          }
           case 'error':
             controller.enqueue(sseEvent('error', String((paramsRecord.error as JsonRecord | undefined)?.message || 'Turn failed')));
             break;
@@ -624,9 +845,13 @@ export class CodexProvider implements LLMProvider {
   private handleCompletedItem(
     controller: ReadableStreamDefaultController<string>,
     item: JsonRecord | undefined,
+    fallbackTurnId?: string,
   ): void {
     if (!item) return;
     const itemType = normalizeItemType(item.type);
+    const resolvedTurnId = typeof item.turnId === 'string'
+      ? item.turnId
+      : fallbackTurnId || undefined;
 
     switch (itemType) {
       case 'agentMessage': {
@@ -644,11 +869,22 @@ export class CodexProvider implements LLMProvider {
         break;
       }
       case 'commandExecution': {
-        const toolId = typeof item.id === 'string' ? item.id : `tool-${Date.now()}`;
+        const toolId = typeof item.id === 'string' ? item.id : `command:${resolvedTurnId || Date.now()}`;
         const command = typeof item.command === 'string' ? item.command : '';
         const output = typeof item.aggregatedOutput === 'string' ? item.aggregatedOutput : '';
         const exitCode = typeof item.exitCode === 'number' ? item.exitCode : null;
         const isError = exitCode !== null && exitCode !== 0;
+        controller.enqueue(sseEvent('activity_event', {
+          kind: 'command_execution',
+          id: toolId,
+          turnId: resolvedTurnId,
+          status: isError ? 'failed' : 'completed',
+          command,
+          cwd: typeof item.cwd === 'string' ? item.cwd : undefined,
+          output,
+          exitCode,
+          durationMs: typeof item.durationMs === 'number' ? item.durationMs : null,
+        } satisfies ActivityEvent));
         controller.enqueue(sseEvent('tool_use', {
           id: toolId,
           name: 'Bash',
@@ -662,14 +898,23 @@ export class CodexProvider implements LLMProvider {
         break;
       }
       case 'fileChange': {
-        const toolId = typeof item.id === 'string' ? item.id : `tool-${Date.now()}`;
+        const toolId = typeof item.id === 'string' ? item.id : `file-change:${resolvedTurnId || Date.now()}`;
         const changes = Array.isArray(item.changes) ? item.changes : [];
+        const entries = extractFileChangeEntries(changes);
         const summary = changes
           .map((change) => {
             const record = change as JsonRecord;
             return `${String(record.kind || 'update')}: ${String(record.path || '')}`;
           })
           .join('\n');
+        controller.enqueue(sseEvent('activity_event', {
+          kind: 'file_change',
+          id: toolId,
+          turnId: resolvedTurnId,
+          status: 'completed',
+          summary: summary || '已完成文件修改',
+          changes: entries,
+        } satisfies ActivityEvent));
         controller.enqueue(sseEvent('tool_use', {
           id: toolId,
           name: 'Edit',
@@ -683,12 +928,22 @@ export class CodexProvider implements LLMProvider {
         break;
       }
       case 'mcpToolCall': {
-        const toolId = typeof item.id === 'string' ? item.id : `tool-${Date.now()}`;
+        const toolId = typeof item.id === 'string' ? item.id : `tool:${resolvedTurnId || Date.now()}`;
         const server = typeof item.server === 'string' ? item.server : '';
         const tool = typeof item.tool === 'string' ? item.tool : '';
         const result = item.result as JsonRecord | null | undefined;
         const error = item.error as JsonRecord | null | undefined;
         const content = result?.content ?? result?.structuredContent ?? result?.structured_content;
+        const activity = buildLightweightActivity(
+          resolvedTurnId || toolId,
+          error ? 'failed' : 'completed',
+          summarizeToolCall(`${server}/${tool}`, item.arguments),
+          resolvedTurnId,
+          'tool_call',
+        );
+        if (activity) {
+          controller.enqueue(sseEvent('activity_event', activity));
+        }
         controller.enqueue(sseEvent('tool_use', {
           id: toolId,
           name: `mcp__${server}__${tool}`,
@@ -705,10 +960,106 @@ export class CodexProvider implements LLMProvider {
         const parts = Array.isArray(item.content) ? item.content.filter((part): part is string => typeof part === 'string') : [];
         const text = parts.join('\n').trim();
         if (text) {
-          controller.enqueue(sseEvent('status', { reasoning: text }));
+          controller.enqueue(sseEvent('status', { reasoning: text, turn_id: resolvedTurnId }));
         }
         break;
       }
+    }
+  }
+
+  private handleStartedItem(
+    controller: ReadableStreamDefaultController<string>,
+    item: JsonRecord | undefined,
+    turnId: string,
+  ): void {
+    if (!item) return;
+    const itemType = normalizeItemType(item.type);
+    if (itemType === 'commandExecution') {
+      controller.enqueue(sseEvent('activity_event', {
+        kind: 'command_execution',
+        id: typeof item.id === 'string' ? item.id : `command:${turnId || Date.now()}`,
+        turnId: turnId || undefined,
+        status: 'running',
+        command: typeof item.command === 'string' ? item.command : '',
+        cwd: typeof item.cwd === 'string' ? item.cwd : undefined,
+      } satisfies ActivityEvent));
+      return;
+    }
+    if (itemType === 'fileChange') {
+      controller.enqueue(sseEvent('activity_event', {
+        kind: 'file_change',
+        id: typeof item.id === 'string' ? item.id : `file-change:${turnId || Date.now()}`,
+        turnId: turnId || undefined,
+        status: 'running',
+        summary: '正在修改文件…',
+        changes: extractFileChangeEntries(item.changes),
+      } satisfies ActivityEvent));
+      return;
+    }
+    if (itemType === 'mcpToolCall') {
+      const activity = buildLightweightActivity(
+        turnId || String(item.id || Date.now()),
+        'running',
+        summarizeToolCall(
+          `${firstString(item.server)}/${firstString(item.tool)}`.replace(/^\/+/, ''),
+          item.arguments,
+        ),
+        turnId || undefined,
+        'tool_call',
+      );
+      if (activity) {
+        controller.enqueue(sseEvent('activity_event', activity));
+      }
+    }
+  }
+
+  private handleCommandExecutionDelta(
+    controller: ReadableStreamDefaultController<string>,
+    params: JsonRecord,
+    turnId: string,
+  ): void {
+    controller.enqueue(sseEvent('activity_event', {
+      kind: 'command_execution',
+      id: firstString(params.itemId, params.id) || `command:${turnId || Date.now()}`,
+      turnId: turnId || undefined,
+      status: 'running',
+      command: firstString(params.command, params.cmd),
+      cwd: firstString(params.cwd) || undefined,
+      output: firstString(params.delta, params.output) || undefined,
+    } satisfies ActivityEvent));
+  }
+
+  private handleFileChangeDelta(
+    controller: ReadableStreamDefaultController<string>,
+    params: JsonRecord,
+    turnId: string,
+  ): void {
+    const changes = extractFileChangeEntries(params.changes);
+    const summary = firstString(params.delta, params.summary) || '正在修改文件…';
+    controller.enqueue(sseEvent('activity_event', {
+      kind: 'file_change',
+      id: firstString(params.itemId, params.id) || `file-change:${turnId || Date.now()}`,
+      turnId: turnId || undefined,
+      status: 'running',
+      summary,
+      changes,
+    } satisfies ActivityEvent));
+  }
+
+  private handleToolCallDelta(
+    controller: ReadableStreamDefaultController<string>,
+    params: JsonRecord,
+    turnId: string,
+  ): void {
+    const activity = buildLightweightActivity(
+      turnId || firstString(params.itemId, params.id) || `tool:${Date.now()}`,
+      'running',
+      summarizeToolCall(firstString(params.toolName, params.tool, params.name) || '工具', params.input || params.arguments),
+      turnId || undefined,
+      'tool_call',
+    );
+    if (activity) {
+      controller.enqueue(sseEvent('activity_event', activity));
     }
   }
 }

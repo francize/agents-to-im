@@ -7,7 +7,7 @@
  */
 
 // Re-export bridge-local types from host.ts so consumers can import from one place
-export type { FileAttachment } from './host.js';
+export type { ActivityEvent, FileAttachment } from './host.js';
 
 // ── Channel Types ──────────────────────────────────────────────
 

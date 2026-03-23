@@ -708,6 +708,248 @@ describe('bridge-manager plan workflow', () => {
     assert.equal(deliveredRequest.requestId, 'req-no-prime-1');
   });
 
+  it('suppresses delayed lightweight activity cards when the turn immediately asks for structured input', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const activityEvents: Array<Record<string, unknown>> = [];
+    let structuredRequest: { requestId?: string } | null = null;
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'activity_event',
+              data: JSON.stringify({
+                kind: 'lightweight_activity',
+                id: 'lw-1',
+                turnId: 'turn-activity-structured',
+                status: 'running',
+                text: '正在自动压缩背景信息…',
+              }),
+            })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'structured_input_request',
+              data: JSON.stringify({
+                requestId: 'req-activity-structured',
+                threadId: 'thread-activity-structured',
+                turnId: 'turn-activity-structured',
+                itemId: 'item-activity-structured',
+                questions: [
+                  {
+                    id: 'q1',
+                    header: '语言',
+                    question: '页面内容用什么语言？',
+                    isOther: true,
+                    isSecret: false,
+                    options: [{ label: '英文', description: '推荐' }],
+                  },
+                ],
+              }),
+            })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-activity-structured' }) })}\n`);
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-activity-structured',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    (adapter as any).upsertActivityEvent = async (_address: unknown, event: Record<string, unknown>) => {
+      activityEvents.push(event);
+      return { ok: true, messageId: `activity-${activityEvents.length}` };
+    };
+    (adapter as any).sendStructuredInputRequest = async (_address: unknown, request: { requestId?: string }) => {
+      structuredRequest = request;
+      return { ok: true, messageId: 'structured-activity-msg' };
+    };
+
+    await start();
+    adapter.push({
+      messageId: 'msg-activity-structured',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-activity-structured' },
+      text: '继续',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => structuredRequest !== null);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    assert.equal(activityEvents.length, 0);
+    const deliveredRequest = structuredRequest || { requestId: undefined };
+    assert.equal(deliveredRequest.requestId, 'req-activity-structured');
+  });
+
+  it('projects lightweight, command, and file activities without mixing them into assistant text delivery', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const activityEvents: Array<Record<string, unknown>> = [];
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'activity_event',
+              data: JSON.stringify({
+                kind: 'lightweight_activity',
+                id: 'lw-1',
+                turnId: 'turn-activity-project',
+                status: 'running',
+                text: '正在搜索飞书文档…',
+              }),
+            })}\n`);
+            setTimeout(() => {
+              controller.enqueue(`data: ${JSON.stringify({
+                type: 'activity_event',
+                data: JSON.stringify({
+                  kind: 'lightweight_activity',
+                  id: 'lw-2',
+                  turnId: 'turn-activity-project',
+                  status: 'completed',
+                  text: '已搜索飞书文档 (https://open.feishu.cn/...)',
+                }),
+              })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({
+                type: 'activity_event',
+                data: JSON.stringify({
+                  kind: 'command_execution',
+                  id: 'legacy-cmd-1',
+                  turnId: 'turn-activity-project',
+                  status: 'running',
+                  command: 'rg CardKit',
+                  cwd: '/tmp/test-cwd',
+                  output: 'src/feishu/adapter.ts',
+                }),
+              })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({
+                type: 'activity_event',
+                data: JSON.stringify({
+                  kind: 'command_execution',
+                  id: 'stable-cmd-1',
+                  turnId: 'turn-activity-project',
+                  status: 'completed',
+                  command: 'rg CardKit',
+                  cwd: '/tmp/test-cwd',
+                  output: 'src/feishu/adapter.ts',
+                  exitCode: 0,
+                }),
+              })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({
+                type: 'activity_event',
+                data: JSON.stringify({
+                  kind: 'command_execution',
+                  id: 'command:turn-activity-project',
+                  turnId: 'turn-activity-project',
+                  status: 'completed',
+                  command: 'pwd',
+                  cwd: '/tmp/test-cwd',
+                  output: '/tmp/test-cwd',
+                  exitCode: 0,
+                }),
+              })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({
+                type: 'activity_event',
+                data: JSON.stringify({
+                  kind: 'command_execution',
+                  id: 'command:turn-activity-project',
+                  turnId: 'turn-activity-project',
+                  status: 'completed',
+                  command: 'rg CardKit',
+                  cwd: '/tmp/test-cwd',
+                  output: 'src/feishu/adapter.ts',
+                  exitCode: 0,
+                }),
+              })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({
+                type: 'activity_event',
+                data: JSON.stringify({
+                  kind: 'file_change',
+                  id: 'file-1',
+                  turnId: 'turn-activity-project',
+                  status: 'completed',
+                  summary: '已修改 bridge-manager.ts',
+                  changes: [{ kind: 'update', path: 'src/bridge/bridge-manager.ts' }],
+                }),
+              })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '我已经整理出 remodex 风格的展示方案。' })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-activity-project' }) })}\n`);
+              controller.close();
+            }, 40);
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-activity-project',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    (adapter as any).upsertActivityEvent = async (_address: unknown, event: Record<string, unknown>) => {
+      activityEvents.push(event);
+      return { ok: true, messageId: `activity-${activityEvents.length}` };
+    };
+
+    await start();
+    adapter.push({
+      messageId: 'msg-activity-project',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-activity-project', threadId: 'thread-1' },
+      text: '继续',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length === 1 && activityEvents.length >= 7);
+
+    assert.equal(adapter.sent[0].text, '我已经整理出 remodex 风格的展示方案。');
+    assert.deepEqual(
+      activityEvents.map((event) => event.kind),
+      [
+        'lightweight_activity',
+        'lightweight_activity',
+        'command_execution',
+        'command_execution',
+        'command_execution',
+        'command_execution',
+        'file_change',
+      ],
+    );
+    assert.equal(activityEvents[0].id, activityEvents[1].id);
+    assert.match(String(activityEvents[0].id), /^lightweight-slot:/);
+    assert.match(String(activityEvents[2].id), /^command:/);
+    assert.equal(activityEvents[2].id, activityEvents[3].id);
+    assert.notEqual(activityEvents[3].id, activityEvents[4].id);
+    assert.notEqual(activityEvents[3].id, activityEvents[5].id);
+    assert.notEqual(activityEvents[4].id, activityEvents[5].id);
+    assert.match(String(activityEvents[6].id), /^file:/);
+  });
+
   it('keeps one final delivery for replace_preview channels and merges a one-character lead segment', async () => {
     const store = new JsonFileStore(makeSettings());
     initBridgeContext({

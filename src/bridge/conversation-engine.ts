@@ -10,6 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import type { ChannelBinding } from './types.js';
 import type {
+  ActivityEvent,
   FileAttachment,
   SSEEvent,
   StructuredInputRequestInfo,
@@ -48,6 +49,8 @@ export type OnServerRequestResolved = (requestId: string) => Promise<void>;
 export type OnPartialText = (fullText: string) => void;
 
 export type OnResponseSegment = (segmentText: string) => Promise<void> | void;
+
+export type OnActivityEvent = (event: ActivityEvent) => Promise<void> | void;
 
 export interface ConversationResult {
   responseText: string;
@@ -121,6 +124,7 @@ export async function processMessage(
   onStructuredInputRequest?: OnStructuredInputRequest,
   onServerRequestResolved?: OnServerRequestResolved,
   onResponseSegment?: OnResponseSegment,
+  onActivityEvent?: OnActivityEvent,
 ): Promise<ConversationResult> {
   const { store, llm } = getBridgeContext();
   const sessionId = binding.codepilotSessionId;
@@ -254,6 +258,7 @@ export async function processMessage(
       onStructuredInputRequest,
       onServerRequestResolved,
       onResponseSegment,
+      onActivityEvent,
     );
   } finally {
     clearInterval(renewalInterval);
@@ -275,6 +280,7 @@ async function consumeStream(
   onStructuredInputRequest?: OnStructuredInputRequest,
   onServerRequestResolved?: OnServerRequestResolved,
   onResponseSegment?: OnResponseSegment,
+  onActivityEvent?: OnActivityEvent,
 ): Promise<ConversationResult> {
   const { store } = getBridgeContext();
   const reader = stream.getReader();
@@ -512,6 +518,16 @@ async function consumeStream(
             emitPlanPreview();
             break;
 
+          case 'activity_event': {
+            try {
+              const activity = JSON.parse(event.data) as ActivityEvent;
+              if (onActivityEvent) {
+                await onActivityEvent(activity);
+              }
+            } catch { /* skip */ }
+            break;
+          }
+
           case 'status': {
             try {
               const statusData = JSON.parse(event.data);
@@ -525,6 +541,27 @@ async function consumeStream(
               }
               if (statusData.model) {
                 store.updateSessionModel(sessionId, statusData.model);
+              }
+              if (statusData.reasoning && onActivityEvent) {
+                await onActivityEvent({
+                  kind: 'lightweight_activity',
+                  id: `lightweight:${capturedSdkSessionId || sessionId}`,
+                  turnId: typeof statusData.turn_id === 'string' ? statusData.turn_id : undefined,
+                  status: 'running',
+                  text: '正在思考…',
+                  source: 'reasoning',
+                });
+              }
+              if (statusData.context_usage && onActivityEvent) {
+                const usage = statusData.context_usage as Record<string, unknown>;
+                await onActivityEvent({
+                  kind: 'context_usage',
+                  id: `context:${capturedSdkSessionId || sessionId}`,
+                  turnId: typeof statusData.turn_id === 'string' ? statusData.turn_id : undefined,
+                  inputTokens: Number(usage.input_tokens || 0),
+                  outputTokens: Number(usage.output_tokens || 0),
+                  cacheReadInputTokens: Number(usage.cache_read_input_tokens || 0),
+                });
               }
             } catch { /* skip */ }
             break;

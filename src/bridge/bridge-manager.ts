@@ -8,7 +8,14 @@
  */
 
 import type { StructuredInputRequestInfo } from './host.js';
-import type { BridgeStatus, InboundMessage, OutboundMessage, SendResult, StreamingPreviewState } from './types.js';
+import type {
+  ActivityEvent,
+  BridgeStatus,
+  InboundMessage,
+  OutboundMessage,
+  SendResult,
+  StreamingPreviewState,
+} from './types.js';
 import { createAdapter, getRegisteredTypes } from './channel-adapter.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
 import * as router from './channel-router.js';
@@ -253,6 +260,73 @@ function resetPreviewState(state: StreamingPreviewState): void {
   state.lastSentAt = 0;
   state.pendingText = '';
   state.inFlightSend = null;
+}
+
+interface LightweightActivityState {
+  current: Extract<ActivityEvent, { kind: 'lightweight_activity' }> | null;
+  visible: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
+  inFlight: Promise<void> | null;
+}
+
+function clearLightweightActivityTimer(state: LightweightActivityState): void {
+  if (state.timer) {
+    clearTimeout(state.timer);
+    state.timer = null;
+  }
+}
+
+function normalizeCompletedLightweightText(text: string): string {
+  const trimmed = text.trim().replace(/(?:\.\.\.|…)+$/u, '').trim();
+  if (!trimmed) return '已完成当前步骤';
+  if (trimmed.startsWith('已')) return trimmed;
+  if (trimmed.startsWith('正在')) {
+    return `已${trimmed.slice(2).trimStart()}`.trim();
+  }
+  return `已完成：${trimmed}`;
+}
+
+function finalizeLightweightActivity(
+  event: Extract<ActivityEvent, { kind: 'lightweight_activity' }> | null,
+): Extract<ActivityEvent, { kind: 'lightweight_activity' }> | null {
+  if (!event || event.status !== 'running') return event;
+  return {
+    ...event,
+    status: 'completed',
+    text: normalizeCompletedLightweightText(event.text),
+  };
+}
+
+function queueLightweightActivityUpsert(
+  adapter: BaseChannelAdapter,
+  state: LightweightActivityState,
+  address: ChannelAddress,
+  event: Extract<ActivityEvent, { kind: 'lightweight_activity' }>,
+  replyToMessageId?: string,
+): Promise<void> {
+  const send = async (): Promise<void> => {
+    await adapter.upsertActivityEvent?.(address, event, replyToMessageId);
+  };
+  const previous = state.inFlight;
+  const next = (previous
+    ? previous.catch(() => undefined).then(send)
+    : send()
+  ).finally(() => {
+    if (state.inFlight === next) {
+      state.inFlight = null;
+    }
+  });
+  state.inFlight = next;
+  return next;
+}
+
+async function settleLightweightActivity(state: LightweightActivityState | null): Promise<void> {
+  if (!state?.inFlight) return;
+  try {
+    await state.inFlight;
+  } catch {
+    // best effort
+  }
 }
 
 // ── Channel-aware rendering dispatch ──────────────────────────
@@ -754,8 +828,264 @@ async function handleMessage(
   }
 
   const streamCfg = previewState ? getStreamConfig(adapter.channelType) : null;
+  const activityDelayMs = getStreamConfig(adapter.channelType).primeDelayMs;
   const previewFinalDelivery = caps?.finalDelivery || 'separate_message';
   const previewFinalizesPerSegment = previewFinalDelivery === 'segment_replace_preview';
+  const lightweightActivityState: LightweightActivityState | null = adapter.upsertActivityEvent
+    ? {
+        current: null,
+        visible: false,
+        timer: null,
+        inFlight: null,
+      }
+    : null;
+  const activeActivityIdByRawKey = new Map<string, string>();
+  const activeRawKeysByActivityId = new Map<string, Set<string>>();
+  const activeCommandActivityBySignature = new Map<string, string>();
+  const activeFileActivityBySignature = new Map<string, string>();
+  const activityVersionBySignature = new Map<string, number>();
+  const activitySignatureById = new Map<string, string>();
+
+  const compactActivityText = (value: string | undefined): string => (value || '').replace(/\s+/g, ' ').trim();
+
+  const activitySignatureToken = (signature: string): string => {
+    let hash = 2166136261;
+    for (let index = 0; index < signature.length; index += 1) {
+      hash ^= signature.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  };
+
+  const nextActivitySlotId = (
+    prefix: 'command' | 'file',
+    turnScope: string,
+    signature: string,
+  ): string => {
+    const current = activityVersionBySignature.get(signature) || 0;
+    const next = current + 1;
+    activityVersionBySignature.set(signature, next);
+    return `${prefix}:${turnScope}:${activitySignatureToken(signature)}:${next}`;
+  };
+
+  const bindActiveRawKey = (rawKey: string, canonical: string): void => {
+    activeActivityIdByRawKey.set(rawKey, canonical);
+    let rawKeys = activeRawKeysByActivityId.get(canonical);
+    if (!rawKeys) {
+      rawKeys = new Set<string>();
+      activeRawKeysByActivityId.set(canonical, rawKeys);
+    }
+    rawKeys.add(rawKey);
+  };
+
+  const unbindActiveRawKey = (rawKey: string, canonical: string): void => {
+    activeActivityIdByRawKey.delete(rawKey);
+    const rawKeys = activeRawKeysByActivityId.get(canonical);
+    if (!rawKeys) return;
+    rawKeys.delete(rawKey);
+    if (rawKeys.size === 0) {
+      activeRawKeysByActivityId.delete(canonical);
+    }
+  };
+
+  const clearActiveCommandActivity = (canonical: string): void => {
+    const signature = activitySignatureById.get(canonical);
+    if (signature && activeCommandActivityBySignature.get(signature) === canonical) {
+      activeCommandActivityBySignature.delete(signature);
+    }
+    const rawKeys = activeRawKeysByActivityId.get(canonical);
+    if (rawKeys) {
+      for (const rawKey of rawKeys) {
+        activeActivityIdByRawKey.delete(rawKey);
+      }
+      activeRawKeysByActivityId.delete(canonical);
+    }
+  };
+
+  const clearActiveFileActivity = (canonical: string): void => {
+    const signature = activitySignatureById.get(canonical);
+    if (signature && activeFileActivityBySignature.get(signature) === canonical) {
+      activeFileActivityBySignature.delete(signature);
+    }
+    const rawKeys = activeRawKeysByActivityId.get(canonical);
+    if (rawKeys) {
+      for (const rawKey of rawKeys) {
+        activeActivityIdByRawKey.delete(rawKey);
+      }
+      activeRawKeysByActivityId.delete(canonical);
+    }
+  };
+
+  const normalizeCommandActivityId = (
+    event: Extract<ActivityEvent, { kind: 'command_execution' }>,
+    turnScope: string,
+  ): string => {
+    const rawKey = `command:${event.id}`;
+    const signature = `command:${turnScope}:${compactActivityText(event.command)}:${event.cwd || ''}`;
+    const aliased = activeActivityIdByRawKey.get(rawKey);
+    if (aliased) {
+      const currentSignature = activitySignatureById.get(aliased);
+      if (!currentSignature || currentSignature === signature) {
+        activitySignatureById.set(aliased, signature);
+        if (event.status === 'running') {
+          activeCommandActivityBySignature.set(signature, aliased);
+        } else {
+          clearActiveCommandActivity(aliased);
+        }
+        return aliased;
+      }
+      unbindActiveRawKey(rawKey, aliased);
+    }
+    const active = activeCommandActivityBySignature.get(signature);
+    const canonical = active || nextActivitySlotId('command', turnScope, signature);
+    activitySignatureById.set(canonical, signature);
+    bindActiveRawKey(rawKey, canonical);
+    if (event.status === 'running') {
+      activeCommandActivityBySignature.set(signature, canonical);
+    } else {
+      clearActiveCommandActivity(canonical);
+    }
+    return canonical;
+  };
+
+  const normalizeFileActivityId = (
+    event: Extract<ActivityEvent, { kind: 'file_change' }>,
+    turnScope: string,
+  ): string => {
+    const rawKey = `file:${event.id}`;
+    const signaturePayload = event.changes.length > 0
+      ? event.changes
+          .map((change) => `${change.kind}:${change.path}`)
+          .sort()
+          .join('|')
+      : compactActivityText(event.summary);
+    const signature = `file:${turnScope}:${signaturePayload}`;
+    const aliased = activeActivityIdByRawKey.get(rawKey);
+    if (aliased) {
+      const currentSignature = activitySignatureById.get(aliased);
+      if (!currentSignature || currentSignature === signature) {
+        activitySignatureById.set(aliased, signature);
+        if (event.status === 'running') {
+          activeFileActivityBySignature.set(signature, aliased);
+        } else {
+          clearActiveFileActivity(aliased);
+        }
+        return aliased;
+      }
+      unbindActiveRawKey(rawKey, aliased);
+    }
+    const active = activeFileActivityBySignature.get(signature);
+    const canonical = active || nextActivitySlotId('file', turnScope, signature);
+    activitySignatureById.set(canonical, signature);
+    bindActiveRawKey(rawKey, canonical);
+    if (event.status === 'running') {
+      activeFileActivityBySignature.set(signature, canonical);
+    } else {
+      clearActiveFileActivity(canonical);
+    }
+    return canonical;
+  };
+
+  const normalizeActivityEvent = (event: ActivityEvent): ActivityEvent => {
+    const turnScope = event.turnId || msg.messageId;
+    switch (event.kind) {
+      case 'lightweight_activity':
+        return { ...event, id: `lightweight-slot:${turnScope}` };
+      case 'command_execution':
+        return { ...event, id: normalizeCommandActivityId(event, turnScope) };
+      case 'file_change':
+        return { ...event, id: normalizeFileActivityId(event, turnScope) };
+      case 'context_usage':
+        return { ...event, id: `context:${turnScope}` };
+    }
+  };
+
+  const cancelPendingLightweightActivity = (): void => {
+    if (!lightweightActivityState) return;
+    clearLightweightActivityTimer(lightweightActivityState);
+  };
+
+  const upsertLightweightActivityNow = async (
+    event: Extract<ActivityEvent, { kind: 'lightweight_activity' }>,
+  ): Promise<void> => {
+    if (!lightweightActivityState) return;
+    clearLightweightActivityTimer(lightweightActivityState);
+    lightweightActivityState.current = event;
+    lightweightActivityState.visible = true;
+    await queueLightweightActivityUpsert(
+      adapter,
+      lightweightActivityState,
+      msg.address,
+      event,
+      msg.messageId,
+    );
+  };
+
+  const scheduleLightweightActivity = (
+    event: Extract<ActivityEvent, { kind: 'lightweight_activity' }>,
+  ): void => {
+    if (!lightweightActivityState) return;
+    clearLightweightActivityTimer(lightweightActivityState);
+    lightweightActivityState.current = event;
+    lightweightActivityState.timer = setTimeout(() => {
+      lightweightActivityState.timer = null;
+      if (
+        !lightweightActivityState.current
+        || lightweightActivityState.visible
+        || lightweightActivityState.current.id !== event.id
+        || lightweightActivityState.current.text !== event.text
+        || lightweightActivityState.current.status !== event.status
+      ) {
+        return;
+      }
+      lightweightActivityState.visible = true;
+      void queueLightweightActivityUpsert(
+        adapter,
+        lightweightActivityState,
+        msg.address,
+        event,
+        msg.messageId,
+      );
+    }, activityDelayMs);
+  };
+
+  const finalizeVisibleLightweightActivity = async (): Promise<void> => {
+    if (!lightweightActivityState?.visible) return;
+    if (lightweightActivityState.current?.status !== 'running') return;
+    const finalized = finalizeLightweightActivity(lightweightActivityState.current);
+    if (!finalized) return;
+    lightweightActivityState.current = finalized;
+    await queueLightweightActivityUpsert(
+      adapter,
+      lightweightActivityState,
+      msg.address,
+      finalized,
+      msg.messageId,
+    );
+  };
+
+  const handleActivityEvent = async (event: ActivityEvent): Promise<void> => {
+    if (!adapter.upsertActivityEvent) return;
+    if (event.kind === 'context_usage') return;
+    const normalized = normalizeActivityEvent(event);
+    if (normalized.kind === 'lightweight_activity') {
+      if (
+        lightweightActivityState?.current
+        && lightweightActivityState.current.id === normalized.id
+        && lightweightActivityState.current.status === normalized.status
+        && lightweightActivityState.current.text === normalized.text
+      ) {
+        return;
+      }
+      if (normalized.status === 'running' && !lightweightActivityState?.visible) {
+        scheduleLightweightActivity(normalized);
+        return;
+      }
+      await upsertLightweightActivityNow(normalized);
+      return;
+    }
+    await adapter.upsertActivityEvent(msg.address, normalized, msg.messageId);
+  };
 
   // Build the onPartialText callback (or undefined if preview not supported)
   const onPartialText = (previewState && streamCfg) ? (fullText: string) => {
@@ -813,6 +1143,7 @@ async function handleMessage(
     const normalized = segmentText.trim();
     if (!normalized) return;
     const ps = previewState!;
+    cancelPendingLightweightActivity();
     clearPrimeTimer(ps);
     if (ps.throttleTimer) {
       clearTimeout(ps.throttleTimer);
@@ -830,6 +1161,7 @@ async function handleMessage(
       streamedSegmentCount += 1;
       streamedSegmentDelivery = delivery;
       hasVisibleAssistantOutput = true;
+      await finalizeVisibleLightweightActivity();
     }
     adapter.endPreview?.(msg.address, ps.draftId);
     resetPreviewState(ps);
@@ -861,6 +1193,7 @@ async function handleMessage(
       permissionModeOverride: planWorkflowMeta?.permissionMode,
       collaborationModeOverride: resolveCodexCollaborationMode(binding, planWorkflowMeta),
     }, async (request: StructuredInputRequestInfo) => {
+      cancelPendingLightweightActivity();
       if (previewState) {
         clearPrimeTimer(previewState);
       }
@@ -930,7 +1263,7 @@ async function handleMessage(
         // ignore
       }
       await adapter.resolveStructuredInputRequest?.(requestId);
-    }, onResponseSegment);
+    }, onResponseSegment, handleActivityEvent);
 
     // Send response text — render via channel-appropriate format
     let responseDelivery: SendResult | null = null;
@@ -938,6 +1271,10 @@ async function handleMessage(
     const remainingSegments = result.responseSegments
       .filter((segment) => segment.trim())
       .slice(streamedSegmentCount);
+    const hasVisibleResponseBody = remainingSegments.length > 0 || !!streamedSegmentDelivery || !!result.responseText;
+    if (hasVisibleResponseBody) {
+      await finalizeVisibleLightweightActivity();
+    }
     if (previewState && previewFinalDelivery === 'replace_preview') {
       const finalResponseText = result.responseText || remainingSegments.join('\n\n').trim();
       if (finalResponseText) {
@@ -1062,6 +1399,7 @@ async function handleMessage(
     ): Promise<boolean> => {
       const workflow = store.getPlanWorkflow(workflowId);
       if (!workflow) return false;
+      cancelPendingLightweightActivity();
       let actionCard: SendResult;
       try {
         actionCard = await deliver(adapter, {
@@ -1194,6 +1532,8 @@ async function handleMessage(
         adapter.endPreview?.(msg.address, previewState.draftId);
       }
     }
+    cancelPendingLightweightActivity();
+    await settleLightweightActivity(lightweightActivityState);
 
     state.activeTasks.delete(binding.codepilotSessionId);
     // Notify adapter that message processing ended

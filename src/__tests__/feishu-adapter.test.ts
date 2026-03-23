@@ -343,6 +343,119 @@ describe('FeishuAdapter', () => {
     assert.match(createdCardPayload, /🤖 努力回答中\.\.\./);
   });
 
+  it('upserts the latest lightweight activity card in place on the same message', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+
+    const sentPayloads: string[] = [];
+    const patchedPayloads: string[] = [];
+    const adapter = new FeishuAdapter() as any;
+    adapter.lastIncomingMessageId.set('group-activity:main', 'incoming-1');
+    adapter.restClient = {
+      im: {
+        message: {
+          reply: async (payload: { data: { content: string } }) => {
+            sentPayloads.push(payload.data.content);
+            return { code: 0, data: { message_id: 'activity-msg-1', open_message_id: 'open-activity-1' } };
+          },
+          patch: async (payload: { data: { content: string } }) => {
+            patchedPayloads.push(payload.data.content);
+            return { code: 0, data: {} };
+          },
+        },
+      },
+    };
+
+    const first = await adapter.upsertActivityEvent(
+      { channelType: 'feishu', chatId: 'group-activity' },
+      {
+        kind: 'lightweight_activity',
+        id: 'lightweight-slot:turn-1',
+        turnId: 'turn-1',
+        status: 'running',
+        text: '正在搜索网页…',
+      },
+    );
+    const second = await adapter.upsertActivityEvent(
+      { channelType: 'feishu', chatId: 'group-activity' },
+      {
+        kind: 'lightweight_activity',
+        id: 'lightweight-slot:turn-1',
+        turnId: 'turn-1',
+        status: 'completed',
+        text: '已搜索网页 (https://open.feishu.cn/...)',
+      },
+    );
+
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.equal(sentPayloads.length, 1);
+    assert.equal(patchedPayloads.length, 1);
+    assert.match(sentPayloads[0], /🤖 正在搜索网页/);
+    assert.match(patchedPayloads[0], /🤖 已搜索网页/);
+  });
+
+  it('renders command and file activity cards with fixed titles and concise details', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+
+    const sentPayloads: string[] = [];
+    const adapter = new FeishuAdapter() as any;
+    adapter.lastIncomingMessageId.set('group-activity-cards:main', 'incoming-1');
+    adapter.restClient = {
+      im: {
+        message: {
+          reply: async (payload: { data: { content: string } }) => {
+            sentPayloads.push(payload.data.content);
+            return { code: 0, data: { message_id: `activity-msg-${sentPayloads.length}` } };
+          },
+        },
+      },
+    };
+
+    await adapter.upsertActivityEvent(
+      { channelType: 'feishu', chatId: 'group-activity-cards' },
+      {
+        kind: 'command_execution',
+        id: 'command:turn-1:cmd-1',
+        turnId: 'turn-1',
+        status: 'completed',
+        command: 'rg CardKit',
+        cwd: '/tmp/test-cwd',
+        output: 'src/feishu/adapter.ts',
+        exitCode: 0,
+      },
+    );
+    await adapter.upsertActivityEvent(
+      { channelType: 'feishu', chatId: 'group-activity-cards' },
+      {
+        kind: 'file_change',
+        id: 'file:turn-1:file-1',
+        turnId: 'turn-1',
+        status: 'completed',
+        summary: '已修改 bridge-manager.ts',
+        changes: [{ kind: 'update', path: 'src/bridge/bridge-manager.ts' }],
+      },
+    );
+
+    const commandCard = JSON.parse(sentPayloads[0]);
+    const fileCard = JSON.parse(sentPayloads[1]);
+    assert.equal(commandCard.config.width_mode, 'fill');
+    assert.equal(commandCard.body.elements[0].tag, 'collapsible_panel');
+    assert.equal(commandCard.body.elements[0].expanded, false);
+    assert.equal(commandCard.body.elements[0].header.width, 'fill');
+    assert.match(commandCard.body.elements[0].header.title.content, /执行命令/);
+    assert.match(commandCard.body.elements[0].header.title.content, /rg CardKit/);
+    assert.match(commandCard.body.elements[0].elements[0].content, /退出码/);
+    assert.equal(fileCard.config.width_mode, 'fill');
+    assert.equal(fileCard.body.elements[0].tag, 'collapsible_panel');
+    assert.equal(fileCard.body.elements[0].expanded, false);
+    assert.equal(fileCard.body.elements[0].header.width, 'fill');
+    assert.match(fileCard.body.elements[0].header.title.content, /修改文件/);
+    assert.match(fileCard.body.elements[0].elements[0].content, /bridge-manager\.ts/);
+    assert.match(fileCard.body.elements[0].elements[0].content, /已完成/);
+  });
+
   it('sends permission cards as schema 2.0 without deprecated action tags', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});

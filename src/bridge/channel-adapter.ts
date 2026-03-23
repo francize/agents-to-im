@@ -6,6 +6,7 @@
  */
 
 import type {
+  ActivityEvent,
   ChannelAddress,
   ChannelType,
   InboundMessage,
@@ -125,6 +126,17 @@ export abstract class BaseChannelAdapter {
    * Mark a previously sent structured-input card as resolved/disabled.
    */
   resolveStructuredInputRequest?(_requestId: string): Promise<void>;
+
+  /**
+   * Create or update a process-activity card tied to the current turn/item.
+   * Adapters that support richer timeline projections can implement this to
+   * surface lightweight activity, command execution, or file-change status.
+   */
+  upsertActivityEvent?(
+    _address: ChannelAddress,
+    _event: ActivityEvent,
+    _replyToMessageId?: string,
+  ): Promise<SendResult>;
 }
 
 // ── Adapter Registry ────────────────────────────────────────────

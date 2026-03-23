@@ -283,4 +283,83 @@ describe('conversation-engine', () => {
       '我会先看一下当前目录和仓库内的协作说明，然后直接把目标仓库 clone 到当前目录下。',
     ]);
   });
+
+  it('forwards activity callbacks without mixing reasoning/tool status into assistant response segments', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(sseEvent('status', { reasoning: '正在搜索飞书文档…', turn_id: 'turn-activity-1' }));
+            controller.enqueue(sseEvent('activity_event', {
+              kind: 'command_execution',
+              id: 'cmd-1',
+              turnId: 'turn-activity-1',
+              status: 'running',
+              command: 'rg CardKit',
+              cwd: '/tmp/test-cwd',
+            }));
+            controller.enqueue(sseEvent('tool_use', {
+              id: 'tool-1',
+              name: 'Bash',
+              input: { command: 'rg CardKit', cwd: '/tmp/test-cwd' },
+            }));
+            controller.enqueue(sseEvent('tool_result', {
+              tool_use_id: 'tool-1',
+              content: 'match found',
+              is_error: false,
+            }));
+            controller.enqueue(sseEvent('text_segment', '我已经定位到相关文档和实现入口。'));
+            controller.enqueue(sseEvent('result', { session_id: 'thread-activity-1' }));
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-activity',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    const seenActivities: Array<Record<string, unknown>> = [];
+    const result = await processMessage(
+      binding,
+      '继续',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async (event) => {
+        seenActivities.push(event as Record<string, unknown>);
+      },
+    );
+
+    assert.deepEqual(result.responseSegments, ['我已经定位到相关文档和实现入口。']);
+    assert.equal(result.responseText, '我已经定位到相关文档和实现入口。');
+    assert.equal(seenActivities.length, 2);
+    assert.deepEqual(
+      seenActivities.map((event) => event.kind),
+      ['lightweight_activity', 'command_execution'],
+    );
+    assert.equal(seenActivities[0].text, '正在思考…');
+    assert.equal(seenActivities[1].command, 'rg CardKit');
+  });
 });

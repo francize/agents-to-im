@@ -30,6 +30,7 @@ export interface SSEEvent {
 export type SSEEventType =
   | 'text'
   | 'text_segment'
+  | 'activity_event'
   | 'tool_use'
   | 'tool_result'
   | 'tool_output'
@@ -55,6 +56,48 @@ export type MessageContentBlock =
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
   | { type: 'code'; language: string; code: string };
+
+export interface ActivityFileChangeEntry {
+  kind: string;
+  path: string;
+}
+
+export type ActivityEvent =
+  | {
+      kind: 'lightweight_activity';
+      id: string;
+      turnId?: string;
+      status: 'running' | 'completed' | 'failed';
+      text: string;
+      source?: string;
+    }
+  | {
+      kind: 'command_execution';
+      id: string;
+      turnId?: string;
+      status: 'running' | 'completed' | 'failed';
+      command: string;
+      cwd?: string;
+      output?: string;
+      exitCode?: number | null;
+      durationMs?: number | null;
+    }
+  | {
+      kind: 'file_change';
+      id: string;
+      turnId?: string;
+      status: 'running' | 'completed' | 'failed';
+      summary?: string;
+      changes: ActivityFileChangeEntry[];
+    }
+  | {
+      kind: 'context_usage';
+      id: string;
+      turnId?: string;
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadInputTokens?: number;
+    };
 
 /** Token usage statistics from an LLM response. */
 export interface TokenUsage {
