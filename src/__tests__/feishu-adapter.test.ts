@@ -462,6 +462,62 @@ describe('FeishuAdapter', () => {
     assert.match(patchedPayloads[0], /已完成/);
   });
 
+  it('skips tool output cards when bridge_feishu_tool_output_cards is disabled', async () => {
+    const settings = makeSettings();
+    settings.set('bridge_feishu_tool_output_cards', 'false');
+    const store = new JsonFileStore(settings);
+    installContext(store, {});
+
+    let replyCalls = 0;
+    let patchCalls = 0;
+    const adapter = new FeishuAdapter() as any;
+    adapter.lastIncomingMessageId.set('group-activity-disabled:main', 'incoming-disabled-1');
+    adapter.restClient = {
+      im: {
+        message: {
+          reply: async () => {
+            replyCalls += 1;
+            return { code: 0, data: { message_id: 'activity-disabled-msg-1' } };
+          },
+          patch: async () => {
+            patchCalls += 1;
+            return { code: 0, data: {} };
+          },
+        },
+      },
+    };
+
+    const running = await adapter.upsertActivityEvent(
+      { channelType: 'feishu', chatId: 'group-activity-disabled' },
+      {
+        kind: 'command_execution',
+        id: 'command:turn-disabled:cmd-1',
+        turnId: 'turn-disabled',
+        status: 'running',
+        command: 'pwd',
+        cwd: '/tmp/test-cwd',
+      },
+    );
+    const completed = await adapter.upsertActivityEvent(
+      { channelType: 'feishu', chatId: 'group-activity-disabled' },
+      {
+        kind: 'command_execution',
+        id: 'command:turn-disabled:cmd-1',
+        turnId: 'turn-disabled',
+        status: 'completed',
+        command: 'pwd',
+        cwd: '/tmp/test-cwd',
+        output: '/tmp/test-cwd',
+        exitCode: 0,
+      },
+    );
+
+    assert.equal(running.ok, true);
+    assert.equal(completed.ok, true);
+    assert.equal(replyCalls, 0);
+    assert.equal(patchCalls, 0);
+  });
+
   it('renders command and file activity cards with fixed titles and concise details', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});

@@ -1045,7 +1045,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
     event: ActivityEvent,
     replyToMessageId?: string,
   ): Promise<SendResult> {
-    if (!this.restClient || event.kind === 'context_usage') {
+    if (
+      !this.restClient
+      || event.kind === 'context_usage'
+      || this.getStore().getSetting('bridge_feishu_tool_output_cards') === 'false'
+    ) {
       return { ok: true };
     }
     const routeKey = routeKeyForAddress(address);

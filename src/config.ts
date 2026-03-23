@@ -11,6 +11,7 @@ export interface Config {
   feishuAppSecret?: string;
   feishuDomain?: string;
   feishuAllowedUsers?: string[];
+  feishuToolOutputCards?: boolean;
   autoApprove?: boolean;
   claudeDefaultModel?: string;
   codexDefaultModel?: string;
@@ -50,6 +51,13 @@ function splitCsv(value: string | undefined): string[] | undefined {
     .filter(Boolean);
 }
 
+function parseBoolean(value: string | undefined, defaultValue: boolean): boolean {
+  if (value === undefined) return defaultValue;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return defaultValue;
+}
+
 function parseRuntime(value: string | undefined): RuntimeName | undefined {
   if (value === 'claude' || value === 'codex') return value;
   if (value === 'auto') return 'claude';
@@ -72,6 +80,7 @@ export function loadConfig(): Config {
     feishuAppSecret: env.get('CTI_FEISHU_APP_SECRET') || undefined,
     feishuDomain: env.get('CTI_FEISHU_DOMAIN') || undefined,
     feishuAllowedUsers: splitCsv(env.get('CTI_FEISHU_ALLOWED_USERS')),
+    feishuToolOutputCards: parseBoolean(env.get('CTI_FEISHU_TOOL_OUTPUT_CARDS'), true),
     autoApprove: env.get('CTI_AUTO_APPROVE') === 'true',
     claudeDefaultModel: env.get('CTI_CLAUDE_DEFAULT_MODEL') || undefined,
     codexDefaultModel: env.get('CTI_CODEX_DEFAULT_MODEL') || undefined,
@@ -93,6 +102,10 @@ export function saveConfig(config: Config): void {
   out += formatEnvLine('CTI_FEISHU_APP_SECRET', config.feishuAppSecret);
   out += formatEnvLine('CTI_FEISHU_DOMAIN', config.feishuDomain);
   out += formatEnvLine('CTI_FEISHU_ALLOWED_USERS', config.feishuAllowedUsers?.join(','));
+  out += formatEnvLine(
+    'CTI_FEISHU_TOOL_OUTPUT_CARDS',
+    config.feishuToolOutputCards === undefined ? undefined : String(config.feishuToolOutputCards),
+  );
   out += formatEnvLine('CTI_AUTO_APPROVE', config.autoApprove ? 'true' : undefined);
   out += formatEnvLine('CTI_CLAUDE_DEFAULT_MODEL', config.claudeDefaultModel);
   out += formatEnvLine('CTI_CODEX_DEFAULT_MODEL', config.codexDefaultModel);
@@ -123,6 +136,7 @@ export function configToSettings(config: Config): Map<string, string> {
   if (config.feishuAllowedUsers) {
     settings.set('bridge_feishu_allowed_users', config.feishuAllowedUsers.join(','));
   }
+  settings.set('bridge_feishu_tool_output_cards', config.feishuToolOutputCards === false ? 'false' : 'true');
 
   if (config.claudeDefaultModel) {
     settings.set('bridge_default_model', config.claudeDefaultModel);

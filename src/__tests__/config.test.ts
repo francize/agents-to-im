@@ -26,6 +26,7 @@ describe('configToSettings', () => {
     const settings = configToSettings(base);
     assert.equal(settings.get('remote_bridge_enabled'), 'true');
     assert.equal(settings.get('bridge_feishu_enabled'), 'true');
+    assert.equal(settings.get('bridge_feishu_tool_output_cards'), 'true');
   });
 
   it('maps feishu credentials and allowlist', () => {
@@ -67,5 +68,13 @@ describe('configToSettings', () => {
       legacyRuntime: 'codex',
     });
     assert.equal(settings.get('bridge_default_runtime'), 'codex');
+  });
+
+  it('allows disabling feishu tool output cards explicitly', () => {
+    const settings = configToSettings({
+      ...base,
+      feishuToolOutputCards: false,
+    });
+    assert.equal(settings.get('bridge_feishu_tool_output_cards'), 'false');
   });
 });
