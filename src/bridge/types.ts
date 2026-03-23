@@ -77,6 +77,16 @@ export interface OutboundMessage {
   rawCard?: Record<string, unknown>;
 }
 
+/** Outbound image to send to an IM channel */
+export interface OutboundImage {
+  /** Target address */
+  address: ChannelAddress;
+  /** Absolute path to a local image file */
+  filePath: string;
+  /** If replying to a specific message */
+  replyToMessageId?: string;
+}
+
 /** Inline keyboard button for permission prompts */
 export interface InlineButton {
   text: string;

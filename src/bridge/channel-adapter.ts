@@ -10,6 +10,7 @@ import type {
   ChannelAddress,
   ChannelType,
   InboundMessage,
+  OutboundImage,
   OutboundMessage,
   PreviewCapabilities,
   SendResult,
@@ -47,6 +48,11 @@ export abstract class BaseChannelAdapter {
    * Handles platform-specific formatting and API calls.
    */
   abstract send(message: OutboundMessage): Promise<SendResult>;
+
+  /**
+   * Send a local image file to the channel as a native image message.
+   */
+  sendImage?(_image: OutboundImage): Promise<SendResult>;
 
   /**
    * Answer a callback query (e.g. Telegram inline button press).

@@ -12,6 +12,7 @@ export interface Config {
   feishuDomain?: string;
   feishuAllowedUsers?: string[];
   feishuToolOutputCards?: boolean;
+  feishuAutoImageSend?: boolean;
   autoApprove?: boolean;
   claudeDefaultModel?: string;
   codexDefaultModel?: string;
@@ -81,6 +82,7 @@ export function loadConfig(): Config {
     feishuDomain: env.get('CTI_FEISHU_DOMAIN') || undefined,
     feishuAllowedUsers: splitCsv(env.get('CTI_FEISHU_ALLOWED_USERS')),
     feishuToolOutputCards: parseBoolean(env.get('CTI_FEISHU_TOOL_OUTPUT_CARDS'), true),
+    feishuAutoImageSend: parseBoolean(env.get('CTI_FEISHU_AUTO_IMAGE_SEND'), true),
     autoApprove: env.get('CTI_AUTO_APPROVE') === 'true',
     claudeDefaultModel: env.get('CTI_CLAUDE_DEFAULT_MODEL') || undefined,
     codexDefaultModel: env.get('CTI_CODEX_DEFAULT_MODEL') || undefined,
@@ -105,6 +107,10 @@ export function saveConfig(config: Config): void {
   out += formatEnvLine(
     'CTI_FEISHU_TOOL_OUTPUT_CARDS',
     config.feishuToolOutputCards === undefined ? undefined : String(config.feishuToolOutputCards),
+  );
+  out += formatEnvLine(
+    'CTI_FEISHU_AUTO_IMAGE_SEND',
+    config.feishuAutoImageSend === undefined ? undefined : String(config.feishuAutoImageSend),
   );
   out += formatEnvLine('CTI_AUTO_APPROVE', config.autoApprove ? 'true' : undefined);
   out += formatEnvLine('CTI_CLAUDE_DEFAULT_MODEL', config.claudeDefaultModel);
@@ -137,6 +143,7 @@ export function configToSettings(config: Config): Map<string, string> {
     settings.set('bridge_feishu_allowed_users', config.feishuAllowedUsers.join(','));
   }
   settings.set('bridge_feishu_tool_output_cards', config.feishuToolOutputCards === false ? 'false' : 'true');
+  settings.set('bridge_feishu_auto_image_send', config.feishuAutoImageSend === false ? 'false' : 'true');
 
   if (config.claudeDefaultModel) {
     settings.set('bridge_default_model', config.claudeDefaultModel);

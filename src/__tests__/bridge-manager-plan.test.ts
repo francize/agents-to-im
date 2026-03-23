@@ -6,7 +6,7 @@ import path from 'node:path';
 import { BaseChannelAdapter, registerAdapterFactory } from '../bridge/channel-adapter.js';
 import { initBridgeContext } from '../bridge/context.js';
 import { start, stop } from '../bridge/bridge-manager.js';
-import type { InboundMessage, OutboundMessage, SendResult } from '../bridge/types.js';
+import type { InboundMessage, OutboundImage, OutboundMessage, SendResult } from '../bridge/types.js';
 import { JsonFileStore } from '../store.js';
 import { CTI_HOME } from '../config.js';
 
@@ -34,6 +34,7 @@ class PlanStubAdapter extends BaseChannelAdapter {
   private queue: InboundMessage[] = [];
   private waiters: Array<(msg: InboundMessage | null) => void> = [];
   sent: OutboundMessage[] = [];
+  sentImages: OutboundImage[] = [];
   private messageSeq = 0;
 
   async start(): Promise<void> {
@@ -64,6 +65,12 @@ class PlanStubAdapter extends BaseChannelAdapter {
     this.sent.push(message);
     this.messageSeq += 1;
     return { ok: true, messageId: `sent-${this.messageSeq}` };
+  }
+
+  async sendImage(image: OutboundImage): Promise<SendResult> {
+    this.sentImages.push(image);
+    this.messageSeq += 1;
+    return { ok: true, messageId: `img-${this.messageSeq}` };
   }
 
   validateConfig(): string | null {
@@ -948,6 +955,350 @@ describe('bridge-manager plan workflow', () => {
     assert.notEqual(activityEvents[3].id, activityEvents[5].id);
     assert.notEqual(activityEvents[4].id, activityEvents[5].id);
     assert.match(String(activityEvents[6].id), /^file:/);
+  });
+
+  it('auto-sends a completed command screenshot once per turn and dedupes repeated completed events', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const imagePath = path.resolve('/tmp/test-cwd/index-preview.png');
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            fs.mkdirSync(path.dirname(imagePath), { recursive: true });
+            fs.writeFileSync(imagePath, 'fake-png-data');
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'activity_event',
+              data: JSON.stringify({
+                kind: 'command_execution',
+                id: 'cmd-image-1',
+                turnId: 'turn-image-1',
+                status: 'completed',
+                command: `python capture.py --output ${imagePath}`,
+                cwd: '/tmp/test-cwd',
+                output: `saved screenshot to ${imagePath}`,
+                exitCode: 0,
+              }),
+            })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'activity_event',
+              data: JSON.stringify({
+                kind: 'command_execution',
+                id: 'cmd-image-1-repeat',
+                turnId: 'turn-image-1',
+                status: 'completed',
+                command: `python capture.py --output ${imagePath}`,
+                cwd: '/tmp/test-cwd',
+                output: `saved screenshot to ${imagePath}`,
+                exitCode: 0,
+              }),
+            })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '截图已经生成。' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-image-1' }) })}\n`);
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-auto-image',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-auto-image',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-auto-image', threadId: 'thread-1' },
+      text: '生成截图',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sentImages.length === 1 && adapter.sent.length === 1);
+
+    assert.equal(adapter.sentImages.length, 1);
+    assert.equal(adapter.sentImages[0].filePath, imagePath);
+    assert.equal(adapter.sentImages[0].replyToMessageId, 'msg-auto-image');
+    assert.equal(adapter.sent[0].text, '截图已经生成。');
+  });
+
+  it('auto-sends a completed file_change image by resolving relative paths against the binding cwd', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const imagePath = path.resolve('/tmp/test-cwd/shot.png');
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            fs.mkdirSync(path.dirname(imagePath), { recursive: true });
+            fs.writeFileSync(imagePath, 'fake-png-data');
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'activity_event',
+              data: JSON.stringify({
+                kind: 'file_change',
+                id: 'file-image-1',
+                turnId: 'turn-file-image-1',
+                status: 'completed',
+                summary: '生成了预览图',
+                changes: [{ kind: 'create', path: 'shot.png' }],
+              }),
+            })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '文件截图已生成。' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-file-image-1' }) })}\n`);
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-file-image',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-file-image',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-file-image' },
+      text: '生成预览图',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sentImages.length === 1 && adapter.sent.length === 1);
+
+    assert.equal(adapter.sentImages[0].filePath, imagePath);
+    assert.equal(adapter.sentImages[0].replyToMessageId, 'msg-file-image');
+  });
+
+  it('skips non-images, missing files, zero-byte files, and stale files when auto-sending screenshots', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const oldImagePath = path.resolve('/tmp/test-cwd/old-preview.png');
+    const zeroImagePath = path.resolve('/tmp/test-cwd/zero-preview.png');
+    const missingImagePath = path.resolve('/tmp/test-cwd/missing-preview.png');
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            fs.mkdirSync(path.dirname(oldImagePath), { recursive: true });
+            fs.writeFileSync(oldImagePath, 'old-image');
+            const oldTime = new Date(Date.now() - 60_000);
+            fs.utimesSync(oldImagePath, oldTime, oldTime);
+            fs.writeFileSync(zeroImagePath, '');
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'activity_event',
+              data: JSON.stringify({
+                kind: 'command_execution',
+                id: 'cmd-invalid-images',
+                turnId: 'turn-invalid-images',
+                status: 'completed',
+                command: `echo ${oldImagePath} ${zeroImagePath} ${missingImagePath}`,
+                cwd: '/tmp/test-cwd',
+                output: `${oldImagePath}\n${zeroImagePath}\n${missingImagePath}`,
+                exitCode: 0,
+              }),
+            })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'activity_event',
+              data: JSON.stringify({
+                kind: 'file_change',
+                id: 'file-invalid-images',
+                turnId: 'turn-invalid-images',
+                status: 'completed',
+                summary: '只改了文本文件',
+                changes: [{ kind: 'update', path: 'notes.txt' }],
+              }),
+            })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '没有有效截图需要发送。' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-invalid-images' }) })}\n`);
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-invalid-images',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-invalid-images',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-invalid-images' },
+      text: '检查无效截图',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length === 1);
+
+    assert.equal(adapter.sentImages.length, 0);
+    assert.equal(adapter.sent[0].text, '没有有效截图需要发送。');
+  });
+
+  it('does not auto-send screenshots when bridge_feishu_auto_image_send is disabled', async () => {
+    const settings = makeSettings();
+    settings.set('bridge_feishu_auto_image_send', 'false');
+    const store = new JsonFileStore(settings);
+    const imagePath = path.resolve('/tmp/test-cwd/disabled-preview.png');
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            fs.mkdirSync(path.dirname(imagePath), { recursive: true });
+            fs.writeFileSync(imagePath, 'fake-png-data');
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'activity_event',
+              data: JSON.stringify({
+                kind: 'command_execution',
+                id: 'cmd-disabled-image',
+                turnId: 'turn-disabled-image',
+                status: 'completed',
+                command: `python capture.py --output ${imagePath}`,
+                cwd: '/tmp/test-cwd',
+                output: imagePath,
+                exitCode: 0,
+              }),
+            })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '图片不会自动发送。' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-disabled-image' }) })}\n`);
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-disabled-image',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-disabled-image',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-disabled-image' },
+      text: '不要自动发图',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length === 1);
+
+    assert.equal(adapter.sentImages.length, 0);
+    assert.equal(adapter.sent[0].text, '图片不会自动发送。');
+  });
+
+  it('keeps delivering assistant text even when automatic screenshot sending fails', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const imagePath = path.resolve('/tmp/test-cwd/throwing-preview.png');
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            fs.mkdirSync(path.dirname(imagePath), { recursive: true });
+            fs.writeFileSync(imagePath, 'fake-png-data');
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'activity_event',
+              data: JSON.stringify({
+                kind: 'command_execution',
+                id: 'cmd-throwing-image',
+                turnId: 'turn-throwing-image',
+                status: 'completed',
+                command: `python capture.py --output ${imagePath}`,
+                cwd: '/tmp/test-cwd',
+                output: imagePath,
+                exitCode: 0,
+              }),
+            })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '即使发图失败，正文也要继续。' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-throwing-image' }) })}\n`);
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-throwing-image',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+    (adapter as any).sendImage = async () => {
+      throw new Error('upload failed');
+    };
+
+    await start();
+    adapter.push({
+      messageId: 'msg-throwing-image',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-throwing-image' },
+      text: '发图失败也要继续',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length === 1);
+
+    assert.equal(adapter.sentImages.length, 0);
+    assert.equal(adapter.sent[0].text, '即使发图失败，正文也要继续。');
   });
 
   it('keeps one final delivery for replace_preview channels and merges a one-character lead segment', async () => {

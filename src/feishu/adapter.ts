@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import fs from 'node:fs';
 
 import * as lark from '@larksuiteoapi/node-sdk';
 
@@ -7,6 +8,7 @@ import type {
   ChannelAddress,
   ChannelType,
   InboundMessage,
+  OutboundImage,
   OutboundMessage,
   PreviewCapabilities,
   SendResult,
@@ -1179,6 +1181,32 @@ export class FeishuAdapter extends BaseChannelAdapter {
     return result;
   }
 
+  async sendImage(image: OutboundImage): Promise<SendResult> {
+    if (!this.restClient) {
+      return { ok: false, error: 'Feishu client not initialized' };
+    }
+    try {
+      const imageKey = await this.uploadImageFile(image.filePath);
+      const response = await this.sendLarkMessage(
+        image.address,
+        'image',
+        JSON.stringify({ image_key: imageKey }),
+        image.replyToMessageId,
+      );
+      assertLarkOk(response, 'im.message.sendImage');
+      return {
+        ok: true,
+        messageId: response.data?.message_id,
+        openMessageId: (response.data as { open_message_id?: string } | undefined)?.open_message_id,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   private async handleIncomingEvent(data: FeishuMessageEventData): Promise<void> {
     const messageId = data.message.message_id;
     if (data.sender.sender_type === 'app') return;
@@ -2093,9 +2121,24 @@ export class FeishuAdapter extends BaseChannelAdapter {
     };
   }
 
+  private async uploadImageFile(filePath: string): Promise<string> {
+    const image = fs.readFileSync(filePath);
+    const response = await this.restClient!.im.image.create({
+      data: {
+        image_type: 'message',
+        image,
+      },
+    });
+    const imageKey = response?.image_key;
+    if (!imageKey) {
+      throw new Error('Feishu image upload succeeded without image_key');
+    }
+    return imageKey;
+  }
+
   private async sendLarkMessage(
     address: ChannelAddress,
-    msgType: 'interactive' | 'post',
+    msgType: 'interactive' | 'post' | 'image',
     content: string,
     replyToMessageId?: string,
     requestUuid?: string,

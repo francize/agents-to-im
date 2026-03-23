@@ -27,6 +27,7 @@ describe('configToSettings', () => {
     assert.equal(settings.get('remote_bridge_enabled'), 'true');
     assert.equal(settings.get('bridge_feishu_enabled'), 'true');
     assert.equal(settings.get('bridge_feishu_tool_output_cards'), 'true');
+    assert.equal(settings.get('bridge_feishu_auto_image_send'), 'true');
   });
 
   it('maps feishu credentials and allowlist', () => {
@@ -76,5 +77,13 @@ describe('configToSettings', () => {
       feishuToolOutputCards: false,
     });
     assert.equal(settings.get('bridge_feishu_tool_output_cards'), 'false');
+  });
+
+  it('allows disabling automatic feishu image sends explicitly', () => {
+    const settings = configToSettings({
+      ...base,
+      feishuAutoImageSend: false,
+    });
+    assert.equal(settings.get('bridge_feishu_auto_image_send'), 'false');
   });
 });

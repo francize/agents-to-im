@@ -7,6 +7,9 @@
  * Uses globalThis to survive Next.js HMR in development.
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
+
 import type { StructuredInputRequestInfo } from './host.js';
 import type {
   ActivityEvent,
@@ -117,6 +120,55 @@ function buildStructuredInputPreface(request: StructuredInputRequestInfo): strin
     return `我先梳理了这个请求，继续前还需要确认 ${headers.join('、')}。你补充后我再继续。`;
   }
   return '我先梳理了这个请求，继续前还需要你补充一些关键信息。你回答下面问题后我再继续。';
+}
+
+const AUTO_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
+const ABSOLUTE_IMAGE_PATH_RE = /((?:\/|[A-Za-z]:[\\/])[^\s"'`<>|]+?\.(?:png|jpe?g|gif|webp))/gi;
+
+function isSupportedAutoImagePath(filePath: string): boolean {
+  return AUTO_IMAGE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+}
+
+function uniquePaths(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const candidate of paths) {
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
+    ordered.push(candidate);
+  }
+  return ordered;
+}
+
+function extractAbsoluteImagePaths(text: string | undefined): string[] {
+  if (!text) return [];
+  const matches = text.matchAll(ABSOLUTE_IMAGE_PATH_RE);
+  const found: string[] = [];
+  for (const match of matches) {
+    const rawPath = match[1]?.trim();
+    if (!rawPath || !path.isAbsolute(rawPath) || !isSupportedAutoImagePath(rawPath)) continue;
+    found.push(rawPath);
+  }
+  return uniquePaths(found);
+}
+
+function resolveFileChangeImagePath(rawPath: string, cwd?: string): string | null {
+  const trimmed = rawPath.trim();
+  if (!trimmed) return null;
+  const resolved = path.isAbsolute(trimmed)
+    ? trimmed
+    : (cwd ? path.resolve(cwd, trimmed) : null);
+  if (!resolved || !isSupportedAutoImagePath(resolved)) return null;
+  return resolved;
+}
+
+function isFreshNonEmptyFile(filePath: string, turnStartedAtMs: number): boolean {
+  try {
+    const stat = fs.statSync(filePath);
+    return stat.isFile() && stat.size > 0 && stat.mtimeMs >= turnStartedAtMs;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -800,6 +852,9 @@ async function handleMessage(
 
   // Regular message — route to conversation engine
   const binding = router.resolve(msg.address);
+  const turnStartedAtMs = Date.now();
+  const sentAutoImagePaths = new Set<string>();
+  const autoImageSendEnabled = store.getSetting('bridge_feishu_auto_image_send') !== 'false';
 
   // Notify adapter that message processing is starting (e.g., typing indicator)
   adapter.onMessageStart?.(msg.address);
@@ -1064,7 +1119,52 @@ async function handleMessage(
     );
   };
 
+  const maybeSendAutoImages = async (event: ActivityEvent): Promise<void> => {
+    if (!autoImageSendEnabled || !adapter.sendImage) return;
+    if (event.kind !== 'command_execution' && event.kind !== 'file_change') return;
+    if (event.status !== 'completed') return;
+
+    let candidates: string[] = [];
+    if (event.kind === 'file_change') {
+      candidates = uniquePaths(
+        event.changes
+          .map((change) => resolveFileChangeImagePath(change.path, binding.workingDirectory))
+          .filter((candidate): candidate is string => Boolean(candidate)),
+      );
+    } else {
+      candidates = uniquePaths([
+        ...extractAbsoluteImagePaths(event.command),
+        ...extractAbsoluteImagePaths(event.output),
+      ]);
+    }
+
+    for (const candidate of candidates) {
+      const normalizedPath = path.resolve(candidate);
+      if (sentAutoImagePaths.has(normalizedPath)) continue;
+      if (!isFreshNonEmptyFile(normalizedPath, turnStartedAtMs)) continue;
+      try {
+        const result = await adapter.sendImage({
+          address: msg.address,
+          filePath: normalizedPath,
+          replyToMessageId: msg.messageId,
+        });
+        if (result.ok) {
+          sentAutoImagePaths.add(normalizedPath);
+        } else {
+          console.warn(
+            `[bridge-manager] Failed to auto-send image ${normalizedPath}: ${result.error || 'unknown error'}`,
+          );
+        }
+      } catch (error) {
+        console.warn(`[bridge-manager] Failed to auto-send image ${normalizedPath}:`, error);
+      }
+    }
+  };
+
   const handleActivityEvent = async (event: ActivityEvent): Promise<void> => {
+    if (event.kind !== 'context_usage') {
+      await maybeSendAutoImages(event);
+    }
     if (!adapter.upsertActivityEvent) return;
     if (event.kind === 'context_usage') return;
     const normalized = normalizeActivityEvent(event);

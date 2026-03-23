@@ -518,6 +518,97 @@ describe('FeishuAdapter', () => {
     assert.equal(patchCalls, 0);
   });
 
+  it('uploads a local image and sends it as a native Feishu image reply', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const tempImagePath = path.join(DATA_DIR, 'auto-image-send.png');
+    fs.mkdirSync(path.dirname(tempImagePath), { recursive: true });
+    fs.writeFileSync(tempImagePath, 'not-a-real-png-but-good-enough');
+
+    const uploadPayloads: Array<Record<string, unknown>> = [];
+    const replyPayloads: Array<Record<string, unknown>> = [];
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        image: {
+          create: async (payload: Record<string, unknown>) => {
+            uploadPayloads.push(payload);
+            return { image_key: 'img_v2_test_1' };
+          },
+        },
+        message: {
+          reply: async (payload: Record<string, unknown>) => {
+            replyPayloads.push(payload);
+            return { code: 0, data: { message_id: 'img-msg-1', open_message_id: 'open-img-msg-1' } };
+          },
+        },
+      },
+    };
+
+    const result = await adapter.sendImage({
+      address: { channelType: 'feishu', chatId: 'group-image', threadId: 'thread-image-1' },
+      filePath: tempImagePath,
+      replyToMessageId: 'incoming-1',
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.messageId, 'img-msg-1');
+    assert.equal(uploadPayloads.length, 1);
+    assert.equal((uploadPayloads[0].data as { image_type?: string }).image_type, 'message');
+    assert.equal(replyPayloads.length, 1);
+    assert.equal((replyPayloads[0].path as { message_id?: string }).message_id, 'incoming-1');
+    const replyData = replyPayloads[0].data as { msg_type?: string; content?: string; reply_in_thread?: boolean };
+    assert.equal(replyData.msg_type, 'image');
+    assert.equal(replyData.reply_in_thread, true);
+    assert.match(replyData.content || '', /img_v2_test_1/);
+  });
+
+  it('returns a failed SendResult when sendImage is called without a Feishu client', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const adapter = new FeishuAdapter();
+
+    const result = await adapter.sendImage({
+      address: { channelType: 'feishu', chatId: 'group-image' },
+      filePath: '/tmp/does-not-matter.png',
+      replyToMessageId: 'incoming-1',
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(result.error || '', /not initialized/i);
+  });
+
+  it('returns a failed SendResult when Feishu image upload does not provide an image key', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const tempImagePath = path.join(DATA_DIR, 'missing-image-key.png');
+    fs.mkdirSync(path.dirname(tempImagePath), { recursive: true });
+    fs.writeFileSync(tempImagePath, 'still-good-enough');
+
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        image: {
+          create: async () => ({}),
+        },
+        message: {
+          reply: async () => {
+            throw new Error('should not send reply without image key');
+          },
+        },
+      },
+    };
+
+    const result = await adapter.sendImage({
+      address: { channelType: 'feishu', chatId: 'group-image' },
+      filePath: tempImagePath,
+      replyToMessageId: 'incoming-1',
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(result.error || '', /image_key/i);
+  });
+
   it('renders command and file activity cards with fixed titles and concise details', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});
