@@ -63,20 +63,44 @@ export interface ActivityFileChangeEntry {
   path: string;
 }
 
+export type ActivityRunStatus = 'running' | 'completed' | 'failed';
+export type ToolActivityStatus = 'pending' | ActivityRunStatus;
+
 export type ActivityEvent =
   | {
       kind: 'lightweight_activity';
       id: string;
       turnId?: string;
-      status: 'running' | 'completed' | 'failed';
+      status: ActivityRunStatus;
       text: string;
+      source?: string;
+    }
+  | {
+      kind: 'reasoning_activity';
+      turnId?: string;
+      taskId?: string;
+      status: ActivityRunStatus;
+      text: string;
+      source?: string;
+    }
+  | {
+      kind: 'tool_activity';
+      turnId?: string;
+      toolUseId: string;
+      parentToolUseId?: string | null;
+      toolName: string;
+      status: ToolActivityStatus;
+      inputPreview?: string;
+      resultPreview?: string;
+      taskId?: string;
+      elapsedSeconds?: number;
       source?: string;
     }
   | {
       kind: 'command_execution';
       id: string;
       turnId?: string;
-      status: 'running' | 'completed' | 'failed';
+      status: ActivityRunStatus;
       command: string;
       cwd?: string;
       output?: string;
@@ -87,7 +111,7 @@ export type ActivityEvent =
       kind: 'file_change';
       id: string;
       turnId?: string;
-      status: 'running' | 'completed' | 'failed';
+      status: ActivityRunStatus;
       summary?: string;
       changes: ActivityFileChangeEntry[];
     }

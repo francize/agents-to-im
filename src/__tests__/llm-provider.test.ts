@@ -30,7 +30,12 @@ function makeFakeController() {
 }
 
 function freshState(): StreamState {
-  return { hasReceivedResult: false, hasStreamedText: false, lastAssistantText: '' };
+  return {
+    hasReceivedResult: false,
+    hasStreamedText: false,
+    lastAssistantText: '',
+    toolNamesByUseId: new Map<string, string>(),
+  };
 }
 
 function parseChunk(chunk: string): { type: string; data: string } {
@@ -351,11 +356,12 @@ describe('handleMessage state tracking', () => {
     } as any, controller, state);
 
     assert.equal(state.lastAssistantText, 'Let me check');
-    assert.equal(chunks.length, 1); // only tool_use, no text
-    assert.ok(chunks[0].includes('tool_use'));
+    assert.equal(chunks.length, 2); // activity_event + tool_use, no duplicated text
+    assert.ok(chunks[0].includes('activity_event'));
+    assert.ok(chunks[1].includes('tool_use'));
   });
 
-  it('maps compacting/task progress SDK messages into activity events', () => {
+  it('maps Claude SDK task/tool messages into reasoning and tool activities', () => {
     const compacting = mapSdkMessageToActivityEvent({
       type: 'system',
       subtype: 'status',
@@ -371,21 +377,69 @@ describe('handleMessage state tracking', () => {
       usage: { total_tokens: 1, tool_uses: 1, duration_ms: 1 },
       session_id: 'sess-1',
     } as any);
+    const toolProgress = mapSdkMessageToActivityEvent({
+      type: 'tool_progress',
+      tool_use_id: 'tool-1',
+      tool_name: 'mcp__chrome-devtools__take_screenshot',
+      parent_tool_use_id: 'parent-1',
+      elapsed_time_seconds: 1.4,
+      task_id: 'task-1',
+      session_id: 'sess-1',
+    } as any);
 
     assert.deepEqual(compacting, {
-      kind: 'lightweight_activity',
-      id: 'claude-status:sess-1:compacting',
+      kind: 'reasoning_activity',
       status: 'running',
       text: '正在压缩上下文…',
-      source: 'claude-sdk',
+      source: 'compacting',
     });
     assert.deepEqual(taskProgress, {
-      kind: 'lightweight_activity',
-      id: 'claude-task:task-1',
+      kind: 'reasoning_activity',
+      taskId: 'task-1',
       status: 'running',
       text: '正在分析仓库 · Read',
       source: 'task_progress',
     });
+    assert.deepEqual(toolProgress, {
+      kind: 'tool_activity',
+      toolUseId: 'tool-1',
+      parentToolUseId: 'parent-1',
+      toolName: 'MCP: chrome-devtools take_screenshot',
+      status: 'running',
+      taskId: 'task-1',
+      elapsedSeconds: 1.4,
+      source: 'tool_progress',
+    });
+  });
+
+  it('emits tool_activity before tool_result when a tool_result block arrives', () => {
+    const { controller, chunks } = makeFakeController();
+    const state = freshState();
+    state.toolNamesByUseId.set('tu1', 'Bash');
+
+    handleMessage({
+      type: 'user',
+      parent_tool_use_id: null,
+      session_id: 'sess-tool-result',
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu1',
+            content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'abc123' } }],
+            is_error: false,
+          },
+        ],
+      },
+    } as any, controller, state);
+
+    assert.equal(chunks.length, 2);
+    const activity = parseChunk(chunks[0] || '');
+    const result = parseChunk(chunks[1] || '');
+    assert.equal(activity.type, 'activity_event');
+    assert.equal(result.type, 'tool_result');
+    assert.match(activity.data, /"kind":"tool_activity"/);
+    assert.match(activity.data, /"resultPreview":"返回了 1 张图片"/);
   });
 
   it('parses AskUserQuestion payloads into structured input requests', () => {
@@ -494,7 +548,12 @@ describe('catch block error suppression logic', () => {
   // the state conditions that drive its behavior.
 
   it('result received + exit code → should suppress (transport noise)', () => {
-    const state: StreamState = { hasReceivedResult: true, hasStreamedText: true, lastAssistantText: '' };
+    const state: StreamState = {
+      hasReceivedResult: true,
+      hasStreamedText: true,
+      lastAssistantText: '',
+      toolNamesByUseId: new Map<string, string>(),
+    };
     const errorMsg = 'Claude Code process exited with code 1';
     const isTransportExit = errorMsg.includes('process exited with code');
 
@@ -504,7 +563,12 @@ describe('catch block error suppression logic', () => {
   });
 
   it('partial text + exit code (no result) → should NOT suppress (real crash)', () => {
-    const state: StreamState = { hasReceivedResult: false, hasStreamedText: true, lastAssistantText: '' };
+    const state: StreamState = {
+      hasReceivedResult: false,
+      hasStreamedText: true,
+      lastAssistantText: '',
+      toolNamesByUseId: new Map<string, string>(),
+    };
     const errorMsg = 'Claude Code process exited with code 1';
     const isTransportExit = errorMsg.includes('process exited with code');
 
@@ -517,6 +581,7 @@ describe('catch block error suppression logic', () => {
       hasReceivedResult: false,
       hasStreamedText: false,
       lastAssistantText: 'Your organization does not have access to Claude',
+      toolNamesByUseId: new Map<string, string>(),
     };
 
     // Case 2 condition: lastAssistantText must be a recognised auth/access error
@@ -529,6 +594,7 @@ describe('catch block error suppression logic', () => {
       hasReceivedResult: false,
       hasStreamedText: false,
       lastAssistantText: 'Here is my analysis of the code...',
+      toolNamesByUseId: new Map<string, string>(),
     };
 
     // Normal response text is not a recognised auth error — must fall through to error handling
@@ -537,7 +603,12 @@ describe('catch block error suppression logic', () => {
   });
 
   it('no streaming + no assistant text → should show full error', () => {
-    const state: StreamState = { hasReceivedResult: false, hasStreamedText: false, lastAssistantText: '' };
+    const state: StreamState = {
+      hasReceivedResult: false,
+      hasStreamedText: false,
+      lastAssistantText: '',
+      toolNamesByUseId: new Map<string, string>(),
+    };
 
     const shouldSurface = !!state.lastAssistantText && classifyAuthError(state.lastAssistantText) !== false;
     const shouldSuppress = state.hasReceivedResult;
@@ -549,7 +620,12 @@ describe('catch block error suppression logic', () => {
   it('streaming + result + exit code → should suppress', () => {
     // Normal successful flow that ends with exit code 0 won't throw,
     // but some edge cases might. Verify suppression.
-    const state: StreamState = { hasReceivedResult: true, hasStreamedText: true, lastAssistantText: 'some response' };
+    const state: StreamState = {
+      hasReceivedResult: true,
+      hasStreamedText: true,
+      lastAssistantText: 'some response',
+      toolNamesByUseId: new Map<string, string>(),
+    };
     const isTransportExit = true;
 
     const shouldSuppress = state.hasReceivedResult && isTransportExit;

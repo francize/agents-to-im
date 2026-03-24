@@ -259,8 +259,10 @@ function escapeInlineCode(text: string): string {
   return text.replace(/`/g, '\\`');
 }
 
-function formatActivityStatus(status: 'running' | 'completed' | 'failed'): string {
+function formatActivityStatus(status: 'pending' | 'running' | 'completed' | 'failed'): string {
   switch (status) {
+    case 'pending':
+      return '等待确认';
     case 'running':
       return '进行中';
     case 'failed':
@@ -299,13 +301,24 @@ function buildActivityCardBase(elements: Array<Record<string, unknown>>, header?
   };
 }
 
+function getActivityEventId(event: ActivityEvent): string {
+  switch (event.kind) {
+    case 'reasoning_activity':
+      return `reasoning:${event.turnId || event.taskId || event.source || 'current'}`;
+    case 'tool_activity':
+      return `tool:${event.toolUseId}`;
+    default:
+      return event.id;
+  }
+}
+
 function buildCollapsibleActivityCard(
   title: string,
   summary: string,
   bodyMarkdown: string,
-  status: 'running' | 'completed' | 'failed',
+  status: 'pending' | 'running' | 'completed' | 'failed',
 ): Record<string, unknown> {
-  const tone = status === 'failed' ? 'red' : 'grey';
+  const tone = status === 'failed' ? 'red' : status === 'pending' ? 'orange' : 'grey';
   const panelTitle = summary.trim()
     ? `**${title}** · ${summary.trim()}`
     : `**${title}**`;
@@ -355,6 +368,31 @@ function buildLightweightActivityCard(event: Extract<ActivityEvent, { kind: 'lig
       content: ensureRobotPrefix(event.text),
     },
   ]);
+}
+
+function buildReasoningActivityCard(event: Extract<ActivityEvent, { kind: 'reasoning_activity' }>): Record<string, unknown> {
+  const title = event.source === 'compacting'
+    ? '压缩上下文'
+    : event.source === 'tool_use_summary'
+      ? '步骤总结'
+      : '思考过程';
+  const lines = [
+    `**状态**：${formatActivityStatus(event.status)}`,
+    '',
+    ensureRobotPrefix(event.text),
+  ];
+  if (event.taskId) {
+    lines.splice(1, 0, `**任务**：\`${escapeInlineCode(event.taskId)}\``);
+  }
+  return buildActivityCardBase([
+    {
+      tag: 'markdown',
+      content: lines.join('\n'),
+    },
+  ], {
+    title,
+    template: event.status === 'failed' ? 'red' : event.status === 'completed' ? 'blue' : 'grey',
+  });
 }
 
 function buildCommandExecutionCard(event: Extract<ActivityEvent, { kind: 'command_execution' }>): Record<string, unknown> {
@@ -407,10 +445,45 @@ function buildFileChangeCard(event: Extract<ActivityEvent, { kind: 'file_change'
   return buildCollapsibleActivityCard('修改文件', summary, lines.join('\n'), event.status);
 }
 
+function buildToolActivityCard(event: Extract<ActivityEvent, { kind: 'tool_activity' }>): Record<string, unknown> {
+  const shortInput = truncateActivityOutput(normalizeSingleLine(event.inputPreview || ''), 72);
+  const shortResult = truncateActivityOutput(normalizeSingleLine(event.resultPreview || ''), 72);
+  const summary = [
+    formatActivityStatus(event.status),
+    shortInput || shortResult,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const lines = [
+    `**状态**：${formatActivityStatus(event.status)}`,
+    `**工具**：\`${escapeInlineCode(event.toolName)}\``,
+  ];
+  if (event.taskId?.trim()) {
+    lines.push(`**任务**：\`${escapeInlineCode(event.taskId)}\``);
+  }
+  if (event.parentToolUseId?.trim()) {
+    lines.push(`**父工具**：\`${escapeInlineCode(event.parentToolUseId)}\``);
+  }
+  if (typeof event.elapsedSeconds === 'number' && Number.isFinite(event.elapsedSeconds)) {
+    lines.push(`**耗时**：${event.elapsedSeconds.toFixed(1)} s`);
+  }
+  if (event.inputPreview?.trim()) {
+    lines.push('', '**输入预览**', '```text', event.inputPreview.replace(/```/g, '``` '), '```');
+  }
+  if (event.resultPreview?.trim()) {
+    lines.push('', `**${event.status === 'failed' ? '错误预览' : '结果预览'}**`, '```text', event.resultPreview.replace(/```/g, '``` '), '```');
+  }
+  return buildCollapsibleActivityCard(event.toolName, summary, lines.join('\n'), event.status);
+}
+
 function buildActivityCard(event: ActivityEvent): Record<string, unknown> {
   switch (event.kind) {
     case 'lightweight_activity':
       return buildLightweightActivityCard(event);
+    case 'reasoning_activity':
+      return buildReasoningActivityCard(event);
+    case 'tool_activity':
+      return buildToolActivityCard(event);
     case 'command_execution':
       return buildCommandExecutionCard(event);
     case 'file_change':
@@ -1185,7 +1258,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return { ok: true };
     }
     const routeKey = routeKeyForAddress(address);
-    const key = activityKey(routeKey, event.id);
+    const activityId = getActivityEventId(event);
+    const key = activityKey(routeKey, activityId);
     const artifact = this.activityArtifacts.get(key);
     const card = buildActivityCard(event);
 
@@ -1206,7 +1280,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       this.activityArtifacts.set(key, {
         key,
         routeKey,
-        activityId: event.id,
+        activityId,
         messageId: sent.messageId,
         openMessageId: sent.openMessageId,
         kind: event.kind,

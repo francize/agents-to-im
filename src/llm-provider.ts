@@ -426,6 +426,8 @@ export interface StreamState {
    * as assistant text but were followed by a CLI crash.
    */
   lastAssistantText: string;
+  /** Stable tool name lookup for later tool_result updates. */
+  toolNamesByUseId: Map<string, string>;
 }
 
 interface ClaudeAskUserQuestionOptionLike {
@@ -548,32 +550,124 @@ export function buildAskUserQuestionResponse(
   };
 }
 
+function stringifyUnknown(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  if (value === null || value === undefined) return '';
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function truncatePreview(text: string, maxChars = 220): string {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars - 3).trimEnd()}...`;
+}
+
+function formatMcpToolName(toolName: string): string {
+  const withoutPrefix = toolName.replace(/^mcp__/, '');
+  const parts = withoutPrefix.split('__');
+  if (parts.length >= 2) {
+    return `MCP: ${(parts[0] || '').trim()} ${parts.slice(1).join('__').trim()}`.trim();
+  }
+  return `MCP: ${withoutPrefix.trim()}`.trim();
+}
+
+function buildToolInputPreview(toolName: string, input: unknown): string {
+  if (!input || typeof input !== 'object') return truncatePreview(stringifyUnknown(input));
+  const record = input as Record<string, unknown>;
+
+  if (toolName === 'Bash') {
+    const command = typeof record.command === 'string' ? record.command.trim() : '';
+    if (command) return truncatePreview(command);
+  }
+
+  const filePath = typeof record.file_path === 'string'
+    ? record.file_path.trim()
+    : typeof record.filePath === 'string'
+      ? record.filePath.trim()
+      : '';
+  if (filePath) return truncatePreview(filePath);
+
+  const query = typeof record.query === 'string' ? record.query.trim() : '';
+  if (query) return truncatePreview(query);
+
+  return truncatePreview(stringifyUnknown(input));
+}
+
+function buildToolResultPreview(content: unknown): string {
+  if (Array.isArray(content)) {
+    const imageCount = content.filter((item) => {
+      if (!item || typeof item !== 'object') return false;
+      const record = item as Record<string, unknown>;
+      const source = record.source;
+      return record.type === 'image'
+        && !!source
+        && typeof source === 'object'
+        && (source as Record<string, unknown>).type === 'base64';
+    }).length;
+    if (imageCount > 0) {
+      return imageCount === 1 ? '返回了 1 张图片' : `返回了 ${imageCount} 张图片`;
+    }
+  }
+  return truncatePreview(stringifyUnknown(content));
+}
+
+function buildToolActivityEvent(
+  toolUseId: string,
+  toolName: string,
+  options: {
+    status: 'pending' | 'running' | 'completed' | 'failed';
+    input?: unknown;
+    result?: unknown;
+    parentToolUseId?: string | null;
+    taskId?: string;
+    elapsedSeconds?: number;
+    source?: string;
+  },
+): ActivityEvent {
+  return {
+    kind: 'tool_activity',
+    toolUseId,
+    parentToolUseId: options.parentToolUseId,
+    toolName: toolName.startsWith('mcp__') ? formatMcpToolName(toolName) : toolName,
+    status: options.status,
+    ...(options.input !== undefined ? { inputPreview: buildToolInputPreview(toolName, options.input) } : {}),
+    ...(options.result !== undefined ? { resultPreview: buildToolResultPreview(options.result) } : {}),
+    ...(options.taskId ? { taskId: options.taskId } : {}),
+    ...(typeof options.elapsedSeconds === 'number' ? { elapsedSeconds: options.elapsedSeconds } : {}),
+    ...(options.source ? { source: options.source } : {}),
+  };
+}
+
 export function mapSdkMessageToActivityEvent(msg: SDKMessage): ActivityEvent | null {
   if (msg.type === 'system') {
     switch (msg.subtype) {
       case 'status':
         if (msg.status === 'compacting') {
           return {
-            kind: 'lightweight_activity',
-            id: `claude-status:${msg.session_id}:compacting`,
+            kind: 'reasoning_activity',
             status: 'running',
             text: '正在压缩上下文…',
-            source: 'claude-sdk',
+            source: 'compacting',
           };
         }
         return null;
       case 'task_started':
         return {
-          kind: 'lightweight_activity',
-          id: `claude-task:${msg.task_id}`,
+          kind: 'reasoning_activity',
+          taskId: msg.task_id,
           status: 'running',
           text: msg.description,
           source: msg.task_type || 'task_started',
         };
       case 'task_progress':
         return {
-          kind: 'lightweight_activity',
-          id: `claude-task:${msg.task_id}`,
+          kind: 'reasoning_activity',
+          taskId: msg.task_id,
           status: 'running',
           text: msg.last_tool_name
             ? `${msg.description} · ${msg.last_tool_name}`
@@ -582,16 +676,15 @@ export function mapSdkMessageToActivityEvent(msg: SDKMessage): ActivityEvent | n
         };
       case 'task_notification':
         return {
-          kind: 'lightweight_activity',
-          id: `claude-task:${msg.task_id}`,
+          kind: 'reasoning_activity',
+          taskId: msg.task_id,
           status: msg.status === 'failed' ? 'failed' : 'completed',
           text: msg.summary,
           source: msg.status,
         };
       case 'elicitation_complete':
         return {
-          kind: 'lightweight_activity',
-          id: `claude-elicitation:${msg.session_id}:${msg.elicitation_id}`,
+          kind: 'reasoning_activity',
           status: 'completed',
           text: `MCP 输入请求已完成：${msg.mcp_server_name}`,
           source: 'elicitation_complete',
@@ -603,17 +696,16 @@ export function mapSdkMessageToActivityEvent(msg: SDKMessage): ActivityEvent | n
 
   switch (msg.type) {
     case 'tool_progress':
-      return {
-        kind: 'lightweight_activity',
-        id: `claude-tool:${msg.tool_use_id}`,
+      return buildToolActivityEvent(msg.tool_use_id, msg.tool_name, {
         status: 'running',
-        text: `正在执行 ${msg.tool_name}…`,
+        parentToolUseId: msg.parent_tool_use_id,
+        taskId: msg.task_id,
+        elapsedSeconds: msg.elapsed_time_seconds,
         source: 'tool_progress',
-      };
+      });
     case 'tool_use_summary':
       return {
-        kind: 'lightweight_activity',
-        id: `claude-tool-summary:${msg.uuid}`,
+        kind: 'reasoning_activity',
         status: 'completed',
         text: msg.summary,
         source: 'tool_use_summary',
@@ -656,7 +748,12 @@ export class SDKLLMProvider implements LLMProvider {
           // Ring-buffer for recent stderr output (max 4 KB)
           const MAX_STDERR = 4096;
           let stderrBuf = '';
-          const state: StreamState = { hasReceivedResult: false, hasStreamedText: false, lastAssistantText: '' };
+          const state: StreamState = {
+            hasReceivedResult: false,
+            hasStreamedText: false,
+            lastAssistantText: '',
+            toolNamesByUseId: new Map<string, string>(),
+          };
 
           try {
             const cleanEnv = buildSubprocessEnv();
@@ -724,8 +821,7 @@ export class SDKLLMProvider implements LLMProvider {
                     const request = parseAskUserQuestionRequest(opts.toolUseID, input);
                     if (!request) {
                       enqueueActivityEvent(controller, {
-                        kind: 'lightweight_activity',
-                        id: `claude-ask-user-question:${opts.toolUseID}`,
+                        kind: 'reasoning_activity',
                         status: 'failed',
                         text: '收到了无法识别的 AskUserQuestion 请求，已拒绝本轮澄清输入。',
                         source: 'ask_user_question',
@@ -757,6 +853,13 @@ export class SDKLLMProvider implements LLMProvider {
                     return { behavior: 'allow' as const, updatedInput: input };
                   }
 
+                  enqueueActivityEvent(controller, buildToolActivityEvent(opts.toolUseID, toolName, {
+                    status: 'pending',
+                    input,
+                    source: 'permission_request',
+                  }));
+                  state.toolNamesByUseId.set(opts.toolUseID, toolName);
+
                   // Emit permission_request SSE event for the bridge
                   controller.enqueue(
                     sseEvent('permission_request', {
@@ -779,6 +882,12 @@ export class SDKLLMProvider implements LLMProvider {
                         : {}),
                     };
                   }
+                  enqueueActivityEvent(controller, buildToolActivityEvent(opts.toolUseID, toolName, {
+                    status: 'failed',
+                    input,
+                    result: result.message || 'Denied by user',
+                    source: result.interrupt ? 'permission_interrupt' : 'permission_deny',
+                  }));
                   return {
                     behavior: 'deny' as const,
                     message: result.message || 'Denied by user',
@@ -900,6 +1009,12 @@ export function handleMessage(
         event.type === 'content_block_start' &&
         event.content_block.type === 'tool_use'
       ) {
+        state.toolNamesByUseId.set(event.content_block.id, event.content_block.name);
+        enqueueActivityEvent(controller, buildToolActivityEvent(event.content_block.id, event.content_block.name, {
+          status: 'running',
+          input: 'input' in event.content_block ? event.content_block.input : {},
+          source: 'stream_tool_use',
+        }));
         controller.enqueue(
           sseEvent('tool_use', {
             id: event.content_block.id,
@@ -924,6 +1039,13 @@ export function handleMessage(
           if (block.type === 'text' && block.text) {
             state.lastAssistantText += (state.lastAssistantText ? '\n' : '') + block.text;
           } else if (block.type === 'tool_use') {
+            state.toolNamesByUseId.set(block.id, block.name);
+            enqueueActivityEvent(controller, buildToolActivityEvent(block.id, block.name, {
+              status: 'running',
+              input: block.input,
+              parentToolUseId: msg.parent_tool_use_id,
+              source: 'assistant_tool_use',
+            }));
             controller.enqueue(
               sseEvent('tool_use', {
                 id: block.id,
@@ -947,6 +1069,16 @@ export function handleMessage(
             const text = typeof rb.content === 'string'
               ? rb.content
               : JSON.stringify(rb.content ?? '');
+            enqueueActivityEvent(controller, buildToolActivityEvent(
+              rb.tool_use_id,
+              state.toolNamesByUseId.get(rb.tool_use_id) || 'Tool',
+              {
+              status: rb.is_error ? 'failed' : 'completed',
+              result: rb.content,
+              parentToolUseId: msg.parent_tool_use_id,
+              source: 'tool_result',
+              },
+            ));
             controller.enqueue(
               sseEvent('tool_result', {
                 tool_use_id: rb.tool_use_id,

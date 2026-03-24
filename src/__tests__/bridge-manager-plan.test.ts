@@ -914,6 +914,83 @@ describe('bridge-manager plan workflow', () => {
     assert.equal(deliveredRequest.requestId, 'req-activity-structured');
   });
 
+  it('does not prime a preview once a Claude tool activity card is already visible', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const activityEvents: Array<Record<string, unknown>> = [];
+    const previewPrimes: number[] = [];
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'activity_event',
+              data: JSON.stringify({
+                kind: 'tool_activity',
+                toolUseId: 'tool-1',
+                toolName: 'MCP: chrome-devtools take_screenshot',
+                status: 'running',
+                inputPreview: 'file:///tmp/test-cwd/index.html',
+                taskId: 'task-1',
+                source: 'tool_progress',
+              }),
+            })}\n`);
+            setTimeout(() => {
+              controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '截图执行中，我会把结果直接发回群里。' })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-tool-preview-1' }) })}\n`);
+              controller.close();
+            }, 60);
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-tool-preview',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+
+    (adapter as any).getPreviewCapabilities = () => ({
+      supported: true,
+      privateOnly: false,
+      finalDelivery: 'segment_replace_preview',
+    });
+    (adapter as any).primePreview = async (_address: unknown, draftId: number) => {
+      previewPrimes.push(draftId);
+      return 'sent';
+    };
+    (adapter as any).upsertActivityEvent = async (_address: unknown, event: Record<string, unknown>) => {
+      activityEvents.push(event);
+      return { ok: true, messageId: `activity-${activityEvents.length}` };
+    };
+
+    await start();
+    adapter.push({
+      messageId: 'msg-tool-preview',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-tool-preview', threadId: 'thread-1' },
+      text: '继续',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length === 1 && activityEvents.length === 1);
+
+    assert.equal(previewPrimes.length, 0);
+    assert.equal(activityEvents[0]?.kind, 'tool_activity');
+    assert.equal(adapter.sent[0].text, '截图执行中，我会把结果直接发回群里。');
+  });
+
   it('projects lightweight, command, and file activities without mixing them into assistant text delivery', async () => {
     const store = new JsonFileStore(makeSettings());
     const activityEvents: Array<Record<string, unknown>> = [];

@@ -1036,6 +1036,7 @@ async function handleMessage(
   const activeFileActivityBySignature = new Map<string, string>();
   const activityVersionBySignature = new Map<string, number>();
   const activitySignatureById = new Map<string, string>();
+  let hasVisibleProgressCard = false;
 
   const compactActivityText = (value: string | undefined): string => (value || '').replace(/\s+/g, ' ').trim();
 
@@ -1182,6 +1183,10 @@ async function handleMessage(
     switch (event.kind) {
       case 'lightweight_activity':
         return { ...event, id: `lightweight-slot:${turnScope}` };
+      case 'reasoning_activity':
+        return { ...event, turnId: turnScope };
+      case 'tool_activity':
+        return { ...event, turnId: turnScope };
       case 'command_execution':
         return { ...event, id: normalizeCommandActivityId(event, turnScope) };
       case 'file_change':
@@ -1189,6 +1194,30 @@ async function handleMessage(
       case 'context_usage':
         return { ...event, id: `context:${turnScope}` };
     }
+  };
+
+  const dismissPlaceholderPreviewIfIdle = async (): Promise<void> => {
+    if (!previewState) return;
+    clearPrimeTimer(previewState);
+    if (previewState.throttleTimer) {
+      clearTimeout(previewState.throttleTimer);
+      previewState.throttleTimer = null;
+    }
+    if (
+      previewState.placeholderPrimed
+      && !previewState.lastSentText.trim()
+      && !previewState.pendingText.trim()
+      && previewState.lastSentAt === 0
+    ) {
+      await settlePreview(previewState);
+      adapter.endPreview?.(msg.address, previewState.draftId);
+      resetPreviewState(previewState);
+    }
+  };
+
+  const markProgressCardVisible = async (): Promise<void> => {
+    hasVisibleProgressCard = true;
+    await dismissPlaceholderPreviewIfIdle();
   };
 
   const cancelPendingLightweightActivity = (): void => {
@@ -1340,6 +1369,7 @@ async function handleMessage(
     if (!adapter.upsertActivityEvent) return;
     if (event.kind === 'context_usage') return;
     const normalized = normalizeActivityEvent(event);
+    await markProgressCardVisible();
     if (normalized.kind === 'lightweight_activity') {
       if (
         lightweightActivityState?.current
@@ -1437,7 +1467,7 @@ async function handleMessage(
     }
     adapter.endPreview?.(msg.address, ps.draftId);
     resetPreviewState(ps);
-    if (delivery.ok) {
+    if (delivery.ok && !hasVisibleProgressCard) {
       schedulePrimePreview(adapter, ps, streamCfg!.primeDelayMs);
     }
   } : undefined;
@@ -1458,6 +1488,7 @@ async function handleMessage(
     ): Promise<boolean> => {
       const workflow = store.getPlanWorkflow(workflowId);
       if (!workflow) return false;
+      hasVisibleProgressCard = true;
       cancelPendingLightweightActivity();
       await dismissPreviewForConfirmationCard(adapter, msg.address, previewState);
       const approvalMessage: OutboundMessage = adapter.channelType === 'feishu'
@@ -1513,17 +1544,17 @@ async function handleMessage(
         const planFilePath = parseClaudePlanFilePath(perm.toolInput);
         const allowedPrompts = parseClaudeAllowedPrompts(perm.toolInput);
         const showClearContext = true;
-        const sent = await sendClaudePlanConfirmationCard(
-          workflow.workflowId,
-          planText,
-          allowedPrompts,
-          showClearContext,
+      const sent = await sendClaudePlanConfirmationCard(
+        workflow.workflowId,
+        planText,
+        allowedPrompts,
+        showClearContext,
           perm.permissionRequestId,
           planFilePath,
-        );
-        if (sent) {
-          return;
-        }
+      );
+      if (sent) {
+        return;
+      }
 
         store.updatePlanWorkflow(workflow.workflowId, {
           status: 'awaiting_confirmation',
@@ -1536,6 +1567,8 @@ async function handleMessage(
         return;
       }
 
+      hasVisibleProgressCard = true;
+      await dismissPlaceholderPreviewIfIdle();
       await broker.forwardPermissionRequest(
         adapter,
         msg.address,
@@ -1551,6 +1584,7 @@ async function handleMessage(
       permissionModeOverride: planWorkflowMeta?.permissionMode,
       collaborationModeOverride: resolveCodexCollaborationMode(binding, planWorkflowMeta),
     }, async (request: StructuredInputRequestInfo) => {
+      hasVisibleProgressCard = true;
       cancelPendingLightweightActivity();
       if (previewState) {
         clearPrimeTimer(previewState);
