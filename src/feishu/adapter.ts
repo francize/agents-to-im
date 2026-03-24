@@ -1687,7 +1687,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return [
         `已创建 Claude 会话，当前 mode：**${modeTitle}**。`,
         '后续直接在本群发送消息继续对话。',
-        '可用命令：`/mode` 切换 mode、`/reset` 重置会话、`/perm ...` 处理权限请求。',
+        '可用命令：`/mode` 切换 mode、`/reset` 重置会话。权限请求请直接使用卡片按钮处理。',
       ].join('\n');
     }
     return '已创建 codex 会话。后续请直接在本群继续对话。';
@@ -1812,7 +1812,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return;
     }
     if (lower.startsWith('/')) {
-      await this.sendAsPost(inbound.address, '该群仅支持普通对话、`/plan`、`/mode`、`/reset` 与 `/perm ...`。如需新会话，请私聊 Bot。', inbound.messageId);
+      await this.sendAsPost(inbound.address, '该群仅支持普通对话、`/plan`、`/mode`、`/reset`。权限请求请直接使用卡片按钮处理；如需新会话，请私聊 Bot。', inbound.messageId);
       return;
     }
 

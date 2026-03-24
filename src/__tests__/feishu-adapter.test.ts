@@ -148,6 +148,45 @@ describe('FeishuAdapter', () => {
     assert.equal(sends.length, 2);
   });
 
+  it('does not advertise /perm in group-ready messages', () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+
+    const claudeSession = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    const claudeBinding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-claude',
+      codepilotSessionId: claudeSession.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+      claudePermissionMode: 'plan',
+    });
+
+    const codexSession = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+      cwd: '/tmp/test-cwd',
+    });
+    const codexBinding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-codex',
+      codepilotSessionId: codexSession.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5-codex',
+    });
+
+    const adapter = new FeishuAdapter() as any;
+    const claudeMessage = adapter.buildSessionReadyMessage('claude', claudeBinding);
+    const codexMessage = adapter.buildSessionReadyMessage('codex', codexBinding);
+
+    assert.equal(claudeMessage.includes('/perm'), false);
+    assert.equal(codexMessage.includes('/perm'), false);
+  });
+
   it('reset keeps runtime and clears persisted sdk session id', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});
