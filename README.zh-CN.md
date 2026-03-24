@@ -2,7 +2,7 @@
 
 面向本地 AI 编码代理的 Feishu-first 隔离会话工作空间。
 
-通过私聊创建专属群聊并绑定 Claude Code 或 Codex 会话，把正式协作留在 Feishu/Lark 里，同时保留可恢复的本地状态和高质量卡片流式体验。
+通过私聊创建专属群聊并绑定 Claude Code 或 Codex 会话，把正式协作留在 Feishu/Lark 里，同时保留可恢复的本地状态和高质量卡片流式体验。现在 Claude 的私聊创建会先弹出 mode 选择卡，再真正创建群聊。
 
 [English](README.md)
 
@@ -21,7 +21,7 @@ flowchart LR
 
 ## 为什么这是 Feishu-first 方案？
 
-- **它先创建隔离会话空间，而不是把聊天窗口直接当会话容器。** 私聊只是控制面。执行 `/new:claude` 或 `/new:codex` 之后，Bot 会自动创建一个新群并绑定单个会话，默认就具备清晰的工作边界。
+- **它先创建隔离会话空间，而不是把聊天窗口直接当会话容器。** 私聊只是控制面。执行 `/new:claude` 后会先通过卡片选择 Claude mode，再创建新群；执行 `/new:codex` 则直接创建新群。两者都会绑定单个会话，默认就具备清晰的工作边界。
 - **它的工作空间是本地可恢复的。** 会话、群绑定、消息、runtime 状态和 resume 标识都保存在 `~/.agents-to-im/` 下，bridge 重启后不需要重新理解“这个群现在对应哪个任务”。
 - **它把 Feishu 当一等交互界面，而不是纯文本转发器。** 流式预览优先走 CardKit，权限优先走按钮，活动/计划/结构化提问优先走卡片，而不是把所有操作都压缩成 slash command。
 
@@ -142,7 +142,7 @@ node dist/cli-bin.mjs stop
 2. 运行 `node dist/cli-bin.mjs status`，确认 bridge 正在运行
 3. 打开 `http://127.0.0.1:3456`，确认本地状态面板可访问
 4. 私聊 Bot，发送 `/new:claude` 或 `/new:codex`
-5. 确认 Bot 自动创建了一个新群、完成会话绑定，并在群里继续回复
+5. 如果是 Claude，会先在私聊里选择 mode；随后确认 Bot 自动创建了一个新群、完成会话绑定，并在群里继续回复
 
 ## Feishu 体验
 
@@ -154,7 +154,7 @@ node dist/cli-bin.mjs stop
 | 权限处理 | 按钮是默认确认路径，`/perm allow\|allow_session\|deny <id>` 只是兜底 |
 | 活动可见性 | 命令、文件、计划等进度以卡片形式呈现，不要求群成员阅读原始日志 |
 | 结构化提问 | runtime 的补充信息请求可以渲染成 Feishu 卡片；遇到敏感输入则明确退回本地 CLI，避免把 secret 发进群 |
-| 群命名 | 首轮成功后，bridge 会生成短标题并尝试自动重命名群聊 |
+| 群命名 | 首轮成功后，bridge 会生成短标题并尝试自动重命名群聊；Claude 的非默认 permission mode 会追加类似 `[Plan Mode]` 的后缀 |
 
 这让 Feishu 里的工作体验更接近真正的协作空间：进度可见、移动端更友好、上下文也更稳定。
 
@@ -165,7 +165,7 @@ bridge 会把状态保存在 `~/.agents-to-im/`，所以一个群是可恢复的
 | 路径 | 保存内容 |
 | --- | --- |
 | `data/sessions.json` | 会话元数据、runtime、model、标题状态和 resume 相关信息 |
-| `data/bindings.json` | 群聊到会话的绑定关系、工作目录、模式和模型路由 |
+| `data/bindings.json` | 群聊到会话的绑定关系、工作目录、bridge 模式、Claude permission mode 和模型路由 |
 | `data/messages/` | 按会话持久化的消息历史 |
 | `runtime/status.json` | bridge 运行状态和最近退出原因 |
 | `runtime/bridge.pid` | 当前 daemon PID，便于本地进程管理 |
@@ -184,7 +184,7 @@ bridge 会把状态保存在 `~/.agents-to-im/`，所以一个群是可恢复的
 
 | 命令 | 说明 |
 | --- | --- |
-| `/new:claude` | 创建一个基于 Claude 的新群工作空间 |
+| `/new:claude` | 先弹出 Claude mode 选择卡，再按所选 mode 创建新群工作空间 |
 | `/new:codex` | 创建一个基于 Codex 的新群工作空间 |
 
 私聊里发送其他内容时，Bot 只会返回帮助提示，不会直接启动会话。
@@ -194,7 +194,7 @@ bridge 会把状态保存在 `~/.agents-to-im/`，所以一个群是可恢复的
 | 命令 | 说明 |
 | --- | --- |
 | 普通消息 | 继续当前会话 |
-| `/mode plan\|code\|ask` | 切换会话模式 |
+| `/mode` | 在 Claude 群里弹出 Claude mode 卡片；在 Codex 群里仍可用 `/mode plan\|code\|ask` 切换 bridge 模式 |
 | `/plan` | 进入交互式计划流程 |
 | `/plan <需求>` | 直接开始生成计划 |
 | `/reset` | 替换当前会话并保留群的 runtime |

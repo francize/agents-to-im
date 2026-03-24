@@ -8,6 +8,7 @@
 
 import type { SessionExt } from '../runtime-types.js';
 import type { ClaudePlanAllowedPrompt } from '../claude-plan-exit.js';
+import type { ClaudePermissionMode } from '../claude-mode.js';
 import type { ChannelAddress, ChannelBinding, ChannelType } from './types.js';
 
 // ── Bridge-local types (replacing @/types imports) ────────────
@@ -297,6 +298,7 @@ export interface UpsertChannelBindingInput {
   codepilotSessionId: string;
   workingDirectory: string;
   model: string;
+  claudePermissionMode?: ClaudePermissionMode;
 }
 
 /**
@@ -402,6 +404,7 @@ export interface StreamChatParams {
   conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
   files?: FileAttachment[];
   onRuntimeStatusChange?: (status: string) => void;
+  onModeChanged?: (mode: ClaudePermissionMode) => void;
   collaborationMode?: 'plan' | 'default';
 }
 

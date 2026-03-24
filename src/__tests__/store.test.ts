@@ -120,6 +120,32 @@ describe('JsonFileStore', () => {
     assert.equal(b.mode, 'plan');
   });
 
+  it('upsertChannelBinding preserves Claude permission mode unless explicitly changed', () => {
+    const store = new JsonFileStore(makeSettings());
+    const created = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'claude-chat',
+      codepilotSessionId: 'sess-1',
+      workingDirectory: '/tmp',
+      model: 'claude-sonnet-4-6',
+      claudePermissionMode: 'plan',
+    });
+
+    const updated = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'claude-chat',
+      codepilotSessionId: 'sess-2',
+      workingDirectory: '/tmp/next',
+      model: 'claude-sonnet-4-6',
+    });
+
+    assert.equal(created.claudePermissionMode, 'plan');
+    assert.equal(updated.claudePermissionMode, 'plan');
+
+    store.updateChannelBinding(updated.id, { claudePermissionMode: 'dontAsk' });
+    assert.equal(store.getChannelBinding('feishu', 'claude-chat')?.claudePermissionMode, 'dontAsk');
+  });
+
   it('getChannelBinding returns null for missing', () => {
     const store = new JsonFileStore(makeSettings());
     assert.equal(store.getChannelBinding('feishu', 'missing'), null);

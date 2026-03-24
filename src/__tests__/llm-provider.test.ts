@@ -247,6 +247,23 @@ describe('handleMessage state tracking', () => {
     assert.equal(state.hasReceivedResult, true);
   });
 
+  it('emits mode_changed when the SDK surfaces a permission mode update', () => {
+    const { controller, chunks } = makeFakeController();
+    const state = freshState();
+
+    handleMessage({
+      type: 'system',
+      subtype: 'mode_changed',
+      mode: 'dontAsk',
+      session_id: 'sess-mode-1',
+    } as any, controller, state);
+
+    assert.deepEqual(parseChunk(chunks[0] || ''), {
+      type: 'mode_changed',
+      data: JSON.stringify({ mode: 'dontAsk' }),
+    });
+  });
+
   it('falls back to Unknown error when SDK error result has no messages', () => {
     const { controller, chunks } = makeFakeController();
     const state = freshState();

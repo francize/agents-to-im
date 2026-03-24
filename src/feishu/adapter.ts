@@ -6,6 +6,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import type {
   ActivityEvent,
   ChannelAddress,
+  ChannelBinding,
   ChannelType,
   InboundMessage,
   OutboundImage,
@@ -32,6 +33,13 @@ import {
   buildClaudePlanFollowUpPrompt,
   buildClaudePlanModeUpdates,
 } from '../claude-plan-exit.js';
+import {
+  getClaudeModeOptions,
+  getClaudeModeSuffix,
+  getClaudeModeTitle,
+  normalizeClaudePermissionMode,
+} from '../claude-mode.js';
+import type { ClaudePermissionMode } from '../claude-mode.js';
 
 import type { MultiplexLLMProvider } from '../multiplex-llm-provider.js';
 import type { RuntimeName } from '../runtime-types.js';
@@ -160,8 +168,114 @@ function stripPlanSuffix(text: string): string {
   return text.replace(/\s*\[PLAN\]$/, '').trim();
 }
 
-function defaultChatName(runtime: RuntimeName): string {
-  return runtime === 'codex' ? 'Codex 新会话' : 'Claude 新会话';
+function stripClaudeModeSuffix(text: string): string {
+  let normalized = stripPlanSuffix(text).trim();
+  for (const option of getClaudeModeOptions()) {
+    const suffix = getClaudeModeSuffix(option.mode);
+    if (suffix && normalized.endsWith(suffix)) {
+      normalized = normalized.slice(0, -suffix.length).trim();
+      break;
+    }
+  }
+  return normalized;
+}
+
+function resolveLegacyClaudePermissionMode(mode: 'code' | 'plan' | 'ask'): ClaudePermissionMode {
+  switch (mode) {
+    case 'plan':
+      return 'plan';
+    case 'ask':
+      return 'default';
+    default:
+      return 'acceptEdits';
+  }
+}
+
+function resolveClaudeBindingMode(
+  binding: Pick<import('../bridge/types.js').ChannelBinding, 'mode' | 'claudePermissionMode'>,
+): ClaudePermissionMode {
+  return binding.claudePermissionMode || resolveLegacyClaudePermissionMode(binding.mode);
+}
+
+function defaultChatName(runtime: RuntimeName, claudePermissionMode?: ClaudePermissionMode): string {
+  const base = runtime === 'codex' ? 'Codex 新会话' : 'Claude 新会话';
+  return runtime === 'claude' ? `${base}${getClaudeModeSuffix(claudePermissionMode)}` : base;
+}
+
+function buildClaudeModeButtons(
+  scope: 'new' | 'switch',
+  selectedMode?: ClaudePermissionMode,
+  bindingId?: string,
+): Array<Record<string, unknown>> {
+  return getClaudeModeOptions().map((option) => ({
+    tag: 'column' as const,
+    width: 'auto' as const,
+    elements: [
+      {
+        tag: 'button' as const,
+        text: {
+          tag: 'plain_text' as const,
+          content: option.title,
+        },
+        type: option.mode === selectedMode ? 'primary' as const : 'default' as const,
+        behaviors: [
+          {
+            type: 'callback' as const,
+            value: {
+              callback_data: scope === 'new'
+                ? `claude-mode:new:${option.mode}`
+                : `claude-mode:switch:${bindingId || ''}:${option.mode}`,
+            },
+          },
+        ],
+      },
+    ],
+  }));
+}
+
+function buildClaudeModeCard(
+  scope: 'new' | 'switch',
+  options?: {
+    selectedMode?: ClaudePermissionMode;
+    bindingId?: string;
+    note?: string;
+  },
+): Record<string, unknown> {
+  const selectedTitle = options?.selectedMode ? getClaudeModeTitle(options.selectedMode) : '';
+  const intro = scope === 'new'
+    ? '请选择要进入的 Claude mode。创建后会保持该 mode。'
+    : `当前 mode：**${selectedTitle || getClaudeModeTitle('default')}**\n点击下方按钮即可切换。`;
+  const note = options?.note?.trim();
+  return {
+    schema: '2.0',
+    config: {
+      wide_screen_mode: true,
+      update_multi: true,
+      width_mode: 'fill',
+    },
+    header: {
+      title: {
+        tag: 'plain_text',
+        content: scope === 'new' ? '选择 Claude Mode' : '切换 Claude Mode',
+      },
+      template: 'blue',
+    },
+    body: {
+      elements: [
+        {
+          tag: 'markdown',
+          content: note ? `${intro}\n\n${note}` : intro,
+        },
+        {
+          tag: 'column_set',
+          flex_mode: 'flow',
+          horizontal_spacing: '8px',
+          horizontal_align: 'left',
+          columns: buildClaudeModeButtons(scope, options?.selectedMode, options?.bindingId),
+        },
+      ],
+    },
+  };
 }
 
 function buildSimpleCard(text: string): Record<string, unknown> {
@@ -1504,6 +1618,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
       }
       return { toast: { type: 'warning', content: 'Permission already handled' } };
     }
+    if (callbackData.startsWith('claude-mode:')) {
+      return this.handleClaudeModeCardAction(event, callbackData);
+    }
     if (callbackData.startsWith('input:')) {
       return this.handleStructuredInputCardAction(event, callbackData);
     }
@@ -1550,10 +1667,103 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
   }
 
+  private findBindingById(bindingId: string): ChannelBinding | null {
+    return this.getStore().listChannelBindings(this.channelType).find((item) => item.id === bindingId) || null;
+  }
+
+  private extractActionSenderIdentity(event: StructuredActionEvent): SenderIdentity | null {
+    if (event.operator?.open_id) {
+      return { id: event.operator.open_id, type: 'open_id' };
+    }
+    if (event.operator?.user_id) {
+      return { id: event.operator.user_id, type: 'user_id' };
+    }
+    return null;
+  }
+
+  private buildSessionReadyMessage(runtime: RuntimeName, binding: ChannelBinding): string {
+    if (runtime === 'claude') {
+      const modeTitle = getClaudeModeTitle(resolveClaudeBindingMode(binding));
+      return [
+        `已创建 Claude 会话，当前 mode：**${modeTitle}**。`,
+        '后续直接在本群发送消息继续对话。',
+        '可用命令：`/mode` 切换 mode、`/reset` 重置会话、`/perm ...` 处理权限请求。',
+      ].join('\n');
+    }
+    return '已创建 codex 会话。后续请直接在本群继续对话。';
+  }
+
+  private async ensureRuntimeAvailable(runtime: RuntimeName): Promise<void> {
+    const llm = getBridgeContext().llm as MultiplexLLMProvider & {
+      ensureRuntimeAvailable?: (target: RuntimeName) => Promise<void>;
+    };
+    await llm.ensureRuntimeAvailable?.(runtime);
+  }
+
+  private async createBoundSession(
+    runtime: RuntimeName,
+    sender: SenderIdentity,
+    options?: { claudePermissionMode?: ClaudePermissionMode },
+  ): Promise<{ chatId: string; binding: ChannelBinding }> {
+    await this.ensureRuntimeAvailable(runtime);
+    const store = this.getStore();
+    const model = runtime === 'codex'
+      ? store.getSetting('bridge_codex_default_model') || ''
+      : store.getSetting('bridge_claude_default_model') || store.getSetting('bridge_default_model') || '';
+    const chatId = await this.createSessionGroup(runtime, sender, options?.claudePermissionMode);
+    const session = store.createRuntimeSession({
+      runtime,
+      model,
+      cwd: store.getSetting('bridge_default_work_dir') || process.cwd(),
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: this.channelType,
+      chatId,
+      codepilotSessionId: session.id,
+      workingDirectory: session.working_directory,
+      model: session.model,
+      ...(runtime === 'claude'
+        ? { claudePermissionMode: options?.claudePermissionMode || 'default' }
+        : {}),
+    });
+    await this.syncChatName(chatId);
+    await this.sendAsPost(
+      { channelType: this.channelType, chatId },
+      this.buildSessionReadyMessage(runtime, binding),
+    );
+    return { chatId, binding };
+  }
+
+  private async sendClaudeModeCard(
+    address: ChannelAddress,
+    scope: 'new' | 'switch',
+    replyToMessageId?: string,
+    options?: {
+      selectedMode?: ClaudePermissionMode;
+      bindingId?: string;
+      note?: string;
+    },
+  ): Promise<SendResult> {
+    const result = await this.sendInteractiveCard(
+      address,
+      buildClaudeModeCard(scope, options),
+      replyToMessageId,
+    );
+    return {
+      ok: true,
+      messageId: result.messageId,
+      openMessageId: result.openMessageId,
+    };
+  }
+
   private async handleDirectMessage(sender: SenderIdentity, inbound: InboundMessage): Promise<void> {
     const command = inbound.text.trim().toLowerCase();
-    if (command === '/new:claude' || command === '/new:codex') {
-      await this.handleCreateSessionCommand(sender, inbound, command.endsWith('codex') ? 'codex' : 'claude');
+    if (command === '/new:claude') {
+      await this.handleCreateSessionCommand(sender, inbound, 'claude');
+      return;
+    }
+    if (command === '/new:codex') {
+      await this.handleCreateSessionCommand(sender, inbound, 'codex');
       return;
     }
     await this.sendAsPost(
@@ -1618,48 +1828,35 @@ export class FeishuAdapter extends BaseChannelAdapter {
   }
 
   private async handleCreateSessionCommand(sender: SenderIdentity, inbound: InboundMessage, runtime: RuntimeName): Promise<void> {
-    const llm = getBridgeContext().llm as MultiplexLLMProvider & {
-      ensureRuntimeAvailable?: (target: RuntimeName) => Promise<void>;
-    };
-    try {
-      await llm.ensureRuntimeAvailable?.(runtime);
-    } catch (error) {
-      await this.sendAsPost(
-        inbound.address,
-        `无法创建 ${runtime} 会话：${error instanceof Error ? error.message : String(error)}`,
-        inbound.messageId,
-      );
+    if (runtime === 'claude') {
+      try {
+        await this.ensureRuntimeAvailable(runtime);
+      } catch (error) {
+        await this.sendAsPost(
+          inbound.address,
+          `无法创建 ${runtime} 会话：${error instanceof Error ? error.message : String(error)}`,
+          inbound.messageId,
+        );
+        return;
+      }
+      try {
+        await this.sendClaudeModeCard(inbound.address, 'new', inbound.messageId);
+      } catch (error) {
+        await this.sendAsPost(
+          inbound.address,
+          `发送 Claude mode 选择卡失败：${error instanceof Error ? error.message : String(error)}`,
+          inbound.messageId,
+        );
+      }
       return;
     }
 
-    let chatId = '';
     try {
-      chatId = await this.createSessionGroup(runtime, sender);
-      const store = this.getStore();
-      const model = runtime === 'codex'
-        ? store.getSetting('bridge_codex_default_model') || ''
-        : store.getSetting('bridge_claude_default_model') || store.getSetting('bridge_default_model') || '';
-      const session = store.createRuntimeSession({
-        runtime,
-        model,
-        cwd: store.getSetting('bridge_default_work_dir') || process.cwd(),
-      });
-      store.upsertChannelBinding({
-        channelType: this.channelType,
-        chatId,
-        codepilotSessionId: session.id,
-        workingDirectory: session.working_directory,
-        model: session.model,
-      });
-      await this.syncChatName(chatId);
-      await this.sendAsPost({ channelType: this.channelType, chatId }, `已创建 ${runtime} 会话。后续请直接在本群继续对话。`);
+      await this.createBoundSession(runtime, sender);
       await this.sendAsPost(inbound.address, `已创建新群并绑定 ${runtime} 会话。`, inbound.messageId);
     } catch (error) {
       console.error('[feishu-adapter] Failed to initialize group session:', error);
       const message = `创建会话失败：${error instanceof Error ? error.message : String(error)}`;
-      if (chatId) {
-        await this.sendAsPost({ channelType: this.channelType, chatId }, `初始化失败：${message}`);
-      }
       await this.sendAsPost(inbound.address, message, inbound.messageId);
     }
   }
@@ -1707,19 +1904,26 @@ export class FeishuAdapter extends BaseChannelAdapter {
   }
 
   private async handleModeCommand(bindingId: string, text: string, address: ChannelAddress, replyToMessageId?: string): Promise<void> {
+    const store = this.getStore();
+    const binding = this.findBindingById(bindingId);
+    if (!binding) {
+      await this.sendAsPost(address, '当前群尚未绑定会话。', replyToMessageId);
+      return;
+    }
+    const runtime = store.getSessionExt(binding.codepilotSessionId)?.runtime || 'claude';
+    if (runtime === 'claude') {
+      await this.sendClaudeModeCard(address, 'switch', replyToMessageId, {
+        selectedMode: resolveClaudeBindingMode(binding),
+        bindingId: binding.id,
+      });
+      return;
+    }
     const parts = text.trim().split(/\s+/);
     const mode = parts[1]?.toLowerCase() || '';
     if (!validateMode(mode)) {
       await this.sendAsPost(address, '用法：`/mode plan|code|ask`。', replyToMessageId);
       return;
     }
-    const store = this.getStore();
-    const binding = Array.from(store.listChannelBindings(this.channelType)).find((item) => item.id === bindingId);
-    if (!binding) {
-      await this.sendAsPost(address, '当前群尚未绑定会话。', replyToMessageId);
-      return;
-    }
-    const runtime = store.getSessionExt(binding.codepilotSessionId)?.runtime || 'claude';
     if (runtime === 'codex' && mode === 'plan') {
       const llm = getBridgeContext().llm as MultiplexLLMProvider & {
         ensureCodexNativePlanAvailable?: () => Promise<void>;
@@ -2021,6 +2225,87 @@ export class FeishuAdapter extends BaseChannelAdapter {
     };
   }
 
+  private async handleClaudeModeCardAction(
+    event: StructuredActionEvent,
+    callbackData: string,
+  ): Promise<{ toast: { type: string; content: string } }> {
+    const parts = callbackData.split(':');
+    const scope = parts[1];
+    const bindingId = scope === 'switch' ? parts[2] : '';
+    const rawMode = scope === 'switch' ? parts[3] : parts[2];
+    const mode = normalizeClaudePermissionMode(rawMode);
+    if (!mode || (scope !== 'new' && scope !== 'switch')) {
+      return { toast: { type: 'warning', content: 'Unsupported action' } };
+    }
+
+    const actionMessageId = resolveActionOpenMessageId(event);
+
+    if (scope === 'new') {
+      const sender = this.extractActionSenderIdentity(event);
+      if (!sender) {
+        return { toast: { type: 'warning', content: '无法识别当前操作人' } };
+      }
+      try {
+        await this.createBoundSession('claude', sender, { claudePermissionMode: mode });
+        await this.patchActionCardSafely(
+          undefined,
+          buildStatusCard(
+            'Claude 会话已创建',
+            `已创建 Claude 会话，当前 mode：**${getClaudeModeTitle(mode)}**。\n\n请直接进入新群继续对话。`,
+            'green',
+          ),
+          'claude-mode',
+          actionMessageId,
+        );
+        return { toast: { type: 'success', content: `已创建 ${getClaudeModeTitle(mode)} 会话` } };
+      } catch (error) {
+        console.error('[feishu-adapter] Failed to create Claude session from mode card:', error);
+        return {
+          toast: {
+            type: 'warning',
+            content: `创建会话失败：${error instanceof Error ? error.message : String(error)}`,
+          },
+        };
+      }
+    }
+
+    const binding = bindingId ? this.findBindingById(bindingId) : null;
+    if (!binding) {
+      return { toast: { type: 'warning', content: '当前群尚未绑定会话' } };
+    }
+    const runtime = this.getStore().getSessionExt(binding.codepilotSessionId)?.runtime || 'claude';
+    if (runtime !== 'claude') {
+      return { toast: { type: 'warning', content: '当前群不是 Claude 会话' } };
+    }
+
+    const currentMode = resolveClaudeBindingMode(binding);
+    if (currentMode !== mode) {
+      this.getStore().updateChannelBinding(binding.id, {
+        claudePermissionMode: mode,
+        mode: 'code',
+      });
+      await this.syncChatName(binding.chatId);
+    }
+    await this.patchActionCardSafely(
+      undefined,
+      buildClaudeModeCard('switch', {
+        selectedMode: mode,
+        bindingId: binding.id,
+        note: `已切换到 **${getClaudeModeTitle(mode)}**。`,
+      }),
+      'claude-mode',
+      actionMessageId,
+    );
+    return {
+      toast: {
+        type: 'success',
+        content: currentMode === mode
+          ? `当前已是 ${getClaudeModeTitle(mode)}`
+          : `已切换到 ${getClaudeModeTitle(mode)}`,
+      },
+    };
+  }
+
   private async handleStructuredInputCardAction(
     event: StructuredActionEvent,
     callbackData: string,
@@ -2257,7 +2542,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
         actionMessageId || workflow.actionCardOpenMessageId,
       );
       if (binding) {
-        store.updateChannelBinding(binding.id, { mode: 'code' });
+        store.updateChannelBinding(binding.id, {
+          mode: 'code',
+          claudePermissionMode: variant === 'bypass' ? 'bypassPermissions' : 'default',
+        });
       }
       store.deletePlanWorkflow(workflowId);
       await this.syncChatName(workflow.chatId);
@@ -2320,7 +2608,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
       });
       const updatedBinding = store.getChannelBinding(this.channelType, workflow.chatId);
       if (updatedBinding) {
-        store.updateChannelBinding(updatedBinding.id, { mode: 'code', sdkSessionId: '' });
+        store.updateChannelBinding(updatedBinding.id, {
+          mode: 'code',
+          claudePermissionMode: 'bypassPermissions',
+          sdkSessionId: '',
+        });
       }
       store.deletePlanWorkflow(workflowId);
       await this.syncChatName(workflow.chatId);
@@ -2350,7 +2642,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
     return { toast: { type: 'warning', content: 'Unsupported action' } };
   }
 
-  private async createSessionGroup(runtime: RuntimeName, sender: SenderIdentity): Promise<string> {
+  private async createSessionGroup(
+    runtime: RuntimeName,
+    sender: SenderIdentity,
+    claudePermissionMode?: ClaudePermissionMode,
+  ): Promise<string> {
     if (!this.restClient) throw new Error('Feishu client not initialized');
     const response = await this.restClient.im.chat.create({
       params: {
@@ -2358,7 +2654,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         set_bot_manager: true,
       },
       data: {
-        name: defaultChatName(runtime),
+        name: defaultChatName(runtime, claudePermissionMode),
         chat_mode: 'group',
         chat_type: 'private',
         group_message_type: 'chat',
@@ -2422,7 +2718,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!binding) return null;
     const ext = store.getSessionExt(binding.codepilotSessionId);
     const runtime = ext?.runtime || 'claude';
-    const baseName = stripPlanSuffix(ext?.title || defaultChatName(runtime));
+    const baseName = stripClaudeModeSuffix(ext?.title || defaultChatName(runtime));
+    if (runtime === 'claude') {
+      return `${baseName}${getClaudeModeSuffix(resolveClaudeBindingMode(binding))}`;
+    }
     if (!this.shouldDecoratePlan(binding.id, binding.mode)) {
       return baseName;
     }

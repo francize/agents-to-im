@@ -2,7 +2,7 @@
 
 Feishu-first isolated session workspace for local AI coding agents.
 
-DM creates a dedicated group-bound session space for Claude Code and Codex, while the real work stays in Feishu/Lark with recoverable local state and high-quality card streaming.
+DM creates a dedicated group-bound session space for Claude Code and Codex, while the real work stays in Feishu/Lark with recoverable local state and high-quality card streaming. Claude DM creation now starts with a mode-selection card before the group is created.
 
 [中文](README.zh-CN.md)
 
@@ -21,7 +21,7 @@ flowchart LR
 
 ## Why Feishu-first?
 
-- **Dedicated session space, not mixed chat noise.** DM is only the control plane. After `/new:claude` or `/new:codex`, the bot creates a fresh group and binds it to exactly one session, so the working thread is isolated by default.
+- **Dedicated session space, not mixed chat noise.** DM is only the control plane. `/new:claude` first asks for a Claude permission mode via card, then creates a fresh group; `/new:codex` creates the group directly. In both cases, the group is bound to exactly one session, so the working thread is isolated by default.
 - **Recoverable local workspace.** Sessions, chat bindings, messages, runtime state, and resume identifiers live under `~/.agents-to-im/`, so restarting the bridge does not mean rebuilding the workspace model from scratch.
 - **Feishu-native interaction, not plain text forwarding.** Streaming previews prefer CardKit, permission approvals prefer buttons, and activity/plan/structured-input flows are rendered as cards instead of reducing Feishu to a slash-command terminal.
 
@@ -142,7 +142,7 @@ node dist/cli-bin.mjs stop
 2. Run `node dist/cli-bin.mjs status` and confirm the bridge is running.
 3. Open `http://127.0.0.1:3456` and confirm the local dashboard is reachable.
 4. DM the bot with `/new:claude` or `/new:codex`.
-5. Confirm the bot creates a fresh group, binds it to a new session, and replies inside that group.
+5. For Claude, pick a mode from the card, then confirm the bot creates a fresh group, binds it to a new session, and replies inside that group.
 
 ## Feishu Experience
 
@@ -154,7 +154,7 @@ node dist/cli-bin.mjs stop
 | Permission handling | Inline buttons are the primary approval path; `/perm allow\|allow_session\|deny <id>` is only the fallback |
 | Activity visibility | Command/file/plan activity is rendered as cards so the group sees progress without reading raw logs |
 | Structured input | Runtime follow-up questions can be rendered as Feishu cards; sensitive prompts are kicked back to local CLI instead of leaking secrets to chat |
-| Group naming | After the first successful turn, the bridge generates a short title and renames the group to match the session |
+| Group naming | After the first successful turn, the bridge generates a short title and renames the group to match the session; Claude non-default permission modes are appended as a suffix like `[Plan Mode]` |
 
 This gives Feishu a real workspace model: readable progress, fewer mobile-hostile commands, and better context continuity inside the group thread.
 
@@ -165,7 +165,7 @@ The bridge keeps state under `~/.agents-to-im/` so a group remains a recoverable
 | Path | What it stores |
 | --- | --- |
 | `data/sessions.json` | Session metadata, runtime, model, title state, and resume-related metadata |
-| `data/bindings.json` | Chat-to-session bindings, workdir, mode, and model routing |
+| `data/bindings.json` | Chat-to-session bindings, workdir, bridge mode, Claude permission mode, and model routing |
 | `data/messages/` | Persisted message history per session |
 | `runtime/status.json` | Bridge run status and last exit reason |
 | `runtime/bridge.pid` | Active daemon PID for local process management |
@@ -184,7 +184,7 @@ What recovery means in practice:
 
 | Command | Description |
 | --- | --- |
-| `/new:claude` | Create a new Claude-backed group workspace |
+| `/new:claude` | Open a Claude mode card, then create a new Claude-backed group workspace in the selected mode |
 | `/new:codex` | Create a new Codex-backed group workspace |
 
 Any other DM message returns help text instead of starting a session.
@@ -194,7 +194,7 @@ Any other DM message returns help text instead of starting a session.
 | Command | Description |
 | --- | --- |
 | Normal message | Continue the current session |
-| `/mode plan\|code\|ask` | Switch session mode |
+| `/mode` | In Claude groups: open the Claude mode card. In Codex groups: use `/mode plan\|code\|ask` to switch bridge mode |
 | `/plan` | Start an interactive planning flow |
 | `/plan <request>` | Start planning immediately |
 | `/reset` | Replace the current session and keep the group's runtime |

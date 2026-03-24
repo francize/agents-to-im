@@ -8,6 +8,8 @@
 
 import fs from 'fs';
 import path from 'path';
+import type { ClaudePermissionMode } from '../claude-mode.js';
+import { normalizeClaudePermissionMode } from '../claude-mode.js';
 import type { ChannelBinding } from './types.js';
 import type {
   ActivityEvent,
@@ -52,6 +54,8 @@ export type OnResponseSegment = (segmentText: string) => Promise<void> | void;
 
 export type OnActivityEvent = (event: ActivityEvent) => Promise<void> | void;
 
+export type OnModeChanged = (mode: ClaudePermissionMode) => Promise<void> | void;
+
 export interface ConversationResult {
   responseText: string;
   responseSegments: string[];
@@ -69,6 +73,7 @@ export interface ProcessMessageOptions {
   storedUserText?: string;
   permissionModeOverride?: string;
   collaborationModeOverride?: 'plan' | 'default';
+  onModeChanged?: OnModeChanged;
 }
 
 interface PlanStepState {
@@ -108,6 +113,17 @@ function renderPlanMarkdown(explanation: string, steps: unknown[], body: string)
     lines.push(body.trim());
   }
   return lines.join('\n').trim();
+}
+
+function resolveLegacyPermissionMode(binding: ChannelBinding): ClaudePermissionMode {
+  switch (binding.mode) {
+    case 'plan':
+      return 'plan';
+    case 'ask':
+      return 'default';
+    default:
+      return 'acceptEdits';
+  }
 }
 
 /**
@@ -205,11 +221,9 @@ export async function processMessage(
     // Permission mode from binding mode
     let permissionMode = options?.permissionModeOverride;
     if (!permissionMode) {
-      switch (binding.mode) {
-        case 'plan': permissionMode = 'plan'; break;
-        case 'ask': permissionMode = 'default'; break;
-        default: permissionMode = 'acceptEdits'; break;
-      }
+      permissionMode = runtime === 'claude'
+        ? (binding.claudePermissionMode || resolveLegacyPermissionMode(binding))
+        : resolveLegacyPermissionMode(binding);
     }
 
     // Load conversation history for context
@@ -261,6 +275,7 @@ export async function processMessage(
       onServerRequestResolved,
       onResponseSegment,
       onActivityEvent,
+      options?.onModeChanged,
     );
   } finally {
     clearInterval(renewalInterval);
@@ -283,6 +298,7 @@ async function consumeStream(
   onServerRequestResolved?: OnServerRequestResolved,
   onResponseSegment?: OnResponseSegment,
   onActivityEvent?: OnActivityEvent,
+  onModeChanged?: OnModeChanged,
 ): Promise<ConversationResult> {
   const { store } = getBridgeContext();
   const reader = stream.getReader();
@@ -601,7 +617,28 @@ async function consumeStream(
             break;
           }
 
-          // tool_output, tool_timeout, mode_changed, done — ignored for bridge
+          case 'mode_changed': {
+            try {
+              const modeData = JSON.parse(event.data);
+              const nextMode = normalizeClaudePermissionMode(
+                typeof modeData.mode === 'string'
+                  ? modeData.mode
+                  : typeof modeData.permissionMode === 'string'
+                    ? modeData.permissionMode
+                    : typeof modeData.permission_mode === 'string'
+                      ? modeData.permission_mode
+                      : undefined,
+              );
+              if (nextMode && onModeChanged) {
+                await onModeChanged(nextMode);
+              }
+            } catch {
+              // ignore malformed mode updates
+            }
+            break;
+          }
+
+          // tool_output, tool_timeout, done — ignored for bridge
         }
       }
     }

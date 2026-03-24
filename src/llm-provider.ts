@@ -21,6 +21,7 @@ import type {
   StructuredInputRequestInfo,
   StructuredInputResponse,
 } from './bridge/host.js';
+import { normalizeClaudePermissionMode } from './claude-mode.js';
 import type { PendingPermissions, PendingStructuredInputs } from './permission-gateway.js';
 
 import { sseEvent } from './sse-utils.js';
@@ -780,7 +781,7 @@ export class SDKLLMProvider implements LLMProvider {
               model,
               resume: params.sdkSessionId || undefined,
               abortController: params.abortController,
-              permissionMode: (params.permissionMode as 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan') || undefined,
+              permissionMode: (params.permissionMode as 'default' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk' | 'plan') || undefined,
               allowDangerouslySkipPermissions: true,
               includePartialMessages: true,
               // Keep local CLI-managed config (for MCPs in `~/.claude.json`),
@@ -989,6 +990,26 @@ export function handleMessage(
   controller: ReadableStreamDefaultController<string>,
   state: StreamState,
 ): void {
+  const maybeModeChange = msg as SDKMessage & Record<string, unknown>;
+  const nextMode = normalizeClaudePermissionMode(
+    typeof maybeModeChange.mode === 'string'
+      ? maybeModeChange.mode
+      : typeof maybeModeChange.permissionMode === 'string'
+        ? maybeModeChange.permissionMode
+        : typeof maybeModeChange.permission_mode === 'string'
+          ? maybeModeChange.permission_mode
+          : undefined,
+  );
+  const maybeSubtype = typeof maybeModeChange.subtype === 'string' ? maybeModeChange.subtype : '';
+  if (
+    nextMode
+    && (maybeSubtype === 'mode_changed'
+      || maybeSubtype === 'permission_mode_changed'
+      || maybeSubtype === 'set_permission_mode')
+  ) {
+    controller.enqueue(sseEvent('mode_changed', { mode: nextMode }));
+  }
+
   const activity = mapSdkMessageToActivityEvent(msg);
   if (activity) {
     enqueueActivityEvent(controller, activity);

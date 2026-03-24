@@ -45,6 +45,59 @@ describe('FeishuAdapter', () => {
     fs.rmSync(DATA_DIR, { recursive: true, force: true });
   });
 
+  it('sends a Claude mode selection card instead of creating a group immediately from /new:claude in DM', async () => {
+    const store = new JsonFileStore(makeSettings());
+    let ensuredRuntime = '';
+    installContext(store, {
+      ensureRuntimeAvailable: async (runtime: string) => {
+        ensuredRuntime = runtime;
+      },
+    });
+
+    let chatCreateCalls = 0;
+    const replies: Array<{ msgType: string; content: string }> = [];
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        chat: {
+          create: async () => {
+            chatCreateCalls += 1;
+            return { code: 0, data: { chat_id: 'unexpected-chat' } };
+          },
+        },
+        message: {
+          reply: async (payload: { data: { msg_type: string; content: string } }) => {
+            replies.push({ msgType: payload.data.msg_type, content: payload.data.content });
+            return { code: 0, data: { message_id: 'reply-1', open_message_id: 'open-reply-1' } };
+          },
+          create: async () => {
+            throw new Error('unexpected create');
+          },
+        },
+      },
+    };
+
+    await adapter.handleCreateSessionCommand(
+      { id: 'ou_123', type: 'open_id' },
+      {
+        messageId: 'dm-msg',
+        address: { channelType: 'feishu', chatId: 'dm-chat', userId: 'ou_123' },
+        text: '/new:claude',
+        timestamp: Date.now(),
+      },
+      'claude',
+    );
+
+    assert.equal(ensuredRuntime, 'claude');
+    assert.equal(chatCreateCalls, 0);
+    assert.equal(store.listChannelBindings().length, 0);
+    assert.equal(replies.length, 1);
+    assert.equal(replies[0].msgType, 'interactive');
+    const card = JSON.parse(replies[0].content);
+    const titles = card.body.elements[1].columns.map((column: any) => column.elements[0].text.content);
+    assert.deepEqual(titles, ['Default', 'Plan Mode', 'Accept edits', 'Bypass Permissions', "Don't Ask"]);
+  });
+
   it('creates a runtime-bound group session from /new:codex in DM', async () => {
     const store = new JsonFileStore(makeSettings());
     let ensuredRuntime = '';
@@ -1051,6 +1104,121 @@ describe('FeishuAdapter', () => {
     assert.equal(updatedNames.at(-1), 'Codex 新会话 [PLAN]');
   });
 
+  it('shows the Claude mode card for /mode in Claude groups regardless of text arguments', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-claude-mode',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+
+    const replies: Array<{ msgType: string; content: string }> = [];
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        message: {
+          reply: async (payload: { data: { msg_type: string; content: string } }) => {
+            replies.push({ msgType: payload.data.msg_type, content: payload.data.content });
+            return { code: 0, data: { message_id: 'msg-1', open_message_id: 'open-msg-1' } };
+          },
+          create: async () => {
+            throw new Error('unexpected create');
+          },
+        },
+      },
+    };
+
+    await adapter.handleModeCommand(
+      binding.id,
+      '/mode bypassPermissions',
+      { channelType: 'feishu', chatId: 'group-claude-mode' },
+      'reply-1',
+    );
+
+    assert.equal(store.getChannelBinding('feishu', 'group-claude-mode')?.claudePermissionMode, undefined);
+    assert.equal(replies.length, 1);
+    assert.equal(replies[0].msgType, 'interactive');
+    const card = JSON.parse(replies[0].content);
+    const buttons = card.body.elements[1].columns.map((column: any) => ({
+      title: column.elements[0].text.content,
+      type: column.elements[0].type,
+    }));
+    assert.deepEqual(buttons[0], { title: 'Default', type: 'default' });
+    assert.deepEqual(buttons[1], { title: 'Plan Mode', type: 'default' });
+  });
+
+  it('switches Claude mode from card actions and syncs the chat suffix', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-claude-switch',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+
+    const updatedNames: string[] = [];
+    let patchedCard: Record<string, unknown> | null = null;
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        chat: {
+          update: async (payload: { data: { name: string } }) => {
+            updatedNames.push(payload.data.name);
+            return { code: 0, data: {} };
+          },
+        },
+        message: {
+          patch: async (payload: { data: { content: string } }) => {
+            patchedCard = JSON.parse(payload.data.content);
+            return { code: 0, data: {} };
+          },
+        },
+      },
+    };
+
+    const result = await adapter.handleClaudeModeCardAction(
+      {
+        open_id: 'ou_123',
+        tenant_key: 'tenant',
+        token: 'token',
+        open_message_id: 'open-msg-1',
+        action: {
+          value: { callback_data: `claude-mode:switch:${binding.id}:plan` },
+          tag: 'button',
+        },
+      },
+      `claude-mode:switch:${binding.id}:plan`,
+    );
+
+    assert.equal(result.toast.type, 'success');
+    assert.equal(store.getChannelBinding('feishu', 'group-claude-switch')?.claudePermissionMode, 'plan');
+    assert.equal(store.getChannelBinding('feishu', 'group-claude-switch')?.mode, 'code');
+    assert.equal(updatedNames.at(-1), 'Claude 新会话 [Plan Mode]');
+    const buttons = (patchedCard as any)?.body?.elements?.[1]?.columns?.map((column: any) => ({
+      title: column.elements[0].text.content,
+      type: column.elements[0].type,
+    }));
+    assert.deepEqual(buttons?.slice(0, 2), [
+      { title: 'Default', type: 'default' },
+      { title: 'Plan Mode', type: 'primary' },
+    ]);
+  });
+
   it('enters awaiting_input on bare /plan and converts the next same-thread message into a planning request', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});
@@ -1823,6 +1991,7 @@ describe('FeishuAdapter', () => {
     assert.equal(patchTarget, 'open-card-1');
     assert.deepEqual(patchParams, { message_id_type: 'open_message_id' });
     assert.equal(store.getChannelBinding('feishu', 'group-claude-plan')?.mode, 'code');
+    assert.equal(store.getChannelBinding('feishu', 'group-claude-plan')?.claudePermissionMode, 'default');
     assert.equal(store.getPlanWorkflow('wf-claude-manual'), null);
     assert.equal(patchedBeforeResolve, true);
     assert.deepEqual(resolutions[0], {
@@ -1913,6 +2082,7 @@ describe('FeishuAdapter', () => {
 
     assert.equal(result.toast.type, 'success');
     assert.equal(store.getChannelBinding('feishu', 'group-claude-followup-confirm')?.mode, 'code');
+    assert.equal(store.getChannelBinding('feishu', 'group-claude-followup-confirm')?.claudePermissionMode, 'bypassPermissions');
     assert.equal(store.getPlanWorkflow('wf-claude-followup-confirm'), null);
     assert.equal((adapter as any).queue.length, 1);
     assert.equal((adapter as any).queue[0].bridgeMeta.planWorkflow.kind, 'plan_execute');
@@ -2122,6 +2292,7 @@ describe('FeishuAdapter', () => {
     assert.ok(updatedBinding);
     assert.notEqual(updatedBinding!.codepilotSessionId, binding.codepilotSessionId);
     assert.equal(updatedBinding!.mode, 'code');
+    assert.equal(updatedBinding!.claudePermissionMode, 'bypassPermissions');
     assert.equal(updatedBinding!.sdkSessionId, '');
     assert.equal(store.getPlanWorkflow('wf-claude-clear'), null);
     assert.equal((adapter as any).queue.length, 1);
@@ -2202,6 +2373,7 @@ describe('FeishuAdapter', () => {
 
     assert.equal(result.toast.type, 'success');
     assert.equal(store.getChannelBinding('feishu', 'group-claude-bypass-expired')?.mode, 'code');
+    assert.equal(store.getChannelBinding('feishu', 'group-claude-bypass-expired')?.claudePermissionMode, 'bypassPermissions');
     assert.equal(store.getPlanWorkflow('wf-claude-bypass-expired'), null);
     assert.equal((adapter as any).queue.length, 1);
     assert.equal((adapter as any).queue[0].bridgeMeta.planWorkflow.kind, 'plan_execute');

@@ -24,6 +24,7 @@ import type {
   UpsertChannelBindingInput,
 } from './bridge/host.js';
 import type { ChannelBinding, ChannelType } from './bridge/types.js';
+import { normalizeClaudePermissionMode } from './claude-mode.js';
 import { CTI_HOME } from './config.js';
 import type { RuntimeName, SessionExt, SessionRecord, TitleStatus } from './runtime-types.js';
 
@@ -114,9 +115,13 @@ export class JsonFileStore implements BridgeStore {
       path.join(DATA_DIR, 'bindings.json'),
       {},
     );
+    let bindingsChanged = false;
     for (const [key, b] of Object.entries(bindings)) {
-      this.bindings.set(key, b);
+      const normalized = this.normalizeChannelBindingRecord(b);
+      if (normalized !== b) bindingsChanged = true;
+      this.bindings.set(key, normalized);
     }
+    if (bindingsChanged) this.persistBindings();
 
     // Permission links
     const perms = readJson<Record<string, PermissionLinkRecord>>(
@@ -270,6 +275,21 @@ export class JsonFileStore implements BridgeStore {
     };
   }
 
+  private normalizeChannelBindingRecord(binding: ChannelBinding): ChannelBinding {
+    const record = binding as ChannelBinding & Record<string, unknown>;
+    const mode = record.mode === 'plan' || record.mode === 'ask' || record.mode === 'code'
+      ? record.mode
+      : ((this.settings.get('bridge_default_mode') as 'code' | 'plan' | 'ask') || 'code');
+    const claudePermissionMode = normalizeClaudePermissionMode(
+      typeof record.claudePermissionMode === 'string' ? record.claudePermissionMode : undefined,
+    );
+    return {
+      ...binding,
+      mode,
+      claudePermissionMode,
+    };
+  }
+
   private setSession(session: SessionRecord): void {
     this.sessions.set(session.id, this.normalizeSessionRecord(session));
     this.persistSessions();
@@ -285,18 +305,21 @@ export class JsonFileStore implements BridgeStore {
     const key = `${data.channelType}:${data.chatId}`;
     const existing = this.bindings.get(key);
     if (existing) {
-      const updated: ChannelBinding = {
+      const updated = this.normalizeChannelBindingRecord({
         ...existing,
         codepilotSessionId: data.codepilotSessionId,
         workingDirectory: data.workingDirectory,
         model: data.model,
+        ...(data.claudePermissionMode !== undefined
+          ? { claudePermissionMode: data.claudePermissionMode }
+          : {}),
         updatedAt: now(),
-      };
+      });
       this.bindings.set(key, updated);
       this.persistBindings();
       return updated;
     }
-    const binding: ChannelBinding = {
+    const binding = this.normalizeChannelBindingRecord({
       id: uuid(),
       channelType: data.channelType,
       chatId: data.chatId,
@@ -305,10 +328,13 @@ export class JsonFileStore implements BridgeStore {
       workingDirectory: data.workingDirectory,
       model: data.model,
       mode: (this.settings.get('bridge_default_mode') as 'code' | 'plan' | 'ask') || 'code',
+      ...(data.claudePermissionMode !== undefined
+        ? { claudePermissionMode: data.claudePermissionMode }
+        : {}),
       active: true,
       createdAt: now(),
       updatedAt: now(),
-    };
+    });
     this.bindings.set(key, binding);
     this.persistBindings();
     return binding;
@@ -317,7 +343,10 @@ export class JsonFileStore implements BridgeStore {
   updateChannelBinding(id: string, updates: Partial<ChannelBinding>): void {
     for (const [key, b] of this.bindings) {
       if (b.id === id) {
-        this.bindings.set(key, { ...b, ...updates, updatedAt: now() });
+        this.bindings.set(
+          key,
+          this.normalizeChannelBindingRecord({ ...b, ...updates, updatedAt: now() }),
+        );
         this.persistBindings();
         break;
       }

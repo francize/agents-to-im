@@ -1,3 +1,5 @@
+import type { ClaudePermissionMode } from '../claude-mode.js';
+
 /**
  * Bridge system types — shared across all bridge modules.
  *
@@ -104,7 +106,7 @@ export interface BridgeMessageMeta {
     workflowId: string;
     promptText: string;
     storedUserText?: string;
-    permissionMode?: 'plan' | 'default' | 'acceptEdits' | 'bypassPermissions';
+    permissionMode?: ClaudePermissionMode;
     collaborationMode?: 'plan' | 'default';
   };
 }
@@ -135,6 +137,8 @@ export interface ChannelBinding {
   model: string;
   /** Chat mode */
   mode: 'code' | 'plan' | 'ask';
+  /** Persistent Claude SDK permission mode for Claude runtime chats */
+  claudePermissionMode?: ClaudePermissionMode;
   /** Whether this binding is currently active */
   active: boolean;
   createdAt: string;

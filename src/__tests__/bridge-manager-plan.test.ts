@@ -214,6 +214,80 @@ describe('bridge-manager plan workflow', () => {
     assert.equal(store.getPlanWorkflow('wf-1')?.approvalRequestId, '');
   });
 
+  it('treats persistent Claude plan mode messages as plan requests without a synthetic /plan wrapper', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const llmCalls: Array<Record<string, unknown>> = [];
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: (params: Record<string, unknown>) => {
+          llmCalls.push(params);
+          return new ReadableStream<string>({
+            start(controller) {
+              controller.enqueue(`data: ${JSON.stringify({
+                type: 'permission_request',
+                data: JSON.stringify({
+                  permissionRequestId: 'perm-persistent-plan',
+                  toolName: 'ExitPlanMode',
+                  toolInput: {
+                    plan: '# 计划\\n\\n1. 阅读约束\\n2. 生成补丁',
+                    allowedPrompts: [{ tool: 'Read', prompt: '读取仓库约束文件' }],
+                  },
+                }),
+              })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-persistent-plan' }) })}\n`);
+              controller.close();
+            },
+          });
+        },
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-persistent-plan',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+      claudePermissionMode: 'plan',
+    });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-persistent-plan',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-persistent-plan', threadId: 'thread-1' },
+      text: '先帮我规划实现方案',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length === 1);
+
+    assert.equal(llmCalls[0].prompt, '先帮我规划实现方案');
+    assert.equal(llmCalls[0].permissionMode, 'plan');
+    assert.equal(adapter.sent[0].cardHeader?.title, '计划已就绪');
+    assert.deepEqual(
+      adapter.sent[0].inlineButtons?.flat().map((button) => button.text),
+      [
+        'Yes, and bypass permissions',
+        'Yes, manually approve edits',
+        'Yes, clear context and bypass permissions',
+      ],
+    );
+    const workflow = store.getActivePlanWorkflowByBinding(binding.id);
+    assert.ok(workflow);
+    assert.equal(workflow?.status, 'awaiting_confirmation');
+    assert.equal(workflow?.requestText, '先帮我规划实现方案');
+  });
+
   it('treats Claude ExitPlanMode as a dedicated plan approval instead of a generic permission card', async () => {
     const store = new JsonFileStore(makeSettings());
     initBridgeContext({

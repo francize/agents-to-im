@@ -42,6 +42,7 @@ import {
   parseClaudePlanText,
   truncateClaudePlanCardText,
 } from '../claude-plan-exit.js';
+import type { ClaudePermissionMode } from '../claude-mode.js';
 import { escapeHtml } from './adapters/telegram-utils.js';
 import {
   validateWorkingDirectory,
@@ -123,6 +124,20 @@ function resolveCodexCollaborationMode(
     return 'default';
   }
   return undefined;
+}
+
+function resolveClaudePermissionMode(
+  binding: import('./types.js').ChannelBinding,
+): ClaudePermissionMode {
+  if (binding.claudePermissionMode) return binding.claudePermissionMode;
+  switch (binding.mode) {
+    case 'plan':
+      return 'plan';
+    case 'ask':
+      return 'default';
+    default:
+      return 'acceptEdits';
+  }
 }
 
 function isClaudePlanExitPermission(perm: engine.PermissionRequestInfo): boolean {
@@ -987,6 +1002,34 @@ async function handleMessage(
 
   // Regular message — route to conversation engine
   const binding = router.resolve(msg.address);
+  const effectivePlanWorkflowMeta = (() => {
+    if (planWorkflowMeta) return planWorkflowMeta;
+    if (isCodexRuntime(binding.codepilotSessionId)) return null;
+    if (resolveClaudePermissionMode(binding) !== 'plan') return null;
+    const requestText = text || (hasAttachments ? 'Describe this image.' : '');
+    const workflow = store.upsertPlanWorkflow({
+      bindingId: binding.id,
+      channelType: adapter.channelType,
+      chatId: msg.address.chatId,
+      codepilotSessionId: binding.codepilotSessionId,
+      status: 'planning',
+      previousMode: binding.mode,
+      requestText,
+      address: msg.address,
+      routeKey: msg.address.threadId
+        ? `${msg.address.chatId}:thread:${msg.address.threadId}`
+        : `${msg.address.chatId}:main`,
+      requestMessageId: msg.messageId,
+      resolved: true,
+    });
+    return {
+      kind: 'plan_request' as const,
+      workflowId: workflow.workflowId,
+      promptText: requestText,
+      storedUserText: requestText,
+      permissionMode: 'plan' as const,
+    };
+  })();
   const turnStartedAtMs = Date.now();
   const sentAutoImagePaths = new Set<string>();
   const sentInlineToolResultImageDigests = new Set<string>();
@@ -1476,8 +1519,8 @@ async function handleMessage(
     // Pass permission callback so requests are forwarded to IM immediately
     // during streaming (the stream blocks until permission is resolved).
     // Use text or empty string for image-only messages (prompt is still required by streamClaude)
-    const promptText = planWorkflowMeta?.promptText || text || (hasAttachments ? 'Describe this image.' : '');
-    const storedUserText = planWorkflowMeta?.storedUserText || text || (hasAttachments ? 'Describe this image.' : '');
+    const promptText = effectivePlanWorkflowMeta?.promptText || text || (hasAttachments ? 'Describe this image.' : '');
+    const storedUserText = effectivePlanWorkflowMeta?.storedUserText || text || (hasAttachments ? 'Describe this image.' : '');
     const sendClaudePlanConfirmationCard = async (
       workflowId: string,
       planText: string,
@@ -1531,10 +1574,10 @@ async function handleMessage(
     };
 
     const result = await engine.processMessage(binding, promptText, async (perm) => {
-      const workflowId = planWorkflowMeta?.workflowId;
+      const workflowId = effectivePlanWorkflowMeta?.workflowId;
       const workflow = workflowId ? store.getPlanWorkflow(workflowId) : null;
       const isClaudePlanExit =
-        planWorkflowMeta?.kind === 'plan_request'
+        effectivePlanWorkflowMeta?.kind === 'plan_request'
         && workflow
         && !isCodexRuntime(binding.codepilotSessionId)
         && isClaudePlanExitPermission(perm);
@@ -1581,8 +1624,19 @@ async function handleMessage(
       );
     }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText, {
       storedUserText,
-      permissionModeOverride: planWorkflowMeta?.permissionMode,
-      collaborationModeOverride: resolveCodexCollaborationMode(binding, planWorkflowMeta),
+      permissionModeOverride: effectivePlanWorkflowMeta?.permissionMode,
+      collaborationModeOverride: resolveCodexCollaborationMode(binding, effectivePlanWorkflowMeta),
+      onModeChanged: async (mode) => {
+        if (isCodexRuntime(binding.codepilotSessionId)) return;
+        if (binding.claudePermissionMode === mode) return;
+        store.updateChannelBinding(binding.id, { claudePermissionMode: mode, mode: 'code' });
+        binding.claudePermissionMode = mode;
+        binding.mode = 'code';
+        if (adapter.channelType === 'feishu') {
+          const feishuAdapter = adapter as BaseChannelAdapter & { syncChatName?: (chatId: string) => Promise<void> };
+          await feishuAdapter.syncChatName?.(msg.address.chatId);
+        }
+      },
     }, async (request: StructuredInputRequestInfo) => {
       hasVisibleProgressCard = true;
       cancelPendingLightweightActivity();
@@ -1822,8 +1876,8 @@ async function handleMessage(
       return true;
     };
 
-    if (planWorkflowMeta?.kind === 'plan_request') {
-      const workflow = store.getPlanWorkflow(planWorkflowMeta.workflowId);
+    if (effectivePlanWorkflowMeta?.kind === 'plan_request') {
+      const workflow = store.getPlanWorkflow(effectivePlanWorkflowMeta.workflowId);
       if (workflow) {
         const handledByClaudeExitPlan = result.permissionRequests.some(isClaudePlanExitPermission);
         if (handledByClaudeExitPlan) {
@@ -1877,8 +1931,8 @@ async function handleMessage(
       }
     }
 
-    if (planWorkflowMeta?.kind === 'native_plan_request') {
-      const workflow = store.getPlanWorkflow(planWorkflowMeta.workflowId);
+    if (effectivePlanWorkflowMeta?.kind === 'native_plan_request') {
+      const workflow = store.getPlanWorkflow(effectivePlanWorkflowMeta.workflowId);
       if (workflow) {
         if (result.responseText) {
           const nativeApprovalReceived = result.permissionRequests.some(isApprovalRequest);
