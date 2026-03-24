@@ -31,6 +31,9 @@ import { getBridgeContext } from './context.js';
 import {
   buildClaudePlanExecutionPrompt,
   buildClaudePlanModeUpdates,
+  CLAUDE_PLAN_EXIT_BYPASS_LABEL,
+  CLAUDE_PLAN_EXIT_CLEAR_BYPASS_LABEL,
+  CLAUDE_PLAN_EXIT_MANUAL_LABEL,
   parseClaudeAllowedPrompts,
   parseClaudePlanFilePath,
   parseClaudePlanText,
@@ -128,16 +131,43 @@ function truncateClaudePlanCardText(text: string, maxChars = 7000): string {
   return `${trimmed.slice(0, maxChars).trim()}\n\n...`;
 }
 
+function hasActivePreviewDraft(state: StreamingPreviewState): boolean {
+  return !!(
+    state.placeholderPrimed
+    || state.lastSentText.trim()
+    || state.pendingText.trim()
+    || state.lastSentAt > 0
+  );
+}
+
+async function dismissPreviewForConfirmationCard(
+  adapter: BaseChannelAdapter,
+  address: InboundMessage['address'],
+  state: StreamingPreviewState | null,
+): Promise<void> {
+  if (!state) return;
+  if (state.throttleTimer) {
+    clearTimeout(state.throttleTimer);
+    state.throttleTimer = null;
+  }
+  clearPrimeTimer(state);
+  await settlePreview(state);
+  if (hasActivePreviewDraft(state)) {
+    adapter.endPreview?.(address, state.draftId);
+    resetPreviewState(state);
+  }
+}
+
 function buildClaudePlanExitButtons(
   workflowId: string,
   showClearContext: boolean,
 ): NonNullable<OutboundMessage['inlineButtons']> {
   const primary = [
-    { text: '继续执行（绕过权限）', callbackData: `planexit:approve:bypass:${workflowId}` },
-    { text: '继续执行（手动审批）', callbackData: `planexit:approve:manual:${workflowId}` },
+    { text: CLAUDE_PLAN_EXIT_BYPASS_LABEL, callbackData: `planexit:approve:bypass:${workflowId}` },
+    { text: CLAUDE_PLAN_EXIT_MANUAL_LABEL, callbackData: `planexit:approve:manual:${workflowId}` },
   ];
   const secondary = showClearContext
-    ? [{ text: '清空上下文后执行', callbackData: `planexit:clear:bypass:${workflowId}` }]
+    ? [{ text: CLAUDE_PLAN_EXIT_CLEAR_BYPASS_LABEL, callbackData: `planexit:clear:bypass:${workflowId}` }]
     : [];
   return secondary.length > 0 ? [primary, secondary] : [primary];
 }
@@ -212,7 +242,7 @@ function buildClaudePlanExitCard(
             {
               tag: 'button',
               type: 'primary',
-              text: { tag: 'plain_text', content: '继续执行（绕过权限）' },
+              text: { tag: 'plain_text', content: CLAUDE_PLAN_EXIT_BYPASS_LABEL },
               behaviors: [{ type: 'callback', value: { callback_data: `planexit:approve:bypass:${workflowId}` } }],
             },
           ],
@@ -223,7 +253,7 @@ function buildClaudePlanExitCard(
           elements: [
             {
               tag: 'button',
-              text: { tag: 'plain_text', content: '继续执行（手动审批）' },
+              text: { tag: 'plain_text', content: CLAUDE_PLAN_EXIT_MANUAL_LABEL },
               behaviors: [{ type: 'callback', value: { callback_data: `planexit:approve:manual:${workflowId}` } }],
             },
           ],
@@ -235,7 +265,7 @@ function buildClaudePlanExitCard(
               elements: [
                 {
                   tag: 'button',
-                  text: { tag: 'plain_text', content: '清空上下文后执行' },
+                  text: { tag: 'plain_text', content: CLAUDE_PLAN_EXIT_CLEAR_BYPASS_LABEL },
                   behaviors: [{ type: 'callback', value: { callback_data: `planexit:clear:bypass:${workflowId}` } }],
                 },
               ],
@@ -1429,6 +1459,56 @@ async function handleMessage(
     // Use text or empty string for image-only messages (prompt is still required by streamClaude)
     const promptText = planWorkflowMeta?.promptText || text || (hasAttachments ? 'Describe this image.' : '');
     const storedUserText = planWorkflowMeta?.storedUserText || text || (hasAttachments ? 'Describe this image.' : '');
+    const sendClaudePlanConfirmationCard = async (
+      workflowId: string,
+      planText: string,
+      allowedPrompts: Array<{ tool: string; prompt: string }>,
+      showClearContext: boolean,
+      approvalRequestId: string,
+      planFilePath: string,
+    ): Promise<boolean> => {
+      const workflow = store.getPlanWorkflow(workflowId);
+      if (!workflow) return false;
+      cancelPendingLightweightActivity();
+      await dismissPreviewForConfirmationCard(adapter, msg.address, previewState);
+      const approvalMessage: OutboundMessage = adapter.channelType === 'feishu'
+        ? {
+            address: msg.address,
+            text: '',
+            rawCard: buildClaudePlanExitCard(workflow.workflowId, planText, allowedPrompts, showClearContext),
+            replyToMessageId: msg.messageId,
+          }
+        : {
+            address: msg.address,
+            text: buildClaudePlanExitFallbackText(planText, allowedPrompts, showClearContext),
+            parseMode: 'Markdown',
+            inlineButtons: buildClaudePlanExitButtons(workflow.workflowId, showClearContext),
+            replyToMessageId: msg.messageId,
+            cardHeader: {
+              title: '计划已就绪',
+              template: 'blue',
+            },
+          };
+      let cardDelivery: SendResult;
+      try {
+        cardDelivery = await deliver(adapter, approvalMessage, { sessionId: binding.codepilotSessionId });
+      } catch (error) {
+        console.warn('[bridge-manager] Failed to send Claude plan confirmation card:', error);
+        return false;
+      }
+      if (!cardDelivery.ok) return false;
+      store.updatePlanWorkflow(workflow.workflowId, {
+        status: 'awaiting_confirmation',
+        approvalRequestId,
+        planText,
+        planFilePath,
+        allowedPrompts,
+        actionCardMessageId: cardDelivery.messageId || '',
+        actionCardOpenMessageId: cardDelivery.openMessageId || '',
+        resolved: false,
+      });
+      return true;
+    };
 
     const result = await engine.processMessage(binding, promptText, async (perm) => {
       const workflowId = planWorkflowMeta?.workflowId;
@@ -1444,37 +1524,15 @@ async function handleMessage(
         const planFilePath = parseClaudePlanFilePath(perm.toolInput);
         const allowedPrompts = parseClaudeAllowedPrompts(perm.toolInput);
         const showClearContext = true;
-        const approvalMessage: OutboundMessage = adapter.channelType === 'feishu'
-          ? {
-              address: msg.address,
-              text: '',
-              rawCard: buildClaudePlanExitCard(workflow.workflowId, planText, allowedPrompts, showClearContext),
-              replyToMessageId: msg.messageId,
-            }
-          : {
-              address: msg.address,
-              text: buildClaudePlanExitFallbackText(planText, allowedPrompts, showClearContext),
-              parseMode: 'Markdown',
-              inlineButtons: buildClaudePlanExitButtons(workflow.workflowId, showClearContext),
-              replyToMessageId: msg.messageId,
-              cardHeader: {
-                title: '计划已就绪',
-                template: 'blue',
-              },
-            };
-        const cardDelivery = await deliver(adapter, approvalMessage, { sessionId: binding.codepilotSessionId });
-
-        if (cardDelivery.ok) {
-          store.updatePlanWorkflow(workflow.workflowId, {
-            status: 'awaiting_confirmation',
-            approvalRequestId: perm.permissionRequestId,
-            planText,
-            planFilePath,
-            allowedPrompts,
-            actionCardMessageId: cardDelivery.messageId || '',
-            actionCardOpenMessageId: cardDelivery.openMessageId || '',
-            resolved: false,
-          });
+        const sent = await sendClaudePlanConfirmationCard(
+          workflow.workflowId,
+          planText,
+          allowedPrompts,
+          showClearContext,
+          perm.permissionRequestId,
+          planFilePath,
+        );
+        if (sent) {
           return;
         }
 
@@ -1711,6 +1769,7 @@ async function handleMessage(
       const workflow = store.getPlanWorkflow(workflowId);
       if (!workflow) return false;
       cancelPendingLightweightActivity();
+      await dismissPreviewForConfirmationCard(adapter, msg.address, previewState);
       let actionCard: SendResult;
       try {
         actionCard = await deliver(adapter, {
@@ -1746,6 +1805,27 @@ async function handleMessage(
         if (handledByClaudeExitPlan) {
           // Claude SDK already surfaced its native plan-exit approval. Do not
           // stack the legacy bridge-owned execute/continue/cancel card on top.
+        } else if (!isCodexRuntime(binding.codepilotSessionId) && result.responseText) {
+          const sent = await sendClaudePlanConfirmationCard(
+            workflow.workflowId,
+            result.responseText,
+            workflow.allowedPrompts || [],
+            true,
+            workflow.approvalRequestId || '',
+            workflow.planFilePath || '',
+          );
+          if (!sent) {
+            store.updatePlanWorkflow(workflow.workflowId, {
+              status: 'awaiting_input',
+              resolved: true,
+            });
+            await deliver(adapter, {
+              address: msg.address,
+              text: '计划已生成，但 Claude 确认卡发送失败。请直接在本线程继续发送需求，或重新执行 `/plan`。',
+              parseMode: 'Markdown',
+              replyToMessageId: responseDelivery?.messageId || msg.messageId,
+            }, { sessionId: binding.codepilotSessionId });
+          }
         } else if (result.responseText) {
           const sent = await sendPlanConfirmationCard(
             workflow.workflowId,

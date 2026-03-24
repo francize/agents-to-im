@@ -27,6 +27,9 @@ import {
 } from '../bridge/markdown/feishu.js';
 import {
   CLAUDE_PLAN_FOLLOW_UP_REJECT_MESSAGE,
+  CLAUDE_PLAN_EXIT_BYPASS_LABEL,
+  CLAUDE_PLAN_EXIT_CLEAR_BYPASS_LABEL,
+  CLAUDE_PLAN_EXIT_MANUAL_LABEL,
   buildClaudePlanExecutionPrompt,
   buildClaudePlanFollowUpPrompt,
   buildClaudePlanModeUpdates,
@@ -179,6 +182,87 @@ function buildSimpleCard(text: string): Record<string, unknown> {
       ],
     },
   };
+}
+
+function buildStatusCard(
+  title: string,
+  text: string,
+  template: NonNullable<lark.InteractiveCard['header']>['template'] = 'grey',
+): Record<string, unknown> {
+  return {
+    schema: '2.0',
+    config: {
+      wide_screen_mode: true,
+      update_multi: true,
+      width_mode: 'fill',
+    },
+    header: {
+      title: {
+        tag: 'plain_text',
+        content: title,
+      },
+      template,
+    },
+    body: {
+      elements: [
+        {
+          tag: 'markdown',
+          content: text,
+        },
+      ],
+    },
+  };
+}
+
+function buildHandledPermissionCard(action: string): Record<string, unknown> {
+  switch (action) {
+    case 'allow':
+      return buildStatusCard('授权已处理', '已处理：本次允许。\n\n该授权请求已关闭。', 'green');
+    case 'allow_session':
+      return buildStatusCard('授权已处理', '已处理：本会话允许。\n\n后续同会话内匹配的请求将自动放行。', 'green');
+    case 'deny':
+      return buildStatusCard('授权已处理', '已处理：拒绝。\n\n该授权请求已关闭。', 'red');
+    default:
+      return buildStatusCard('授权已处理', '该授权请求已处理。', 'grey');
+  }
+}
+
+function buildHandledPlanCard(action: string): Record<string, unknown> {
+  switch (action) {
+    case 'execute':
+      return buildStatusCard('计划已确认', '已处理：开始执行已确认计划。\n\n该确认卡已关闭。', 'green');
+    case 'continue':
+      return buildStatusCard('继续保持 PLAN', '已处理：继续保持 PLAN 模式。\n\n请直接在本线程回复需要调整的地方。', 'blue');
+    case 'cancel':
+      return buildStatusCard('计划已取消', '已处理：已取消 PLAN 流程。', 'red');
+    default:
+      return buildStatusCard('计划已处理', '该计划确认卡已处理。', 'grey');
+  }
+}
+
+function buildHandledClaudePlanCard(action: string, variant: string): Record<string, unknown> {
+  if (action === 'approve' && variant === 'bypass') {
+    return buildStatusCard(
+      '计划已确认',
+      `已选择：\`${CLAUDE_PLAN_EXIT_BYPASS_LABEL}\`\n\nClaude 将退出 PLAN 并继续执行。该确认卡已关闭。`,
+      'green',
+    );
+  }
+  if (action === 'approve' && variant === 'manual') {
+    return buildStatusCard(
+      '计划已确认',
+      `已选择：\`${CLAUDE_PLAN_EXIT_MANUAL_LABEL}\`\n\nClaude 将退出 PLAN 并继续执行；后续编辑仍需人工审批。该确认卡已关闭。`,
+      'green',
+    );
+  }
+  if (action === 'clear' && variant === 'bypass') {
+    return buildStatusCard(
+      '计划已确认',
+      `已选择：\`${CLAUDE_PLAN_EXIT_CLEAR_BYPASS_LABEL}\`\n\n当前 PLAN 会话已结束，桥会在新会话中按已确认计划继续执行。`,
+      'blue',
+    );
+  }
+  return buildStatusCard('计划已处理', 'Claude 计划确认卡已处理。', 'grey');
 }
 
 function ensureRobotPrefix(text: string): string {
@@ -1350,9 +1434,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
     if (callbackData.startsWith('perm:')) {
       const store = this.getStore();
-      const permissionRequestId = callbackData.split(':').slice(2).join(':');
+      const [, action, ...permissionParts] = callbackData.split(':');
+      const permissionRequestId = permissionParts.join(':');
       const link = store.getPermissionLink(permissionRequestId);
       if (link && handlePermissionCallback(callbackData, link.chatId, event.open_message_id)) {
+        await this.patchActionCardSafely(link.messageId, buildHandledPermissionCard(action || ''), 'permission');
         return { toast: { type: 'success', content: 'Permission updated' } };
       }
       return { toast: { type: 'warning', content: 'Permission already handled' } };
@@ -1367,6 +1453,19 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return this.handlePlanCardAction(event, callbackData);
     }
     return { toast: { type: 'warning', content: 'Unsupported action' } };
+  }
+
+  private async patchActionCardSafely(
+    messageId: string | undefined,
+    card: Record<string, unknown>,
+    kind: string,
+  ): Promise<void> {
+    if (!this.restClient || !messageId || !this.restClient.im?.message?.patch) return;
+    try {
+      await this.patchInteractiveCard(messageId, card);
+    } catch (error) {
+      console.warn(`[feishu-adapter] Failed to patch ${kind} card ${messageId}:`, error);
+    }
   }
 
   private async handleDirectMessage(sender: SenderIdentity, inbound: InboundMessage): Promise<void> {
@@ -1752,7 +1851,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
             inbound.messageId,
             workflow.workflowId,
             requestText,
-            { promptText: buildClaudePlanFollowUpPrompt(requestText) },
+            {
+              promptText: buildClaudePlanFollowUpPrompt(requestText, {
+                planText: workflow.planText,
+                planFilePath: workflow.planFilePath,
+              }),
+            },
           ));
         }
         return true;
@@ -1963,6 +2067,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
           workflowId,
           workflow.requestText,
         ));
+        await this.patchActionCardSafely(workflow.actionCardMessageId, buildHandledPlanCard(action), 'plan');
         return { toast: { type: 'success', content: '开始执行已确认计划' } };
       case 'continue':
         store.updatePlanWorkflow(workflowId, {
@@ -1970,6 +2075,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
           resolved: true,
         });
         await this.syncChatName(workflow.chatId);
+        await this.patchActionCardSafely(workflow.actionCardMessageId, buildHandledPlanCard(action), 'plan');
         return { toast: { type: 'success', content: '继续保持 PLAN 模式' } };
       case 'cancel':
         if (binding) {
@@ -1977,6 +2083,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         }
         store.deletePlanWorkflow(workflowId);
         await this.syncChatName(workflow.chatId);
+        await this.patchActionCardSafely(workflow.actionCardMessageId, buildHandledPlanCard(action), 'plan');
         return { toast: { type: 'success', content: '已取消 PLAN 流程' } };
       default:
         store.updatePlanWorkflow(workflowId, { resolved: false });
@@ -2009,7 +2116,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (knownIds.length > 1 && !knownIds.includes(event.open_message_id)) {
       return { toast: { type: 'warning', content: 'Claude plan card is stale' } };
     }
-    if (workflow.status !== 'awaiting_confirmation' || !workflow.approvalRequestId) {
+    if (workflow.status !== 'awaiting_confirmation') {
       return { toast: { type: 'warning', content: 'Claude plan is no longer waiting for confirmation' } };
     }
     if (!store.markPlanWorkflowResolved(workflowId)) {
@@ -2018,6 +2125,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     const binding = store.getChannelBinding(this.channelType, workflow.chatId);
     const allowedPrompts = workflow.allowedPrompts || [];
+    const approvalRequestId = workflow.approvalRequestId?.trim() || '';
 
     const resolvePermission = (
       resolution: Parameters<typeof getBridgeContext> extends never
@@ -2028,9 +2136,15 @@ export class FeishuAdapter extends BaseChannelAdapter {
             updatedPermissions?: unknown[];
             interrupt?: boolean;
           },
-    ): boolean => getBridgeContext().permissions.resolvePendingPermission(workflow.approvalRequestId!, resolution);
+    ): boolean => approvalRequestId
+      ? getBridgeContext().permissions.resolvePendingPermission(approvalRequestId, resolution)
+      : false;
 
     if (action === 'approve' && (variant === 'manual' || variant === 'bypass')) {
+      if (!binding) {
+        store.updatePlanWorkflow(workflowId, { resolved: false });
+        return { toast: { type: 'warning', content: '会话绑定不存在' } };
+      }
       if (binding) {
         store.updateChannelBinding(binding.id, { mode: 'code' });
       }
@@ -2044,9 +2158,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
         ),
       });
       if (!resolved) {
-        if (!binding) {
-          return { toast: { type: 'warning', content: 'Claude plan request is no longer pending' } };
-        }
         this.enqueue(this.buildPlanExecutionInbound(
           workflow.address,
           workflow.requestMessageId || workflow.planMessageId || workflow.actionCardMessageId || workflow.workflowId,
@@ -2058,6 +2169,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
           },
         ));
       }
+      await this.patchActionCardSafely(
+        workflow.actionCardMessageId,
+        buildHandledClaudePlanCard(action, variant),
+        'claude-plan',
+      );
       return {
         toast: {
           type: 'success',
@@ -2091,11 +2207,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
       store.deletePlanWorkflow(workflowId);
       await this.syncChatName(workflow.chatId);
 
-      resolvePermission({
-        behavior: 'deny',
-        message: 'The user approved the plan but wants execution to restart in a fresh session with cleared context. Stop planning here.',
-        interrupt: true,
-      });
+      if (approvalRequestId) {
+        resolvePermission({
+          behavior: 'deny',
+          message: 'The user approved the plan but wants execution to restart in a fresh session with cleared context. Stop planning here.',
+          interrupt: true,
+        });
+      }
 
       this.enqueue(this.buildPlanExecutionInbound(
         workflow.address,
@@ -2107,6 +2225,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
           planText: workflow.planText,
         },
       ));
+      await this.patchActionCardSafely(
+        workflow.actionCardMessageId,
+        buildHandledClaudePlanCard(action, variant),
+        'claude-plan',
+      );
       return { toast: { type: 'success', content: '已清空上下文，并在新会话中开始执行' } };
     }
 

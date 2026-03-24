@@ -711,6 +711,57 @@ describe('FeishuAdapter', () => {
     assert.equal(card.body.elements[1].columns[1].elements[0].behaviors[0].value.callback_data, 'perm:deny:req-1');
   });
 
+  it('patches a permission card into a handled state after a button action', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: {} as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+    store.insertPermissionLink({
+      permissionRequestId: 'req-perm-1',
+      channelType: 'feishu',
+      chatId: 'group-perm-action',
+      messageId: 'perm-msg-1',
+      openMessageId: 'open-perm-1',
+      toolName: 'Bash',
+      suggestions: '',
+    });
+
+    let patchedCard: Record<string, unknown> | null = null;
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        message: {
+          patch: async (payload: { data: { content: string } }) => {
+            patchedCard = JSON.parse(payload.data.content);
+            return { code: 0, data: {} };
+          },
+        },
+      },
+    };
+
+    const result = await adapter.handleCardAction({
+      open_id: 'ou_123',
+      tenant_key: 'tenant',
+      token: 'token',
+      open_message_id: 'open-perm-1',
+      action: {
+        value: { callback_data: 'perm:allow_session:req-perm-1' },
+        tag: 'button',
+      },
+    });
+
+    assert.equal(result.toast.type, 'success');
+    assert.equal(store.getPermissionLink('req-perm-1')?.resolved, true);
+    assert.equal((patchedCard as any)?.header?.title?.content, '授权已处理');
+    assert.match((patchedCard as any)?.body?.elements?.[0]?.content || '', /本会话允许/);
+    assert.equal((patchedCard as any)?.body?.elements?.length, 1);
+  });
+
   it('keeps threaded follow-up messages on the same route and replies in thread', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});
@@ -1510,11 +1561,18 @@ describe('FeishuAdapter', () => {
       resolved: false,
     });
 
+    let patchedCard: Record<string, unknown> | null = null;
     const adapter = new FeishuAdapter() as any;
     adapter.restClient = {
       im: {
         chat: {
           update: async () => ({ code: 0, data: {} }),
+        },
+        message: {
+          patch: async (payload: { data: { content: string } }) => {
+            patchedCard = JSON.parse(payload.data.content);
+            return { code: 0, data: {} };
+          },
         },
       },
     };
@@ -1540,6 +1598,9 @@ describe('FeishuAdapter', () => {
     assert.equal((adapter as any).queue[0].bridgeMeta.planWorkflow.kind, 'plan_execute');
     assert.match((adapter as any).queue[0].bridgeMeta.planWorkflow.promptText, /开始实施/);
     assert.equal((adapter as any).queue[0].bridgeMeta.planWorkflow.collaborationMode, 'default');
+    assert.equal((patchedCard as any)?.header?.title?.content, '计划已确认');
+    assert.match((patchedCard as any)?.body?.elements?.[0]?.content || '', /开始执行已确认计划/);
+    assert.equal((patchedCard as any)?.body?.elements?.length, 1);
   });
 
   it('approves Claude ExitPlanMode with manual approvals and keeps requested prompt rules', async () => {
@@ -1588,11 +1649,18 @@ describe('FeishuAdapter', () => {
       resolved: false,
     });
 
+    let patchedCard: Record<string, unknown> | null = null;
     const adapter = new FeishuAdapter() as any;
     adapter.restClient = {
       im: {
         chat: {
           update: async () => ({ code: 0, data: {} }),
+        },
+        message: {
+          patch: async (payload: { data: { content: string } }) => {
+            patchedCard = JSON.parse(payload.data.content);
+            return { code: 0, data: {} };
+          },
         },
       },
     };
@@ -1618,6 +1686,87 @@ describe('FeishuAdapter', () => {
       behavior: 'allow',
       updatedPermissions: buildClaudePlanModeUpdates('default', [{ tool: 'Bash', prompt: '在浏览器中打开 HTML 文件' }]),
     });
+    assert.equal((patchedCard as any)?.header?.title?.content, '计划已确认');
+    assert.match((patchedCard as any)?.body?.elements?.[0]?.content || '', /Yes, manually approve edits/);
+    assert.equal((patchedCard as any)?.body?.elements?.length, 1);
+  });
+
+  it('executes a Claude follow-up plan confirmation card even when no pending ExitPlanMode request remains', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const resolutions: unknown[] = [];
+    initBridgeContext({
+      store,
+      llm: {} as any,
+      permissions: {
+        resolvePendingPermission: (_id: string, resolution: unknown) => {
+          resolutions.push(resolution);
+          return true;
+        },
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-claude-followup-confirm',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+    store.updateChannelBinding(binding.id, { mode: 'plan' });
+    store.upsertPlanWorkflow({
+      workflowId: 'wf-claude-followup-confirm',
+      bindingId: binding.id,
+      channelType: 'feishu',
+      chatId: 'group-claude-followup-confirm',
+      codepilotSessionId: session.id,
+      status: 'awaiting_confirmation',
+      previousMode: 'plan',
+      requestText: '生成单文件页面',
+      address: { channelType: 'feishu', chatId: 'group-claude-followup-confirm', threadId: 'thread-1' },
+      routeKey: 'group-claude-followup-confirm:thread:thread-1',
+      requestMessageId: 'user-1',
+      actionCardMessageId: 'card-msg-1',
+      approvalRequestId: '',
+      planText: '# 更新后的计划\n\n1. 创建 about.html\n2. 截图验证',
+      resolved: false,
+    });
+
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        chat: {
+          update: async () => ({ code: 0, data: {} }),
+        },
+      },
+    };
+
+    const result = await adapter.handleClaudePlanExitCardAction(
+      {
+        open_id: 'ou_123',
+        tenant_key: 'tenant',
+        token: 'token',
+        open_message_id: 'card-msg-1',
+        action: {
+          value: { callback_data: 'planexit:approve:bypass:wf-claude-followup-confirm' },
+          tag: 'button',
+        },
+      },
+      'planexit:approve:bypass:wf-claude-followup-confirm',
+    );
+
+    assert.equal(result.toast.type, 'success');
+    assert.equal(store.getChannelBinding('feishu', 'group-claude-followup-confirm')?.mode, 'code');
+    assert.equal(store.getPlanWorkflow('wf-claude-followup-confirm'), null);
+    assert.equal((adapter as any).queue.length, 1);
+    assert.equal((adapter as any).queue[0].bridgeMeta.planWorkflow.kind, 'plan_execute');
+    assert.equal((adapter as any).queue[0].bridgeMeta.planWorkflow.permissionMode, 'bypassPermissions');
+    assert.deepEqual(resolutions, []);
   });
 
   it('treats Claude replies after plan confirmation as plan adjustments in the same thread', async () => {
@@ -1661,6 +1810,8 @@ describe('FeishuAdapter', () => {
       requestMessageId: 'user-1',
       actionCardMessageId: 'card-msg-1',
       approvalRequestId: 'perm-exit-2',
+      planText: '# 当前计划\n\n1. 创建 about.html\n2. 截图验证',
+      planFilePath: '/Users/shesong/.claude/plans/demo.md',
       resolved: false,
     });
 
@@ -1682,7 +1833,10 @@ describe('FeishuAdapter', () => {
     assert.equal(resolutions[0].interrupt, true);
     assert.equal((adapter as any).queue.length, 1);
     assert.equal((adapter as any).queue[0].bridgeMeta.planWorkflow.kind, 'plan_request');
-    assert.match((adapter as any).queue[0].bridgeMeta.planWorkflow.promptText, /上一轮刚输出的计划/);
+    assert.match((adapter as any).queue[0].bridgeMeta.planWorkflow.promptText, /上一轮已生成的计划文本/);
+    assert.match((adapter as any).queue[0].bridgeMeta.planWorkflow.promptText, /创建 about\.html/);
+    assert.match((adapter as any).queue[0].bridgeMeta.planWorkflow.promptText, /不要读取、查找、编辑或依赖任何“计划文件”/);
+    assert.match((adapter as any).queue[0].bridgeMeta.planWorkflow.promptText, /demo\.md/);
   });
 
   it('restarts Claude planning with a fresh plan turn when the confirmation request already expired', async () => {
@@ -1722,6 +1876,7 @@ describe('FeishuAdapter', () => {
       requestMessageId: 'user-1',
       actionCardMessageId: 'card-msg-1',
       approvalRequestId: 'perm-exit-4',
+      planText: '# 当前计划\n\n1. 创建页面\n2. 浏览器打开验证',
       resolved: false,
     });
 
@@ -1740,7 +1895,7 @@ describe('FeishuAdapter', () => {
     assert.equal((adapter as any).queue.length, 1);
     assert.equal((adapter as any).queue[0].bridgeMeta.planWorkflow.kind, 'plan_request');
     assert.equal((adapter as any).queue[0].bridgeMeta.planWorkflow.permissionMode, 'plan');
-    assert.match((adapter as any).queue[0].bridgeMeta.planWorkflow.promptText, /上一轮刚输出的计划/);
+    assert.match((adapter as any).queue[0].bridgeMeta.planWorkflow.promptText, /上一轮已生成的计划文本/);
   });
 
   it('clears context for Claude plan approval by rotating the session and queueing a fresh execution turn', async () => {

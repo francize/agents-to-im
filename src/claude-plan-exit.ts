@@ -5,6 +5,10 @@ export interface ClaudePlanAllowedPrompt {
   prompt: string;
 }
 
+export const CLAUDE_PLAN_EXIT_BYPASS_LABEL = 'Yes, and bypass permissions';
+export const CLAUDE_PLAN_EXIT_MANUAL_LABEL = 'Yes, manually approve edits';
+export const CLAUDE_PLAN_EXIT_CLEAR_BYPASS_LABEL = 'Yes, clear context and bypass permissions';
+
 export const CLAUDE_PLAN_FOLLOW_UP_REJECT_MESSAGE =
   'The user wants to continue planning in a follow-up turn. Stop here without executing anything and wait for the next user message.';
 
@@ -68,15 +72,30 @@ export function buildClaudePlanExecutionPrompt(requestText: string, planText?: s
   return lines.join('\n');
 }
 
-export function buildClaudePlanFollowUpPrompt(requestText: string): string {
-  return [
+export function buildClaudePlanFollowUpPrompt(
+  requestText: string,
+  options?: {
+    planText?: string;
+    planFilePath?: string;
+  },
+): string {
+  const lines = [
     '你仍然处于 PLAN 阶段。',
-    '请基于上一轮刚输出的计划和当前上下文，按下面的用户反馈继续调整计划。',
-    '只输出更新后的计划，不要执行，不要调用工具，不要修改文件，也不要声称已经完成。',
-    '',
-    '用户反馈如下：',
-    requestText.trim(),
-  ].join('\n');
+    '请基于上一轮已生成的计划文本和当前上下文，按照下面的用户反馈继续调整计划。',
+    '直接输出完整的更新版计划。',
+    '不要执行，不要调用工具，不要修改文件，也不要声称已经完成。',
+    '不要读取、查找、编辑或依赖任何“计划文件”；如果之前提到过 planFilePath，那只是上下文提示，不是让你去操作的文件。',
+  ];
+  const normalizedPlan = options?.planText?.trim();
+  if (normalizedPlan) {
+    lines.push('', '上一轮计划如下：', normalizedPlan);
+  }
+  const normalizedPlanFilePath = options?.planFilePath?.trim();
+  if (normalizedPlanFilePath) {
+    lines.push('', `忽略任何计划文件路径（例如 \`${normalizedPlanFilePath}\`），不要尝试读取它。`);
+  }
+  lines.push('', '用户反馈如下：', requestText.trim());
+  return lines.join('\n');
 }
 
 export function buildClaudePlanFeedbackFieldName(workflowId: string): string {

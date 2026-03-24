@@ -123,7 +123,7 @@ describe('bridge-manager plan workflow', () => {
     await stop();
   });
 
-  it('turns a plan_request synthetic message into a plan reply plus an action card', async () => {
+  it('turns a Claude plan_request synthetic message into a Claude-native confirmation card', async () => {
     const store = new JsonFileStore(makeSettings());
     const llmCalls: Array<Record<string, unknown>> = [];
     initBridgeContext({
@@ -195,13 +195,23 @@ describe('bridge-manager plan workflow', () => {
     assert.equal(llmCalls[0].prompt, 'PLAN PROMPT');
     assert.equal(llmCalls[0].permissionMode, 'plan');
     assert.equal(adapter.sent[0].text, '1. 收集上下文\n2. 修改代码\n3. 验证结果');
-    assert.equal(adapter.sent[1].cardHeader?.title, '计划已生成');
+    assert.equal(adapter.sent[1].cardHeader?.title, '计划已就绪');
     assert.deepEqual(
       adapter.sent[1].inlineButtons?.[0].map((button) => button.callbackData),
-      ['plan:execute:wf-1', 'plan:continue:wf-1', 'plan:cancel:wf-1'],
+      ['planexit:approve:bypass:wf-1', 'planexit:approve:manual:wf-1'],
     );
+    assert.deepEqual(
+      adapter.sent[1].inlineButtons?.flat().map((button) => button.text),
+      [
+        'Yes, and bypass permissions',
+        'Yes, manually approve edits',
+        'Yes, clear context and bypass permissions',
+      ],
+    );
+    assert.match(adapter.sent[1].text || '', /如需继续规划，请直接在本线程回复/);
     assert.equal(store.getPlanWorkflow('wf-1')?.status, 'awaiting_confirmation');
     assert.equal(store.getPlanWorkflow('wf-1')?.actionCardMessageId, 'sent-2');
+    assert.equal(store.getPlanWorkflow('wf-1')?.approvalRequestId, '');
   });
 
   it('treats Claude ExitPlanMode as a dedicated plan approval instead of a generic permission card', async () => {
@@ -286,6 +296,14 @@ describe('bridge-manager plan workflow', () => {
         'planexit:approve:bypass:wf-exit',
         'planexit:approve:manual:wf-exit',
         'planexit:clear:bypass:wf-exit',
+      ],
+    );
+    assert.deepEqual(
+      adapter.sent[0].inlineButtons?.flat().map((button) => button.text),
+      [
+        'Yes, and bypass permissions',
+        'Yes, manually approve edits',
+        'Yes, clear context and bypass permissions',
       ],
     );
     assert.doesNotMatch(JSON.stringify(adapter.sent[0].rawCard || {}), /继续规划|claude_plan_feedback/i);
@@ -1613,6 +1631,105 @@ describe('bridge-manager plan workflow', () => {
 
     assert.equal(previewPrimes.length, 1);
     assert.ok(previewUpdates.some((entry) => entry.endsWith(':接下来补齐剩余内容。')));
+  });
+
+  it('clears any pending preview prime before sending a Claude plan confirmation card', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const previewPrimes: number[] = [];
+    const previewEnds: number[] = [];
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text', data: '我先整理出一版实施计划。' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '我先整理出一版实施计划。' })}\n`);
+            setTimeout(() => {
+              controller.enqueue(`data: ${JSON.stringify({
+                type: 'permission_request',
+                data: JSON.stringify({
+                  permissionRequestId: 'perm-prime-exit',
+                  toolName: 'ExitPlanMode',
+                  toolInput: {
+                    plan: '# 计划\\n\\n1. 创建 HTML\\n2. 截图验证',
+                    allowedPrompts: [],
+                  },
+                }),
+              })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-prime-exit' }) })}\n`);
+              controller.close();
+            }, 60);
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-prime-exit',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+    store.upsertPlanWorkflow({
+      workflowId: 'wf-prime-exit',
+      bindingId: binding.id,
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-prime-exit',
+      codepilotSessionId: session.id,
+      status: 'planning',
+      previousMode: 'code',
+      requestText: '先给我计划',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-prime-exit', threadId: 'thread-1' },
+      routeKey: 'chat-prime-exit:thread:thread-1',
+      requestMessageId: 'msg-prime-exit',
+      resolved: true,
+    });
+
+    (adapter as any).getPreviewCapabilities = () => ({
+      supported: true,
+      privateOnly: false,
+      finalDelivery: 'segment_replace_preview',
+    });
+    (adapter as any).primePreview = async (_address: unknown, draftId: number) => {
+      previewPrimes.push(draftId);
+      return 'sent';
+    };
+    (adapter as any).endPreview = (_address: unknown, draftId: number) => {
+      previewEnds.push(draftId);
+    };
+
+    await start();
+    adapter.push({
+      messageId: 'msg-prime-exit',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-prime-exit', threadId: 'thread-1' },
+      text: '先给我计划',
+      timestamp: Date.now(),
+      bridgeMeta: {
+        planWorkflow: {
+          kind: 'plan_request',
+          workflowId: 'wf-prime-exit',
+          promptText: 'PLAN PROMPT',
+          storedUserText: '先给我计划',
+          permissionMode: 'plan',
+        },
+      },
+    });
+
+    await waitFor(() => adapter.sent.length === 2);
+
+    assert.equal(previewPrimes.length, 1);
+    assert.ok(previewEnds.includes(previewPrimes[0]!));
+    assert.equal(adapter.sent[1].cardHeader?.title, '计划已就绪');
   });
 
   it('waits for an in-flight preview before finalizing a segment so the same text is not delivered twice', async () => {
