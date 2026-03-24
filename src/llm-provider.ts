@@ -24,7 +24,7 @@ import type {
 import { normalizeClaudePermissionMode } from './claude-mode.js';
 import type { PendingPermissions, PendingStructuredInputs } from './permission-gateway.js';
 
-import { sseEvent } from './sse-utils.js';
+import { emitCanonicalTurnEvent } from './sse-utils.js';
 
 // ── Environment isolation ──
 
@@ -720,7 +720,7 @@ function enqueueActivityEvent(
   controller: ReadableStreamDefaultController<string>,
   event: ActivityEvent,
 ): void {
-  controller.enqueue(sseEvent('activity_event', event));
+  emitCanonicalTurnEvent(controller, { type: 'activity_event', data: event });
 }
 
 export class SDKLLMProvider implements LLMProvider {
@@ -833,7 +833,7 @@ export class SDKLLMProvider implements LLMProvider {
                       };
                     }
 
-                    controller.enqueue(sseEvent('structured_input_request', request));
+                    emitCanonicalTurnEvent(controller, { type: 'structured_input_request', data: request });
                     const resolution = await pendingStructuredInputs.waitFor(request.requestId);
                     const updatedInput = buildAskUserQuestionResponse(request, resolution);
                     if (updatedInput) {
@@ -862,14 +862,15 @@ export class SDKLLMProvider implements LLMProvider {
                   state.toolNamesByUseId.set(opts.toolUseID, toolName);
 
                   // Emit permission_request SSE event for the bridge
-                  controller.enqueue(
-                    sseEvent('permission_request', {
+                  emitCanonicalTurnEvent(controller, {
+                    type: 'permission_request',
+                    data: {
                       permissionRequestId: opts.toolUseID,
                       toolName,
                       toolInput: input,
                       suggestions: opts.suggestions || [],
-                    }),
-                  );
+                    },
+                  });
 
                   // Block until IM user responds
                   const result = await pendingPerms.waitFor(opts.toolUseID);
@@ -938,7 +939,7 @@ export class SDKLLMProvider implements LLMProvider {
             // a normal response that crashed before result would be silently
             // presented as if it succeeded.
             if (state.lastAssistantText && classifyAuthError(state.lastAssistantText)) {
-              controller.enqueue(sseEvent('text', state.lastAssistantText));
+              emitCanonicalTurnEvent(controller, { type: 'text', data: state.lastAssistantText });
               controller.close();
               return;
             }
@@ -975,7 +976,7 @@ export class SDKLLMProvider implements LLMProvider {
               userMessage = message;
             }
 
-            controller.enqueue(sseEvent('error', userMessage));
+            emitCanonicalTurnEvent(controller, { type: 'error', data: userMessage });
             controller.close();
           }
         })();
@@ -1007,7 +1008,7 @@ export function handleMessage(
       || maybeSubtype === 'permission_mode_changed'
       || maybeSubtype === 'set_permission_mode')
   ) {
-    controller.enqueue(sseEvent('mode_changed', { mode: nextMode }));
+    emitCanonicalTurnEvent(controller, { type: 'mode_changed', data: { mode: nextMode } });
   }
 
   const activity = mapSdkMessageToActivityEvent(msg);
@@ -1023,7 +1024,7 @@ export function handleMessage(
         event.delta.type === 'text_delta'
       ) {
         // Emit delta text — the bridge accumulates on its side
-        controller.enqueue(sseEvent('text', event.delta.text));
+        emitCanonicalTurnEvent(controller, { type: 'text', data: event.delta.text });
         state.hasStreamedText = true;
       }
       if (
@@ -1036,13 +1037,14 @@ export function handleMessage(
           input: 'input' in event.content_block ? event.content_block.input : {},
           source: 'stream_tool_use',
         }));
-        controller.enqueue(
-          sseEvent('tool_use', {
+        emitCanonicalTurnEvent(controller, {
+          type: 'tool_use',
+          data: {
             id: event.content_block.id,
             name: event.content_block.name,
             input: {},
-          }),
-        );
+          },
+        });
       }
       break;
     }
@@ -1067,13 +1069,14 @@ export function handleMessage(
               parentToolUseId: msg.parent_tool_use_id,
               source: 'assistant_tool_use',
             }));
-            controller.enqueue(
-              sseEvent('tool_use', {
+            emitCanonicalTurnEvent(controller, {
+              type: 'tool_use',
+              data: {
                 id: block.id,
                 name: block.name,
                 input: block.input,
-              }),
-            );
+              },
+            });
           }
         }
       }
@@ -1100,13 +1103,14 @@ export function handleMessage(
               source: 'tool_result',
               },
             ));
-            controller.enqueue(
-              sseEvent('tool_result', {
+            emitCanonicalTurnEvent(controller, {
+              type: 'tool_result',
+              data: {
                 tool_use_id: rb.tool_use_id,
                 content: text,
                 is_error: rb.is_error || false,
-              }),
-            );
+              },
+            });
           }
         }
       }
@@ -1121,10 +1125,11 @@ export function handleMessage(
             typeof msg.result === 'string' ? msg.result.trim() : '',
             state.lastAssistantText.trim(),
           ].find((value) => value.length > 0) || 'Unknown error';
-          controller.enqueue(sseEvent('error', errorText));
+          emitCanonicalTurnEvent(controller, { type: 'error', data: errorText });
         }
-        controller.enqueue(
-          sseEvent('result', {
+        emitCanonicalTurnEvent(controller, {
+          type: 'result',
+          data: {
             session_id: msg.session_id,
             is_error: msg.is_error,
             usage: {
@@ -1134,8 +1139,8 @@ export function handleMessage(
               cache_creation_input_tokens: msg.usage.cache_creation_input_tokens ?? 0,
               cost_usd: msg.total_cost_usd,
             },
-          }),
-        );
+          },
+        });
       } else {
         // Error result from SDK (distinct from transport errors in catch)
         const errors = (
@@ -1146,19 +1151,20 @@ export function handleMessage(
           .map((error) => (typeof error === 'string' ? error.trim() : ''))
           .filter(Boolean)
           .join('; ');
-        controller.enqueue(sseEvent('error', errors || 'Unknown error'));
+        emitCanonicalTurnEvent(controller, { type: 'error', data: errors || 'Unknown error' });
       }
       break;
     }
 
     case 'system': {
       if (msg.subtype === 'init') {
-        controller.enqueue(
-          sseEvent('status', {
+        emitCanonicalTurnEvent(controller, {
+          type: 'status',
+          data: {
             session_id: msg.session_id,
             model: msg.model,
-          }),
-        );
+          },
+        });
       }
       break;
     }

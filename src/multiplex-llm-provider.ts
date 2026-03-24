@@ -1,65 +1,28 @@
-import crypto from 'node:crypto';
-
 import type { LLMProvider, StreamChatParams } from './bridge/host.js';
 
 import type { Config } from './config.js';
 import { CodexProvider } from './codex-provider.js';
 import { SDKLLMProvider, preflightCheck, resolveClaudeCliPath } from './llm-provider.js';
 import { PendingApprovals, type PendingPermissions, PendingStructuredInputs } from './permission-gateway.js';
+import {
+  ClaudeRuntimeDriver,
+  CodexRuntimeDriver,
+  type RuntimeDriver,
+} from './runtime-driver.js';
+import {
+  RUNTIME_CAPABILITIES,
+  type ProviderCapabilities,
+} from './runtime-capabilities.js';
 import type { RuntimeName } from './runtime-types.js';
 import { JsonFileStore } from './store.js';
 
-export interface ProviderCapabilities {
-  nativePlanProtocol: boolean;
-  askUserQuestion: boolean;
-  structuredInput: boolean;
-  approvalKinds: 'rich' | 'permission_callback';
-  activityGranularity: 'rich' | 'basic';
-  resumeKinds: Array<'sdkSessionId' | 'runtimeThreadId'>;
-  elicitation: boolean;
-}
-
-const RUNTIME_CAPABILITIES: Record<RuntimeName, ProviderCapabilities> = {
-  claude: {
-    nativePlanProtocol: false,
-    askUserQuestion: true,
-    structuredInput: true,
-    approvalKinds: 'permission_callback',
-    activityGranularity: 'basic',
-    resumeKinds: ['sdkSessionId'],
-    elicitation: true,
-  },
-  codex: {
-    nativePlanProtocol: true,
-    askUserQuestion: false,
-    structuredInput: true,
-    approvalKinds: 'rich',
-    activityGranularity: 'rich',
-    resumeKinds: ['sdkSessionId', 'runtimeThreadId'],
-    elicitation: false,
-  },
-};
-
-function parseSSELine(line: string): { type: string; data: string } | null {
-  if (!line.startsWith('data: ')) return null;
-  try {
-    return JSON.parse(line.slice(6)) as { type: string; data: string };
-  } catch {
-    return null;
-  }
-}
-
-function normalizeGeneratedTitle(text: string): string {
-  return text
-    .replace(/^["'`]+|["'`]+$/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 40);
-}
+export type { ProviderCapabilities } from './runtime-capabilities.js';
 
 export class MultiplexLLMProvider implements LLMProvider {
   private claudeProvider: SDKLLMProvider | null = null;
   private codexProvider: CodexProvider | null = null;
+  private claudeDriver: ClaudeRuntimeDriver | null = null;
+  private codexDriver: CodexRuntimeDriver | null = null;
   private claudeCliPath: string | null = null;
   private readonly pendingApprovals: PendingApprovals;
   private readonly pendingStructuredInputs: PendingStructuredInputs;
@@ -125,16 +88,39 @@ export class MultiplexLLMProvider implements LLMProvider {
     return provider;
   }
 
-  private async getProvider(runtime: RuntimeName): Promise<LLMProvider> {
+  protected async getProvider(runtime: RuntimeName): Promise<LLMProvider> {
     if (runtime === 'codex') return this.getCodexProvider();
     return this.getClaudeProvider();
   }
 
+  private getDriver(runtime: RuntimeName): RuntimeDriver {
+    if (runtime === 'codex') {
+      if (!this.codexDriver) {
+        this.codexDriver = new CodexRuntimeDriver(
+          this.store,
+          this.config,
+          () => this.getProvider('codex') as Promise<CodexProvider>,
+        );
+      }
+      return this.codexDriver;
+    }
+    if (!this.claudeDriver) {
+      this.claudeDriver = new ClaudeRuntimeDriver(
+        this.store,
+        this.config,
+        () => this.getProvider('claude') as Promise<SDKLLMProvider>,
+      );
+    }
+    return this.claudeDriver;
+  }
+
   async ensureRuntimeAvailable(runtime: RuntimeName): Promise<void> {
-    await this.getProvider(runtime);
+    await this.getDriver(runtime).prepare();
   }
 
   async ensureCodexNativePlanAvailable(): Promise<void> {
+    const driver = this.getDriver('codex');
+    await driver.prepare();
     const provider = await this.getCodexProvider();
     if (!(await provider.supportsNativePlan())) {
       throw new Error('本地 Codex 版本不支持原生 plan 模式');
@@ -147,8 +133,9 @@ export class MultiplexLLMProvider implements LLMProvider {
       start(controller) {
         (async () => {
           try {
-            const provider = await self.getProvider(runtime);
-            const reader = provider.streamChat(params).getReader();
+            const driver = self.getDriver(runtime);
+            await driver.prepare();
+            const reader = (await driver.streamTurn(params)).getReader();
             while (true) {
               const { done, value } = await reader.read();
               if (done) break;
@@ -173,48 +160,10 @@ export class MultiplexLLMProvider implements LLMProvider {
 
   async generateTitle(sessionId: string, userText: string, assistantText: string): Promise<string | null> {
     const runtime = this.getSessionRuntime(sessionId);
-    const session = this.store.getSession(sessionId);
-    const stream = this.streamWithRuntime(runtime, {
-      prompt: [
-        'Generate a concise conversation title.',
-        'Requirements:',
-        '- Reply with title text only.',
-        '- No quotes, no markdown, no punctuation decoration.',
-        '- Prefer 4-10 Chinese characters or at most 4 English words.',
-        '- Do not use tools.',
-        '',
-        `User: ${userText.slice(0, 240)}`,
-        `Assistant: ${assistantText.slice(0, 320)}`,
-      ].join('\n'),
-      sessionId: `title-${crypto.randomUUID()}`,
-      workingDirectory: session?.working_directory,
-      model: session?.model,
-    });
-    const reader = stream.getReader();
-    let text = '';
-    let errorMessage = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      for (const line of value.split('\n')) {
-        const event = parseSSELine(line);
-        if (!event) continue;
-        if (event.type === 'text') {
-          text += event.data;
-        } else if (event.type === 'error') {
-          errorMessage = event.data;
-        }
-      }
-    }
-    if (errorMessage) {
-      console.warn(`[multiplex-llm] Title generation failed for ${sessionId}: ${errorMessage}`);
-      return null;
-    }
-    const normalized = normalizeGeneratedTitle(text);
-    return normalized || null;
+    return this.getDriver(runtime).generateTitle(sessionId, userText, assistantText);
   }
 
   async dispose(): Promise<void> {
-    await this.codexProvider?.close();
+    await this.codexDriver?.dispose?.();
   }
 }

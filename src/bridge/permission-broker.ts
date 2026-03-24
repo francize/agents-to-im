@@ -158,6 +158,7 @@ export async function forwardPermissionRequest(
       store.insertPermissionLink({
         permissionRequestId,
         channelType: adapter.channelType,
+        channelInstanceId: address.channelInstanceId || adapter.profileId,
         chatId: address.chatId,
         messageId: result.messageId,
         ...(result.openMessageId ? { openMessageId: result.openMessageId } : {}),
@@ -181,6 +182,7 @@ export function handlePermissionCallback(
   callbackData: string,
   callbackChatId: string,
   callbackMessageId?: string,
+  callbackContext?: { channelType?: string; channelInstanceId?: string },
 ): boolean {
   const { store, permissions } = getBridgeContext();
 
@@ -201,6 +203,23 @@ export function handlePermissionCallback(
   // Security: verify the callback came from the same chat that received the request
   if (link.chatId !== callbackChatId) {
     console.warn(`[permission-broker] Chat ID mismatch: expected ${link.chatId}, got ${callbackChatId}`);
+    return false;
+  }
+
+  if (callbackContext?.channelType && link.channelType !== callbackContext.channelType) {
+    console.warn(
+      `[permission-broker] Channel type mismatch: expected ${link.channelType}, got ${callbackContext.channelType}`,
+    );
+    return false;
+  }
+
+  if (
+    callbackContext?.channelInstanceId
+    && link.channelInstanceId !== callbackContext.channelInstanceId
+  ) {
+    console.warn(
+      `[permission-broker] Channel instance mismatch: expected ${link.channelInstanceId}, got ${callbackContext.channelInstanceId}`,
+    );
     return false;
   }
 

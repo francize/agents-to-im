@@ -69,7 +69,7 @@
 在本地配置好 `config.env` 后，启动：
 
 ```bash
-/agents-to-im start
+npx github:francize/agents-to-im start
 ```
 
 飞书在保存长连接事件时会校验应用连接状态，所以 bridge 必须先起来。
@@ -95,13 +95,19 @@
 ## 8. 配置 bridge 环境变量
 
 至少需要：
-- `CTI_FEISHU_APP_ID`
-- `CTI_FEISHU_APP_SECRET`
+- `CTI_FEISHU_PROFILE_IDS`
+- `CTI_FEISHU_PROFILE_<ID>_APP_ID`
+- `CTI_FEISHU_PROFILE_<ID>_APP_SECRET`
+- `CTI_RUNTIME_CLAUDE_FEISHU_PROFILE`
+- `CTI_RUNTIME_CODEX_FEISHU_PROFILE`
 - `CTI_DEFAULT_WORKDIR`
 
 常见可选项：
-- `CTI_FEISHU_DOMAIN`
-- `CTI_FEISHU_ALLOWED_USERS`
+- `CTI_FEISHU_PROFILE_<ID>_DOMAIN`
+- `CTI_FEISHU_PROFILE_<ID>_ALLOWED_USERS`
+- `CTI_FEISHU_PROFILE_<ID>_TOOL_OUTPUT_CARDS`
+- `CTI_FEISHU_PROFILE_<ID>_AUTO_IMAGE_SEND`
+- `CTI_FEISHU_PROFILE_<ID>_LABEL`
 - `CTI_CLAUDE_DEFAULT_MODEL`
 - `CTI_CODEX_DEFAULT_MODEL`
 - `CTI_CLAUDE_CODE_EXECUTABLE`
@@ -116,4 +122,4 @@ Codex runtime 会直接复用本地 `codex` CLI 及其 `~/.codex/config.toml`（
 3. 后续所有正式对话都在该群进行
 4. 需要清空会话但保留 runtime 时，在群内发送 `/reset`
 
-如果你升级的是旧版 Feishu 接入，任何权限、事件或回调修改都需要重新发布版本并重启 bridge。
+如果你升级的是旧版 Feishu 接入，任何权限、事件或回调修改都需要重新发布版本并执行 `npx github:francize/agents-to-im restart`。

@@ -93,53 +93,64 @@ npm run build:all
 mkdir -p ~/.agents-to-im
 cp config.env.example ~/.agents-to-im/config.env
 $EDITOR ~/.agents-to-im/config.env
+
+# Quick local restart after config/code changes
+bash scripts/daemon.sh restart
 ```
 
-You can also use the interactive setup wizard after building:
+Recommended install / run entry:
 
 ```bash
-node dist/cli-bin.mjs
+npx github:francize/agents-to-im
 ```
 
 Required config:
 
 - `CTI_DEFAULT_WORKDIR`
-- `CTI_FEISHU_APP_ID`
-- `CTI_FEISHU_APP_SECRET`
+- `CTI_FEISHU_PROFILE_IDS`
+- `CTI_FEISHU_PROFILE_<ID>_APP_ID`
+- `CTI_FEISHU_PROFILE_<ID>_APP_SECRET`
+- `CTI_RUNTIME_CLAUDE_FEISHU_PROFILE`
+- `CTI_RUNTIME_CODEX_FEISHU_PROFILE`
 
 Common optional config:
 
 - `CTI_DEFAULT_MODE`
-- `CTI_FEISHU_DOMAIN`
-- `CTI_FEISHU_ALLOWED_USERS`
+- `CTI_FEISHU_PROFILE_<ID>_DOMAIN`
+- `CTI_FEISHU_PROFILE_<ID>_ALLOWED_USERS`
+- `CTI_FEISHU_PROFILE_<ID>_TOOL_OUTPUT_CARDS`
+- `CTI_FEISHU_PROFILE_<ID>_AUTO_IMAGE_SEND`
+- `CTI_FEISHU_PROFILE_<ID>_LABEL`
 - `CTI_CLAUDE_DEFAULT_MODEL`
 - `CTI_CODEX_DEFAULT_MODEL`
 - `CTI_CLAUDE_CODE_EXECUTABLE`
 - `CTI_AUTO_APPROVE`
-- `CTI_FEISHU_TOOL_OUTPUT_CARDS`
-- `CTI_FEISHU_AUTO_IMAGE_SEND`
 
 Codex sessions reuse your local `~/.codex/config.toml` or `$CODEX_HOME/config.toml` for auth, trusted directories, sandbox, approval policy, and default model behavior.
 
 ### 3. Start the bridge
 
 ```bash
-node dist/cli-bin.mjs start
+npx github:francize/agents-to-im start
 ```
 
 Useful local commands:
 
 ```bash
-node dist/cli-bin.mjs status
-node dist/cli-bin.mjs doctor
-node dist/cli-bin.mjs logs 200
-node dist/cli-bin.mjs stop
+npx github:francize/agents-to-im restart
+npx github:francize/agents-to-im status
+npx github:francize/agents-to-im doctor
+npx github:francize/agents-to-im logs 200
+npx github:francize/agents-to-im stop
+bash scripts/daemon.sh restart
 ```
+
+After changing `config.env`, pulling new code, or republishing Feishu events/scopes, prefer `restart` instead of manually doing `stop && start`.
 
 ### 4. 5-minute validation
 
-1. Run `node dist/cli-bin.mjs doctor`.
-2. Run `node dist/cli-bin.mjs status` and confirm the bridge is running.
+1. Run `npx github:francize/agents-to-im doctor`.
+2. Run `npx github:francize/agents-to-im status` and confirm the bridge is running.
 3. Open `http://127.0.0.1:3456` and confirm the local dashboard is reachable.
 4. DM the bot with `/new:claude` or `/new:codex`.
 5. For Claude, pick a mode from the card, then confirm the bot creates a fresh group, binds it to a new session, and replies inside that group.
@@ -214,7 +225,7 @@ The result is a better fit for teams that primarily work in Feishu/Lark and want
 
 ## Troubleshooting and References
 
-- Bridge fails to start: run `node dist/cli-bin.mjs doctor`.
+- Bridge fails to start: run `npx github:francize/agents-to-im doctor`.
 - Bot does not answer in DM: confirm the app is published, Bot is enabled, and Long Connection is configured.
 - `/new:*` creates a group but fails to bind: check app scopes and local runtime availability.
 - Streaming cards fall back to plain messages: verify CardKit and message update permissions.

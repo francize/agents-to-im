@@ -168,6 +168,7 @@ export interface SettingsProvider {
 /** Input for creating an audit log entry. */
 export interface AuditLogInput {
   channelType: string;
+  channelInstanceId?: string;
   chatId: string;
   direction: 'inbound' | 'outbound';
   messageId: string;
@@ -178,6 +179,7 @@ export interface AuditLogInput {
 export interface PermissionLinkInput {
   permissionRequestId: string;
   channelType: string;
+  channelInstanceId?: string;
   chatId: string;
   messageId: string;
   openMessageId?: string;
@@ -187,6 +189,8 @@ export interface PermissionLinkInput {
 
 /** Stored permission link record. */
 export interface PermissionLinkRecord {
+  channelType: string;
+  channelInstanceId: string;
   permissionRequestId: string;
   chatId: string;
   messageId: string;
@@ -201,6 +205,7 @@ export interface PlanWorkflowInput {
   workflowId?: string;
   bindingId: string;
   channelType: string;
+  channelInstanceId?: string;
   chatId: string;
   codepilotSessionId: string;
   status: PlanWorkflowStatus;
@@ -262,6 +267,7 @@ export interface StructuredInputRequestInfo {
 export interface StructuredInputRequestInput {
   requestId: string;
   channelType: string;
+  channelInstanceId?: string;
   chatId: string;
   codepilotSessionId: string;
   address: ChannelAddress;
@@ -285,6 +291,7 @@ export interface StructuredInputRequestRecord extends Omit<StructuredInputReques
 /** Input for inserting an outbound reference. */
 export interface OutboundRefInput {
   channelType: string;
+  channelInstanceId?: string;
   chatId: string;
   codepilotSessionId: string;
   platformMessageId: string;
@@ -294,6 +301,7 @@ export interface OutboundRefInput {
 /** Input for upserting a channel binding. */
 export interface UpsertChannelBindingInput {
   channelType: string;
+  channelInstanceId?: string;
   chatId: string;
   codepilotSessionId: string;
   workingDirectory: string;
@@ -310,7 +318,7 @@ export interface BridgeStore {
   getSetting(key: string): string | null;
 
   // ── Channel bindings ──
-  getChannelBinding(channelType: string, chatId: string): ChannelBinding | null;
+  getChannelBinding(channelType: string, chatId: string, channelInstanceId?: string): ChannelBinding | null;
   upsertChannelBinding(data: UpsertChannelBindingInput): ChannelBinding;
   updateChannelBinding(id: string, updates: Partial<ChannelBinding>): void;
   listChannelBindings(channelType?: ChannelType): ChannelBinding[];
@@ -362,13 +370,21 @@ export interface BridgeStore {
   getPermissionLink(permissionRequestId: string): PermissionLinkRecord | null;
   markPermissionLinkResolved(permissionRequestId: string): boolean;
   /** List unresolved permission links for a given chat. */
-  listPendingPermissionLinksByChat(chatId: string): PermissionLinkRecord[];
+  listPendingPermissionLinksByChat(
+    chatId: string,
+    channelType?: string,
+    channelInstanceId?: string,
+  ): PermissionLinkRecord[];
 
   // ── Plan workflows ──
   upsertPlanWorkflow(workflow: PlanWorkflowInput): PlanWorkflowRecord;
   getPlanWorkflow(workflowId: string): PlanWorkflowRecord | null;
   getActivePlanWorkflowByBinding(bindingId: string): PlanWorkflowRecord | null;
-  getActivePlanWorkflowByChat(channelType: string, chatId: string): PlanWorkflowRecord | null;
+  getActivePlanWorkflowByChat(
+    channelType: string,
+    chatId: string,
+    channelInstanceId?: string,
+  ): PlanWorkflowRecord | null;
   updatePlanWorkflow(workflowId: string, updates: Partial<Omit<PlanWorkflowRecord, 'workflowId' | 'bindingId' | 'channelType' | 'chatId' | 'codepilotSessionId' | 'createdAt'>>): PlanWorkflowRecord | null;
   markPlanWorkflowResolved(workflowId: string): boolean;
   deletePlanWorkflow(workflowId: string): boolean;

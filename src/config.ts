@@ -4,15 +4,30 @@ import path from 'node:path';
 
 import type { RuntimeName } from './runtime-types.js';
 
+export const DEFAULT_FEISHU_PROFILE_ID = 'default';
+const PROFILE_ID_RE = /^[a-z0-9_]+$/;
+
+export interface FeishuProfileConfig {
+  id: string;
+  label: string;
+  appId?: string;
+  appSecret?: string;
+  domain?: 'lark';
+  allowedUsers?: string[];
+  toolOutputCards: boolean;
+  autoImageSend: boolean;
+}
+
+export interface RuntimeFeishuProfileMap {
+  claude: string;
+  codex: string;
+}
+
 export interface Config {
   defaultWorkDir: string;
   defaultMode: 'code' | 'plan' | 'ask';
-  feishuAppId?: string;
-  feishuAppSecret?: string;
-  feishuDomain?: string;
-  feishuAllowedUsers?: string[];
-  feishuToolOutputCards?: boolean;
-  feishuAutoImageSend?: boolean;
+  feishuProfiles: FeishuProfileConfig[];
+  runtimeFeishuProfiles: RuntimeFeishuProfileMap;
   autoApprove?: boolean;
   claudeDefaultModel?: string;
   codexDefaultModel?: string;
@@ -34,8 +49,8 @@ function parseEnvFile(content: string): Map<string, string> {
     const key = trimmed.slice(0, eqIdx).trim();
     let value = trimmed.slice(eqIdx + 1).trim();
     if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith('\'') && value.endsWith('\''))
+      (value.startsWith('"') && value.endsWith('"'))
+      || (value.startsWith('\'') && value.endsWith('\''))
     ) {
       value = value.slice(1, -1);
     }
@@ -65,6 +80,98 @@ function parseRuntime(value: string | undefined): RuntimeName | undefined {
   return undefined;
 }
 
+function normalizeProfileId(value: string | undefined): string | null {
+  if (!value) return null;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized || !PROFILE_ID_RE.test(normalized)) return null;
+  return normalized;
+}
+
+function defaultProfileLabel(profileId: string): string {
+  return profileId === DEFAULT_FEISHU_PROFILE_ID ? '默认 Bot' : profileId;
+}
+
+function getProfileValue(env: Map<string, string>, profileId: string, suffix: string): string | undefined {
+  return env.get(`CTI_FEISHU_PROFILE_${profileId.toUpperCase()}_${suffix}`) || undefined;
+}
+
+function buildFeishuProfile(
+  env: Map<string, string>,
+  profileId: string,
+  fallback?: Partial<FeishuProfileConfig>,
+): FeishuProfileConfig {
+  return {
+    id: profileId,
+    label: getProfileValue(env, profileId, 'LABEL') || fallback?.label || defaultProfileLabel(profileId),
+    appId: getProfileValue(env, profileId, 'APP_ID') || fallback?.appId || undefined,
+    appSecret: getProfileValue(env, profileId, 'APP_SECRET') || fallback?.appSecret || undefined,
+    domain: (getProfileValue(env, profileId, 'DOMAIN') || fallback?.domain) === 'lark' ? 'lark' : undefined,
+    allowedUsers: splitCsv(getProfileValue(env, profileId, 'ALLOWED_USERS')) || fallback?.allowedUsers,
+    toolOutputCards: parseBoolean(
+      getProfileValue(env, profileId, 'TOOL_OUTPUT_CARDS'),
+      fallback?.toolOutputCards ?? true,
+    ),
+    autoImageSend: parseBoolean(
+      getProfileValue(env, profileId, 'AUTO_IMAGE_SEND'),
+      fallback?.autoImageSend ?? true,
+    ),
+  };
+}
+
+function loadFeishuProfiles(env: Map<string, string>): FeishuProfileConfig[] {
+  const explicitProfileIds = splitCsv(env.get('CTI_FEISHU_PROFILE_IDS'))
+    ?.map((value) => normalizeProfileId(value))
+    .filter((value): value is string => !!value);
+  if (explicitProfileIds && explicitProfileIds.length > 0) {
+    return explicitProfileIds.map((profileId) => buildFeishuProfile(env, profileId));
+  }
+
+  const hasLegacyFeishuConfig = [
+    env.get('CTI_FEISHU_APP_ID'),
+    env.get('CTI_FEISHU_APP_SECRET'),
+    env.get('CTI_FEISHU_DOMAIN'),
+    env.get('CTI_FEISHU_ALLOWED_USERS'),
+    env.get('CTI_FEISHU_TOOL_OUTPUT_CARDS'),
+    env.get('CTI_FEISHU_AUTO_IMAGE_SEND'),
+  ].some((value) => value !== undefined);
+
+  if (hasLegacyFeishuConfig) {
+    return [
+      {
+        id: DEFAULT_FEISHU_PROFILE_ID,
+        label: defaultProfileLabel(DEFAULT_FEISHU_PROFILE_ID),
+        appId: env.get('CTI_FEISHU_APP_ID') || undefined,
+        appSecret: env.get('CTI_FEISHU_APP_SECRET') || undefined,
+        domain: env.get('CTI_FEISHU_DOMAIN') === 'lark' ? 'lark' : undefined,
+        allowedUsers: splitCsv(env.get('CTI_FEISHU_ALLOWED_USERS')),
+        toolOutputCards: parseBoolean(env.get('CTI_FEISHU_TOOL_OUTPUT_CARDS'), true),
+        autoImageSend: parseBoolean(env.get('CTI_FEISHU_AUTO_IMAGE_SEND'), true),
+      },
+    ];
+  }
+
+  return [buildFeishuProfile(env, DEFAULT_FEISHU_PROFILE_ID)];
+}
+
+function resolveRuntimeProfileMapping(
+  env: Map<string, string>,
+  profiles: FeishuProfileConfig[],
+): RuntimeFeishuProfileMap {
+  const knownIds = new Set(profiles.map((profile) => profile.id));
+  const defaultProfileId = profiles.find((profile) => profile.id === DEFAULT_FEISHU_PROFILE_ID)?.id || profiles[0]?.id || DEFAULT_FEISHU_PROFILE_ID;
+
+  const pick = (value: string | undefined): string => {
+    const profileId = normalizeProfileId(value);
+    if (profileId && knownIds.has(profileId)) return profileId;
+    return defaultProfileId;
+  };
+
+  return {
+    claude: pick(env.get('CTI_RUNTIME_CLAUDE_FEISHU_PROFILE')),
+    codex: pick(env.get('CTI_RUNTIME_CODEX_FEISHU_PROFILE')),
+  };
+}
+
 export function loadConfig(): Config {
   let env = new Map<string, string>();
   try {
@@ -74,15 +181,12 @@ export function loadConfig(): Config {
     // Config file doesn't exist yet — use defaults.
   }
 
+  const feishuProfiles = loadFeishuProfiles(env);
   return {
     defaultWorkDir: env.get('CTI_DEFAULT_WORKDIR') || process.cwd(),
     defaultMode: ((env.get('CTI_DEFAULT_MODE') || 'code') as Config['defaultMode']),
-    feishuAppId: env.get('CTI_FEISHU_APP_ID') || undefined,
-    feishuAppSecret: env.get('CTI_FEISHU_APP_SECRET') || undefined,
-    feishuDomain: env.get('CTI_FEISHU_DOMAIN') || undefined,
-    feishuAllowedUsers: splitCsv(env.get('CTI_FEISHU_ALLOWED_USERS')),
-    feishuToolOutputCards: parseBoolean(env.get('CTI_FEISHU_TOOL_OUTPUT_CARDS'), true),
-    feishuAutoImageSend: parseBoolean(env.get('CTI_FEISHU_AUTO_IMAGE_SEND'), true),
+    feishuProfiles,
+    runtimeFeishuProfiles: resolveRuntimeProfileMapping(env, feishuProfiles),
     autoApprove: env.get('CTI_AUTO_APPROVE') === 'true',
     claudeDefaultModel: env.get('CTI_CLAUDE_DEFAULT_MODEL') || undefined,
     codexDefaultModel: env.get('CTI_CODEX_DEFAULT_MODEL') || undefined,
@@ -96,22 +200,37 @@ function formatEnvLine(key: string, value: string | undefined): string {
   return `${key}=${value}\n`;
 }
 
+function formatProfileLines(profile: FeishuProfileConfig): string {
+  const prefix = `CTI_FEISHU_PROFILE_${profile.id.toUpperCase()}_`;
+  let out = '';
+  out += formatEnvLine(`${prefix}APP_ID`, profile.appId);
+  out += formatEnvLine(`${prefix}APP_SECRET`, profile.appSecret);
+  out += formatEnvLine(`${prefix}DOMAIN`, profile.domain);
+  out += formatEnvLine(`${prefix}ALLOWED_USERS`, profile.allowedUsers?.join(','));
+  out += formatEnvLine(`${prefix}TOOL_OUTPUT_CARDS`, String(profile.toolOutputCards));
+  out += formatEnvLine(`${prefix}AUTO_IMAGE_SEND`, String(profile.autoImageSend));
+  out += formatEnvLine(`${prefix}LABEL`, profile.label);
+  return out;
+}
+
 export function saveConfig(config: Config): void {
   let out = '';
   out += formatEnvLine('CTI_DEFAULT_WORKDIR', config.defaultWorkDir);
   out += formatEnvLine('CTI_DEFAULT_MODE', config.defaultMode);
-  out += formatEnvLine('CTI_FEISHU_APP_ID', config.feishuAppId);
-  out += formatEnvLine('CTI_FEISHU_APP_SECRET', config.feishuAppSecret);
-  out += formatEnvLine('CTI_FEISHU_DOMAIN', config.feishuDomain);
-  out += formatEnvLine('CTI_FEISHU_ALLOWED_USERS', config.feishuAllowedUsers?.join(','));
   out += formatEnvLine(
-    'CTI_FEISHU_TOOL_OUTPUT_CARDS',
-    config.feishuToolOutputCards === undefined ? undefined : String(config.feishuToolOutputCards),
+    'CTI_FEISHU_PROFILE_IDS',
+    config.feishuProfiles
+      .map((profile) => normalizeProfileId(profile.id))
+      .filter((profileId): profileId is string => !!profileId)
+      .join(','),
   );
-  out += formatEnvLine(
-    'CTI_FEISHU_AUTO_IMAGE_SEND',
-    config.feishuAutoImageSend === undefined ? undefined : String(config.feishuAutoImageSend),
-  );
+  for (const profile of config.feishuProfiles) {
+    const profileId = normalizeProfileId(profile.id);
+    if (!profileId) continue;
+    out += formatProfileLines({ ...profile, id: profileId });
+  }
+  out += formatEnvLine('CTI_RUNTIME_CLAUDE_FEISHU_PROFILE', config.runtimeFeishuProfiles.claude);
+  out += formatEnvLine('CTI_RUNTIME_CODEX_FEISHU_PROFILE', config.runtimeFeishuProfiles.codex);
   out += formatEnvLine('CTI_AUTO_APPROVE', config.autoApprove ? 'true' : undefined);
   out += formatEnvLine('CTI_CLAUDE_DEFAULT_MODEL', config.claudeDefaultModel);
   out += formatEnvLine('CTI_CODEX_DEFAULT_MODEL', config.codexDefaultModel);
@@ -128,22 +247,56 @@ export function maskSecret(value: string): string {
   return '*'.repeat(value.length - 4) + value.slice(-4);
 }
 
+export function getFeishuProfile(
+  config: Config,
+  profileId: string,
+): FeishuProfileConfig | null {
+  return config.feishuProfiles.find((profile) => profile.id === profileId) || null;
+}
+
+export function getRuntimeFeishuProfile(
+  config: Config,
+  runtime: RuntimeName,
+): FeishuProfileConfig | null {
+  return getFeishuProfile(config, config.runtimeFeishuProfiles[runtime]);
+}
+
 export function configToSettings(config: Config): Map<string, string> {
   const settings = new Map<string, string>();
   settings.set('remote_bridge_enabled', 'true');
-  settings.set('bridge_feishu_enabled', 'true');
+  settings.set('bridge_feishu_enabled', config.feishuProfiles.length > 0 ? 'true' : 'false');
   settings.set('bridge_default_work_dir', config.defaultWorkDir);
   settings.set('bridge_default_mode', config.defaultMode);
   settings.set('bridge_default_runtime', config.legacyRuntime || 'claude');
+  settings.set('bridge_feishu_profile_ids', config.feishuProfiles.map((profile) => profile.id).join(','));
+  settings.set('bridge_runtime_claude_feishu_profile', config.runtimeFeishuProfiles.claude);
+  settings.set('bridge_runtime_codex_feishu_profile', config.runtimeFeishuProfiles.codex);
 
-  if (config.feishuAppId) settings.set('bridge_feishu_app_id', config.feishuAppId);
-  if (config.feishuAppSecret) settings.set('bridge_feishu_app_secret', config.feishuAppSecret);
-  if (config.feishuDomain) settings.set('bridge_feishu_domain', config.feishuDomain);
-  if (config.feishuAllowedUsers) {
-    settings.set('bridge_feishu_allowed_users', config.feishuAllowedUsers.join(','));
+  const defaultProfile = getRuntimeFeishuProfile(config, 'claude')
+    || getFeishuProfile(config, DEFAULT_FEISHU_PROFILE_ID)
+    || config.feishuProfiles[0];
+
+  for (const profile of config.feishuProfiles) {
+    const prefix = `bridge_feishu_profile_${profile.id}_`;
+    if (profile.appId) settings.set(`${prefix}app_id`, profile.appId);
+    if (profile.appSecret) settings.set(`${prefix}app_secret`, profile.appSecret);
+    if (profile.domain) settings.set(`${prefix}domain`, profile.domain);
+    if (profile.allowedUsers) settings.set(`${prefix}allowed_users`, profile.allowedUsers.join(','));
+    settings.set(`${prefix}tool_output_cards`, profile.toolOutputCards ? 'true' : 'false');
+    settings.set(`${prefix}auto_image_send`, profile.autoImageSend ? 'true' : 'false');
+    settings.set(`${prefix}label`, profile.label);
   }
-  settings.set('bridge_feishu_tool_output_cards', config.feishuToolOutputCards === false ? 'false' : 'true');
-  settings.set('bridge_feishu_auto_image_send', config.feishuAutoImageSend === false ? 'false' : 'true');
+
+  if (defaultProfile) {
+    if (defaultProfile.appId) settings.set('bridge_feishu_app_id', defaultProfile.appId);
+    if (defaultProfile.appSecret) settings.set('bridge_feishu_app_secret', defaultProfile.appSecret);
+    if (defaultProfile.domain) settings.set('bridge_feishu_domain', defaultProfile.domain);
+    if (defaultProfile.allowedUsers) {
+      settings.set('bridge_feishu_allowed_users', defaultProfile.allowedUsers.join(','));
+    }
+    settings.set('bridge_feishu_tool_output_cards', defaultProfile.toolOutputCards ? 'true' : 'false');
+    settings.set('bridge_feishu_auto_image_send', defaultProfile.autoImageSend ? 'true' : 'false');
+  }
 
   if (config.claudeDefaultModel) {
     settings.set('bridge_default_model', config.claudeDefaultModel);

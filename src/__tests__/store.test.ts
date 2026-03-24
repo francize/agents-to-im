@@ -106,6 +106,30 @@ describe('JsonFileStore', () => {
     assert.equal(b2.codepilotSessionId, 'sess-2');
   });
 
+  it('isolates bindings by channelInstanceId under the same channel type', () => {
+    const store = new JsonFileStore(makeSettings());
+    const claudeBinding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      channelInstanceId: 'claude',
+      chatId: '123',
+      codepilotSessionId: 'sess-1',
+      workingDirectory: '/tmp/claude',
+      model: 'claude-sonnet-4-6',
+    });
+    const codexBinding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      channelInstanceId: 'codex',
+      chatId: '123',
+      codepilotSessionId: 'sess-2',
+      workingDirectory: '/tmp/codex',
+      model: 'gpt-5-codex',
+    });
+
+    assert.notEqual(claudeBinding.id, codexBinding.id);
+    assert.equal(store.getChannelBinding('feishu', '123', 'claude')?.codepilotSessionId, 'sess-1');
+    assert.equal(store.getChannelBinding('feishu', '123', 'codex')?.codepilotSessionId, 'sess-2');
+  });
+
   it('upsertChannelBinding uses default mode from settings', () => {
     const settings = makeSettings();
     settings.set('bridge_default_mode', 'plan');
@@ -170,6 +194,89 @@ describe('JsonFileStore', () => {
     assert.equal(store.listChannelBindings('feishu').length, 1);
     assert.equal(store.listChannelBindings('lark' as any).length, 1);
     assert.equal(store.listChannelBindings().length, 2);
+  });
+
+  it('migrates legacy binding keys and callback state to default channel instance ids', () => {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(
+      path.join(DATA_DIR, 'bindings.json'),
+      JSON.stringify({
+        'feishu:legacy-chat': {
+          id: 'binding-1',
+          channelType: 'feishu',
+          chatId: 'legacy-chat',
+          codepilotSessionId: 'sess-legacy',
+          sdkSessionId: '',
+          workingDirectory: '/tmp',
+          model: 'claude-sonnet-4-6',
+          mode: 'code',
+          active: true,
+          createdAt: '2026-03-24T00:00:00.000Z',
+          updatedAt: '2026-03-24T00:00:00.000Z',
+        },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(DATA_DIR, 'permissions.json'),
+      JSON.stringify({
+        'perm-1': {
+          permissionRequestId: 'perm-1',
+          channelType: 'feishu',
+          chatId: 'legacy-chat',
+          messageId: 'msg-1',
+          resolved: false,
+          suggestions: '',
+        },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(DATA_DIR, 'plan-workflows.json'),
+      JSON.stringify({
+        'workflow-1': {
+          workflowId: 'workflow-1',
+          bindingId: 'binding-1',
+          channelType: 'feishu',
+          chatId: 'legacy-chat',
+          codepilotSessionId: 'sess-legacy',
+          status: 'planning',
+          previousMode: 'code',
+          requestText: 'legacy request',
+          address: { channelType: 'feishu', chatId: 'legacy-chat' },
+          routeKey: 'legacy-chat:main',
+          resolved: false,
+          createdAt: '2026-03-24T00:00:00.000Z',
+          updatedAt: '2026-03-24T00:00:00.000Z',
+        },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(DATA_DIR, 'structured-inputs.json'),
+      JSON.stringify({
+        'input-1': {
+          requestId: 'input-1',
+          channelType: 'feishu',
+          chatId: 'legacy-chat',
+          codepilotSessionId: 'sess-legacy',
+          address: { channelType: 'feishu', chatId: 'legacy-chat' },
+          routeKey: 'legacy-chat:main',
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          itemId: 'item-1',
+          questions: [],
+          draftAnswers: {},
+          resolved: false,
+          createdAt: '2026-03-24T00:00:00.000Z',
+          updatedAt: '2026-03-24T00:00:00.000Z',
+        },
+      }),
+    );
+
+    const store = new JsonFileStore(makeSettings());
+
+    assert.equal(store.getChannelBinding('feishu', 'legacy-chat', 'default')?.channelInstanceId, 'default');
+    assert.equal(store.getPermissionLink('perm-1')?.channelInstanceId, 'default');
+    assert.equal(store.getPlanWorkflow('workflow-1')?.channelInstanceId, 'default');
+    assert.equal(store.getStructuredInputRequest('input-1')?.channelInstanceId, 'default');
   });
 
   it('addMessage and getMessages', () => {

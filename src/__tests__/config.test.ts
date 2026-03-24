@@ -20,6 +20,18 @@ describe('configToSettings', () => {
   const base: Config = {
     defaultWorkDir: '/tmp/test',
     defaultMode: 'code',
+    feishuProfiles: [
+      {
+        id: 'default',
+        label: '默认 Bot',
+        toolOutputCards: true,
+        autoImageSend: true,
+      },
+    ],
+    runtimeFeishuProfiles: {
+      claude: 'default',
+      codex: 'default',
+    },
   };
 
   it('always enables remote bridge and feishu channel', () => {
@@ -33,15 +45,58 @@ describe('configToSettings', () => {
   it('maps feishu credentials and allowlist', () => {
     const settings = configToSettings({
       ...base,
-      feishuAppId: 'app-id',
-      feishuAppSecret: 'app-secret',
-      feishuDomain: 'lark',
-      feishuAllowedUsers: ['ou_1', 'ou_2'],
+      feishuProfiles: [
+        {
+          id: 'default',
+          label: '默认 Bot',
+          appId: 'app-id',
+          appSecret: 'app-secret',
+          domain: 'lark',
+          allowedUsers: ['ou_1', 'ou_2'],
+          toolOutputCards: true,
+          autoImageSend: true,
+        },
+      ],
     });
     assert.equal(settings.get('bridge_feishu_app_id'), 'app-id');
     assert.equal(settings.get('bridge_feishu_app_secret'), 'app-secret');
     assert.equal(settings.get('bridge_feishu_domain'), 'lark');
     assert.equal(settings.get('bridge_feishu_allowed_users'), 'ou_1,ou_2');
+  });
+
+  it('maps profile-local settings and runtime bindings for multiple bots', () => {
+    const settings = configToSettings({
+      ...base,
+      feishuProfiles: [
+        {
+          id: 'default',
+          label: 'Claude Bot',
+          appId: 'claude-app',
+          appSecret: 'claude-secret',
+          toolOutputCards: true,
+          autoImageSend: true,
+        },
+        {
+          id: 'codex',
+          label: 'Codex Bot',
+          appId: 'codex-app',
+          appSecret: 'codex-secret',
+          toolOutputCards: false,
+          autoImageSend: false,
+        },
+      ],
+      runtimeFeishuProfiles: {
+        claude: 'default',
+        codex: 'codex',
+      },
+    });
+    assert.equal(settings.get('bridge_feishu_profile_ids'), 'default,codex');
+    assert.equal(settings.get('bridge_runtime_claude_feishu_profile'), 'default');
+    assert.equal(settings.get('bridge_runtime_codex_feishu_profile'), 'codex');
+    assert.equal(settings.get('bridge_feishu_profile_default_app_id'), 'claude-app');
+    assert.equal(settings.get('bridge_feishu_profile_codex_app_id'), 'codex-app');
+    assert.equal(settings.get('bridge_feishu_profile_codex_tool_output_cards'), 'false');
+    assert.equal(settings.get('bridge_feishu_profile_codex_auto_image_send'), 'false');
   });
 
   it('maps default workdir and mode', () => {
@@ -74,7 +129,12 @@ describe('configToSettings', () => {
   it('allows disabling feishu tool output cards explicitly', () => {
     const settings = configToSettings({
       ...base,
-      feishuToolOutputCards: false,
+      feishuProfiles: [
+        {
+          ...base.feishuProfiles[0],
+          toolOutputCards: false,
+        },
+      ],
     });
     assert.equal(settings.get('bridge_feishu_tool_output_cards'), 'false');
   });
@@ -82,7 +142,12 @@ describe('configToSettings', () => {
   it('allows disabling automatic feishu image sends explicitly', () => {
     const settings = configToSettings({
       ...base,
-      feishuAutoImageSend: false,
+      feishuProfiles: [
+        {
+          ...base.feishuProfiles[0],
+          autoImageSend: false,
+        },
+      ],
     });
     assert.equal(settings.get('bridge_feishu_auto_image_send'), 'false');
   });

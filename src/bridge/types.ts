@@ -19,10 +19,18 @@ export type { ActivityEvent, FileAttachment } from './host.js';
  * modifying this definition. Well-known values: 'telegram', 'discord', 'slack'.
  */
 export type ChannelType = string;
+export const DEFAULT_CHANNEL_INSTANCE_ID = 'default';
+
+export function resolveChannelInstanceId(
+  addressLike: { channelInstanceId?: string } | null | undefined,
+): string {
+  return addressLike?.channelInstanceId || DEFAULT_CHANNEL_INSTANCE_ID;
+}
 
 /** Unique address of a user within a channel */
 export interface ChannelAddress {
   channelType: ChannelType;
+  channelInstanceId?: string;
   chatId: string;        // Platform-specific chat/channel identifier
   userId?: string;       // Platform-specific user identifier (optional for group chats)
   displayName?: string;  // Human-readable name for audit logs
@@ -32,6 +40,7 @@ export interface ChannelAddress {
 /** Composite key for routing: channelType + chatId */
 export interface SessionKey {
   channelType: ChannelType;
+  channelInstanceId?: string;
   chatId: string;
 }
 
@@ -126,6 +135,7 @@ export interface SendResult {
 export interface ChannelBinding {
   id: string;
   channelType: ChannelType;
+  channelInstanceId: string;
   chatId: string;
   /** CodePilot session ID this chat is bound to */
   codepilotSessionId: string;
@@ -156,7 +166,10 @@ export interface BridgeStatus {
 
 /** Status of a single channel adapter */
 export interface AdapterStatus {
+  adapterId: string;
   channelType: ChannelType;
+  profileId?: string;
+  label?: string;
   running: boolean;
   connectedAt: string | null;
   lastMessageAt: string | null;
@@ -169,6 +182,7 @@ export interface AdapterStatus {
 export interface AuditLogEntry {
   id: string;
   channelType: ChannelType;
+  channelInstanceId?: string;
   chatId: string;
   direction: 'inbound' | 'outbound';
   messageId: string;
@@ -181,6 +195,7 @@ export interface PermissionLink {
   id: string;
   permissionRequestId: string;
   channelType: ChannelType;
+  channelInstanceId?: string;
   chatId: string;
   messageId: string;
   createdAt: string;

@@ -14,8 +14,9 @@ import type {
   PreviewCapabilities,
   SendResult,
 } from '../bridge/types.js';
+import { DEFAULT_CHANNEL_INSTANCE_ID, resolveChannelInstanceId } from '../bridge/types.js';
 import type { StructuredInputRequestInfo, StructuredInputResponse } from '../bridge/host.js';
-import { BaseChannelAdapter, registerAdapterFactory } from '../bridge/channel-adapter.js';
+import { BaseChannelAdapter } from '../bridge/channel-adapter.js';
 import { getBridgeContext } from '../bridge/context.js';
 import { handlePermissionCallback } from '../bridge/permission-broker.js';
 import { validateMode } from '../bridge/security/validators.js';
@@ -40,6 +41,7 @@ import {
   normalizeClaudePermissionMode,
 } from '../claude-mode.js';
 import type { ClaudePermissionMode } from '../claude-mode.js';
+import type { FeishuProfileConfig } from '../config.js';
 
 import type { MultiplexLLMProvider } from '../multiplex-llm-provider.js';
 import type { RuntimeName } from '../runtime-types.js';
@@ -119,6 +121,12 @@ interface ActivityArtifact {
 interface PendingActivitySend {
   requestUuid: string;
   needsRecoveryPatch: boolean;
+}
+
+export interface FeishuAdapterOptions {
+  profile: FeishuProfileConfig;
+  runtimeProfileMap: Record<RuntimeName, string>;
+  profileLabels?: Record<string, string>;
 }
 
 type StructuredActionEvent = lark.InteractiveCardActionEvent & {
@@ -1059,6 +1067,9 @@ export function findMissingAppScopes(visibleScopes: readonly string[]): string[]
 
 export class FeishuAdapter extends BaseChannelAdapter {
   readonly channelType: ChannelType = 'feishu';
+  private readonly instanceAdapterId: string;
+  private readonly instanceProfileId: string;
+  private readonly instanceLabel: string;
 
   private running = false;
   private queue: InboundMessage[] = [];
@@ -1076,6 +1087,76 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private pendingTitles = new Set<string>();
   private outboundMessageQueues = new Map<string, Promise<void>>();
   private lastOutboundMessageAt = new Map<string, number>();
+
+  constructor(
+    private readonly options: FeishuAdapterOptions = {
+      profile: {
+        id: DEFAULT_CHANNEL_INSTANCE_ID,
+        label: '默认 Bot',
+        toolOutputCards: true,
+        autoImageSend: true,
+      },
+      runtimeProfileMap: {
+        claude: DEFAULT_CHANNEL_INSTANCE_ID,
+        codex: DEFAULT_CHANNEL_INSTANCE_ID,
+      },
+      profileLabels: {},
+    },
+  ) {
+    super();
+    this.instanceProfileId = options.profile.id || DEFAULT_CHANNEL_INSTANCE_ID;
+    this.instanceAdapterId = `${this.channelType}:${this.instanceProfileId}`;
+    this.instanceLabel = options.profile.label || this.instanceProfileId;
+  }
+
+  get adapterId(): string {
+    return this.instanceAdapterId;
+  }
+
+  get profileId(): string {
+    return this.instanceProfileId;
+  }
+
+  get label(): string {
+    return this.instanceLabel;
+  }
+
+  allowsAutoImageSend(): boolean {
+    if (this.usesLegacyStoreSettings()) {
+      return this.getStore().getSetting('bridge_feishu_auto_image_send') !== 'false';
+    }
+    return this.options.profile.autoImageSend !== false;
+  }
+
+  private withInstance(address: ChannelAddress): ChannelAddress {
+    return {
+      ...address,
+      channelInstanceId: resolveChannelInstanceId(address) === DEFAULT_CHANNEL_INSTANCE_ID
+        ? this.profileId
+        : resolveChannelInstanceId(address),
+    };
+  }
+
+  private getRuntimeProfileId(runtime: RuntimeName): string {
+    return this.options.runtimeProfileMap[runtime] || DEFAULT_CHANNEL_INSTANCE_ID;
+  }
+
+  private getRuntimeProfileLabel(runtime: RuntimeName): string {
+    const profileId = this.getRuntimeProfileId(runtime);
+    return this.options.profileLabels?.[profileId] || profileId;
+  }
+
+  private isRuntimeOwnedByThisAdapter(runtime: RuntimeName): boolean {
+    return this.getRuntimeProfileId(runtime) === this.profileId;
+  }
+
+  private buildWrongBotMessage(runtime: RuntimeName): string {
+    return `请到 ${this.getRuntimeProfileLabel(runtime)} Bot 上执行 \`/new:${runtime}\`。当前 Bot 仅处理映射到自己的 runtime。`;
+  }
+
+  private usesLegacyStoreSettings(): boolean {
+    return !this.options.profile.appId && !this.options.profile.appSecret;
+  }
 
   async start(): Promise<void> {
     if (this.running) return;
@@ -1177,22 +1258,24 @@ export class FeishuAdapter extends BaseChannelAdapter {
   }
 
   validateConfig(): string | null {
-    const { store } = getBridgeContext();
-    if (!store.getSetting('bridge_feishu_app_id')) return 'CTI_FEISHU_APP_ID is required';
-    if (!store.getSetting('bridge_feishu_app_secret')) return 'CTI_FEISHU_APP_SECRET is required';
+    const store = getBridgeContext().store;
+    const appId = this.options.profile.appId || store.getSetting('bridge_feishu_app_id') || '';
+    const appSecret = this.options.profile.appSecret || store.getSetting('bridge_feishu_app_secret') || '';
+    if (!appId) return `${this.label}: CTI_FEISHU_PROFILE_${this.profileId.toUpperCase()}_APP_ID is required`;
+    if (!appSecret) return `${this.label}: CTI_FEISHU_PROFILE_${this.profileId.toUpperCase()}_APP_SECRET is required`;
     return null;
   }
 
   isAuthorized(userId: string, _chatId: string): boolean {
-    const { store } = getBridgeContext();
-    const allowed = store.getSetting('bridge_feishu_allowed_users');
-    if (!allowed) return true;
-    const allowSet = new Set(
-      allowed
-        .split(',')
-        .map((item) => item.trim())
-        .filter(Boolean),
-    );
+    const allowed = this.options.profile.allowedUsers
+      || (this.usesLegacyStoreSettings()
+        ? (this.getStore().getSetting('bridge_feishu_allowed_users') || '')
+            .split(',')
+            .map((item) => item.trim())
+            .filter(Boolean)
+        : undefined);
+    if (!allowed || allowed.length === 0) return true;
+    const allowSet = new Set(allowed.map((item) => item.trim()).filter(Boolean));
     return allowSet.has(userId);
   }
 
@@ -1226,7 +1309,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   getPreviewCapabilities(address: ChannelAddress): PreviewCapabilities | null {
     const store = this.getStore();
-    if (!store.getChannelBinding(this.channelType, address.chatId)) {
+    if (!store.getChannelBinding(this.channelType, address.chatId, this.profileId)) {
       return null;
     }
     return {
@@ -1338,6 +1421,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   async resolveStructuredInputRequest(requestId: string): Promise<void> {
     const request = this.getStore().getStructuredInputRequest(requestId);
+    if (request?.channelInstanceId !== this.profileId) return;
     if (!request?.messageId) return;
     try {
       await this.patchInteractiveCard(
@@ -1367,7 +1451,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (
       !this.restClient
       || event.kind === 'context_usage'
-      || this.getStore().getSetting('bridge_feishu_tool_output_cards') === 'false'
+      || (this.usesLegacyStoreSettings()
+        ? this.getStore().getSetting('bridge_feishu_tool_output_cards') === 'false'
+        : this.options.profile.toolOutputCards === false)
     ) {
       return { ok: true };
     }
@@ -1428,9 +1514,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!this.restClient) {
       return { ok: false, error: 'Feishu client not initialized' };
     }
+    const address = this.withInstance(message.address);
 
     if (message.rawCard) {
-      const result = await this.sendInteractiveCard(message.address, message.rawCard, message.replyToMessageId);
+      const result = await this.sendInteractiveCard(address, message.rawCard, message.replyToMessageId);
       return {
         ok: true,
         messageId: result.messageId,
@@ -1440,7 +1527,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     if (message.inlineButtons && message.inlineButtons.length > 0) {
       return this.sendPermissionCard(
-        message.address,
+        address,
         normalizeMarkdown(message),
         message.inlineButtons,
         message.replyToMessageId,
@@ -1448,7 +1535,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       );
     }
 
-    const activePreviewKey = this.activePreviewByRoute.get(routeKeyForAddress(message.address));
+    const activePreviewKey = this.activePreviewByRoute.get(routeKeyForAddress(address));
     if (activePreviewKey) {
       const artifact = this.previewArtifacts.get(activePreviewKey);
       if (artifact?.messageId) {
@@ -1481,7 +1568,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
             await this.patchInteractiveCard(artifact.messageId, buildSimpleCard(finalText));
           }
           artifact.lastText = finalText;
-          void this.maybeRenameChat(message.address.chatId);
+          void this.maybeRenameChat(address.chatId);
           return { ok: true, messageId: artifact.messageId, openMessageId: artifact.messageId };
         } catch (error) {
           console.warn('[feishu-adapter] Failed to finalize preview in place:', error);
@@ -1491,10 +1578,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     const text = normalizeMarkdown(message);
     const result = hasComplexMarkdown(text)
-      ? await this.sendAsInteractiveCard(message.address, text, message.replyToMessageId)
-      : await this.sendAsPost(message.address, text, message.replyToMessageId);
+      ? await this.sendAsInteractiveCard(address, text, message.replyToMessageId)
+      : await this.sendAsPost(address, text, message.replyToMessageId);
     if (result.ok) {
-      void this.maybeRenameChat(message.address.chatId);
+      void this.maybeRenameChat(address.chatId);
     }
     return result;
   }
@@ -1504,9 +1591,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return { ok: false, error: 'Feishu client not initialized' };
     }
     try {
+      const address = this.withInstance(image.address);
       const imageKey = await this.uploadImageFile(image.filePath);
       const response = await this.sendLarkMessage(
-        image.address,
+        address,
         'image',
         JSON.stringify({ image_key: imageKey }),
         image.replyToMessageId,
@@ -1565,6 +1653,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         messageId,
         address: {
           channelType: this.channelType,
+          channelInstanceId: this.profileId,
           chatId: data.message.chat_id,
           userId: sender.id,
           ...(threadId ? { threadId } : {}),
@@ -1607,7 +1696,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
       const permissionRequestId = permissionParts.join(':');
       const link = store.getPermissionLink(permissionRequestId);
       const actionMessageId = resolveActionOpenMessageId(event);
-      if (link && handlePermissionCallback(callbackData, link.chatId, actionMessageId)) {
+      if (
+        link
+        && handlePermissionCallback(callbackData, link.chatId, actionMessageId, {
+          channelType: this.channelType,
+          channelInstanceId: this.profileId,
+        })
+      ) {
         await this.patchActionCardSafely(
           link.messageId,
           buildHandledPermissionCard(action || ''),
@@ -1668,7 +1763,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
   }
 
   private findBindingById(bindingId: string): ChannelBinding | null {
-    return this.getStore().listChannelBindings(this.channelType).find((item) => item.id === bindingId) || null;
+    return this.getStore()
+      .listChannelBindings(this.channelType)
+      .find((item) => item.channelInstanceId === this.profileId && item.id === bindingId) || null;
   }
 
   private extractActionSenderIdentity(event: StructuredActionEvent): SenderIdentity | null {
@@ -1718,6 +1815,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     });
     const binding = store.upsertChannelBinding({
       channelType: this.channelType,
+      channelInstanceId: this.profileId,
       chatId,
       codepilotSessionId: session.id,
       workingDirectory: session.working_directory,
@@ -1728,7 +1826,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     });
     await this.syncChatName(chatId);
     await this.sendAsPost(
-      { channelType: this.channelType, chatId },
+      { channelType: this.channelType, channelInstanceId: this.profileId, chatId },
       this.buildSessionReadyMessage(runtime, binding),
     );
     return { chatId, binding };
@@ -1777,7 +1875,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const store = this.getStore();
     const text = inbound.text.trim();
     const lower = text.toLowerCase();
-    const binding = store.getChannelBinding(this.channelType, inbound.address.chatId);
+    const binding = store.getChannelBinding(this.channelType, inbound.address.chatId, this.profileId);
     const workflow = binding ? store.getActivePlanWorkflowByBinding(binding.id) : null;
 
     if (lower.startsWith('/perm ')) {
@@ -1828,6 +1926,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
   }
 
   private async handleCreateSessionCommand(sender: SenderIdentity, inbound: InboundMessage, runtime: RuntimeName): Promise<void> {
+    if (!this.isRuntimeOwnedByThisAdapter(runtime)) {
+      await this.sendAsPost(inbound.address, this.buildWrongBotMessage(runtime), inbound.messageId);
+      return;
+    }
     if (runtime === 'claude') {
       try {
         await this.ensureRuntimeAvailable(runtime);
@@ -1863,7 +1965,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   private async handleResetCommand(address: ChannelAddress, replyToMessageId?: string): Promise<void> {
     const store = this.getStore();
-    const binding = store.getChannelBinding(this.channelType, address.chatId);
+    const binding = store.getChannelBinding(this.channelType, address.chatId, this.profileId);
     if (!binding) {
       await this.sendAsPost(address, '当前群尚未绑定会话，请先私聊 Bot 使用 `/new:claude` 或 `/new:codex`。', replyToMessageId);
       return;
@@ -1881,12 +1983,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
     });
     store.upsertChannelBinding({
       channelType: this.channelType,
+      channelInstanceId: this.profileId,
       chatId: address.chatId,
       codepilotSessionId: session.id,
       workingDirectory: binding.workingDirectory,
       model: binding.model,
     });
-    const updated = store.getChannelBinding(this.channelType, address.chatId);
+    const updated = store.getChannelBinding(this.channelType, address.chatId, this.profileId);
     if (updated) {
       store.updateChannelBinding(updated.id, { mode: binding.mode, sdkSessionId: '' });
     }
@@ -1900,7 +2003,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const action = parts[1].toLowerCase();
     if (action !== 'allow' && action !== 'allow_session' && action !== 'deny') return false;
     const permissionRequestId = parts.slice(2).join(' ');
-    return handlePermissionCallback(`perm:${action}:${permissionRequestId}`, chatId, messageId);
+    return handlePermissionCallback(`perm:${action}:${permissionRequestId}`, chatId, messageId, {
+      channelType: this.channelType,
+      channelInstanceId: this.profileId,
+    });
   }
 
   private async handleModeCommand(bindingId: string, text: string, address: ChannelAddress, replyToMessageId?: string): Promise<void> {
@@ -1991,6 +2097,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         store.upsertPlanWorkflow({
           bindingId,
           channelType: this.channelType,
+          channelInstanceId: this.profileId,
           chatId: inbound.address.chatId,
           codepilotSessionId: binding.codepilotSessionId,
           status: 'awaiting_input',
@@ -2008,6 +2115,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       const workflow = store.upsertPlanWorkflow({
         bindingId,
         channelType: this.channelType,
+        channelInstanceId: this.profileId,
         chatId: inbound.address.chatId,
         codepilotSessionId: binding.codepilotSessionId,
         status: 'planning',
@@ -2026,6 +2134,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const workflow = store.upsertPlanWorkflow({
       bindingId,
       channelType: this.channelType,
+      channelInstanceId: this.profileId,
       chatId: inbound.address.chatId,
       codepilotSessionId: binding.codepilotSessionId,
       status: requestText ? 'planning' : 'awaiting_input',
@@ -2050,7 +2159,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const store = this.getStore();
     const workflow = store.getPlanWorkflow(workflowId);
     if (!workflow) return false;
-    const binding = Array.from(store.listChannelBindings(this.channelType)).find((item) => item.id === bindingId);
+    if (workflow.channelInstanceId !== this.profileId) return false;
+    const binding = Array.from(store.listChannelBindings(this.channelType))
+      .find((item) => item.channelInstanceId === this.profileId && item.id === bindingId);
     const runtime = binding ? (store.getSessionExt(binding.codepilotSessionId)?.runtime || 'claude') : 'claude';
     const routeKey = routeKeyForAddress(inbound.address);
     if (workflow.routeKey !== routeKey) {
@@ -2316,7 +2427,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
     const store = this.getStore();
     const request = store.getStructuredInputRequest(requestId);
-    if (!request) {
+    if (!request || request.channelInstanceId !== this.profileId) {
       return { toast: { type: 'warning', content: '问答请求不存在或已失效' } };
     }
 
@@ -2403,7 +2514,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
     const store = this.getStore();
     const workflow = store.getPlanWorkflow(workflowId);
-    if (!workflow) {
+    if (!workflow || workflow.channelInstanceId !== this.profileId) {
       return { toast: { type: 'warning', content: 'PLAN workflow not found' } };
     }
     const actionMessageId = resolveActionOpenMessageId(event as StructuredActionEvent);
@@ -2421,7 +2532,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return { toast: { type: 'warning', content: 'PLAN action already handled' } };
     }
 
-    const binding = store.getChannelBinding(this.channelType, workflow.chatId);
+    const binding = store.getChannelBinding(this.channelType, workflow.chatId, workflow.channelInstanceId);
     switch (action) {
       case 'execute':
         await this.patchActionCardSafely(
@@ -2488,7 +2599,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     const store = this.getStore();
     const workflow = store.getPlanWorkflow(workflowId);
-    if (!workflow) {
+    if (!workflow || workflow.channelInstanceId !== this.profileId) {
       return { toast: { type: 'warning', content: 'Claude plan workflow not found' } };
     }
 
@@ -2507,7 +2618,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return { toast: { type: 'warning', content: 'Claude plan action already handled' } };
     }
 
-    const binding = store.getChannelBinding(this.channelType, workflow.chatId);
+    const binding = store.getChannelBinding(this.channelType, workflow.chatId, workflow.channelInstanceId);
     const allowedPrompts = workflow.allowedPrompts || [];
     const approvalRequestId = workflow.approvalRequestId?.trim() || '';
 
@@ -2601,12 +2712,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
       });
       store.upsertChannelBinding({
         channelType: this.channelType,
+        channelInstanceId: this.profileId,
         chatId: workflow.chatId,
         codepilotSessionId: session.id,
         workingDirectory: binding.workingDirectory,
         model: binding.model,
       });
-      const updatedBinding = store.getChannelBinding(this.channelType, workflow.chatId);
+      const updatedBinding = store.getChannelBinding(this.channelType, workflow.chatId, this.profileId);
       if (updatedBinding) {
         store.updateChannelBinding(updatedBinding.id, {
           mode: 'code',
@@ -2670,7 +2782,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private async maybeRenameChat(chatId: string): Promise<void> {
     if (!this.restClient || this.pendingTitles.has(chatId)) return;
     const store = this.getStore();
-    const binding = store.getChannelBinding(this.channelType, chatId);
+    const binding = store.getChannelBinding(this.channelType, chatId, this.profileId);
     if (!binding) return;
     const ext = store.getSessionExt(binding.codepilotSessionId);
     if (!ext || ext.titleStatus === 'done' || ext.titleStatus === 'running') return;
@@ -2714,7 +2826,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   private computeChatDisplayName(chatId: string): string | null {
     const store = this.getStore();
-    const binding = store.getChannelBinding(this.channelType, chatId);
+    const binding = store.getChannelBinding(this.channelType, chatId, this.profileId);
     if (!binding) return null;
     const ext = store.getSessionExt(binding.codepilotSessionId);
     const runtime = ext?.runtime || 'claude';
@@ -2815,10 +2927,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
   }
 
   private getClientConfig(): { appId: string; appSecret: string; domain: lark.Domain } {
-    const { store } = getBridgeContext();
-    const appId = store.getSetting('bridge_feishu_app_id') || '';
-    const appSecret = store.getSetting('bridge_feishu_app_secret') || '';
-    const domain = store.getSetting('bridge_feishu_domain') === 'lark'
+    const store = getBridgeContext().store;
+    const appId = this.options.profile.appId || store.getSetting('bridge_feishu_app_id') || '';
+    const appSecret = this.options.profile.appSecret || store.getSetting('bridge_feishu_app_secret') || '';
+    const domain = (this.options.profile.domain || store.getSetting('bridge_feishu_domain') || '') === 'lark'
       ? lark.Domain.Lark
       : lark.Domain.Feishu;
     return { appId, appSecret, domain };
@@ -2870,7 +2982,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   private async sendAsInteractiveCard(address: ChannelAddress, text: string, replyToMessageId?: string): Promise<SendResult> {
     const content = buildCardContent(text);
-    const response = await this.sendLarkMessage(address, 'interactive', content, replyToMessageId);
+    const response = await this.sendLarkMessage(this.withInstance(address), 'interactive', content, replyToMessageId);
     assertLarkOk(response, 'im.message.sendInteractive');
     return {
       ok: true,
@@ -2881,7 +2993,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   private async sendAsPost(address: ChannelAddress, text: string, replyToMessageId?: string): Promise<SendResult> {
     const content = buildPostContent(text);
-    const response = await this.sendLarkMessage(address, 'post', content, replyToMessageId);
+    const response = await this.sendLarkMessage(this.withInstance(address), 'post', content, replyToMessageId);
     assertLarkOk(response, 'im.message.sendPost');
     return {
       ok: true,
@@ -2896,7 +3008,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
     replyToMessageId?: string,
     requestUuid?: string,
   ): Promise<{ messageId: string; openMessageId?: string }> {
-    const response = await this.sendLarkMessage(address, 'interactive', JSON.stringify(card), replyToMessageId, requestUuid);
+    const response = await this.sendLarkMessage(
+      this.withInstance(address),
+      'interactive',
+      JSON.stringify(card),
+      replyToMessageId,
+      requestUuid,
+    );
     assertLarkOk(response, 'im.message.sendInteractiveCard');
     return {
       messageId: response.data?.message_id || '',
@@ -3057,5 +3175,3 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
   }
 }
-
-registerAdapterFactory('feishu', () => new FeishuAdapter());

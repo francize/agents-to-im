@@ -330,12 +330,17 @@ function extractInlineToolResultImages(blocks: MessageContentBlock[]): Array<{
  * waiting for the permission to be resolved, so putting "1" behind the
  * session lock would deadlock.
  */
-function isNumericPermissionShortcut(channelType: string, rawText: string, chatId: string): boolean {
+function isNumericPermissionShortcut(
+  channelType: string,
+  rawText: string,
+  chatId: string,
+  channelInstanceId?: string,
+): boolean {
   if (channelType !== 'feishu' && channelType !== 'qq') return false;
   const normalized = rawText.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
   if (!/^[123]$/.test(normalized)) return false;
   const { store } = getBridgeContext();
-  const pending = store.listPendingPermissionLinksByChat(chatId);
+  const pending = store.listPendingPermissionLinksByChat(chatId, channelType, channelInstanceId);
   return pending.length > 0; // any pending → route to inline path
 }
 
@@ -659,31 +664,35 @@ export async function start(): Promise<void> {
     return;
   }
 
-  // Iterate all registered adapter types and create those that are enabled
-  for (const channelType of getRegisteredTypes()) {
-    const settingKey = `bridge_${channelType}_enabled`;
-    if (store.getSetting(settingKey) !== 'true') continue;
+  // Backward compatibility for adapters that still self-register through the
+  // factory registry. Explicitly registered adapters win and can coexist even
+  // when they share the same channelType.
+  if (state.adapters.size === 0) {
+    for (const channelType of getRegisteredTypes()) {
+      const settingKey = `bridge_${channelType}_enabled`;
+      if (store.getSetting(settingKey) !== 'true') continue;
 
-    const adapter = createAdapter(channelType);
-    if (!adapter) continue;
+      const adapter = createAdapter(channelType);
+      if (!adapter) continue;
 
-    const configError = adapter.validateConfig();
-    if (!configError) {
-      registerAdapter(adapter);
-    } else {
-      console.warn(`[bridge-manager] ${channelType} adapter not valid:`, configError);
+      const configError = adapter.validateConfig();
+      if (!configError) {
+        registerAdapter(adapter);
+      } else {
+        console.warn(`[bridge-manager] ${channelType} adapter not valid:`, configError);
+      }
     }
   }
 
   // Start all registered adapters, track how many succeeded
   let startedCount = 0;
-  for (const [type, adapter] of state.adapters) {
+  for (const [adapterId, adapter] of state.adapters) {
     try {
       await adapter.start();
-      console.log(`[bridge-manager] Started adapter: ${type}`);
+      console.log(`[bridge-manager] Started adapter: ${adapterId} (${adapter.channelType})`);
       startedCount++;
     } catch (err) {
-      console.error(`[bridge-manager] Failed to start adapter ${type}:`, err);
+      console.error(`[bridge-manager] Failed to start adapter ${adapterId}:`, err);
     }
   }
 
@@ -731,12 +740,12 @@ export async function stop(): Promise<void> {
   state.loopAborts.clear();
 
   // Stop all adapters
-  for (const [type, adapter] of state.adapters) {
+  for (const [adapterId, adapter] of state.adapters) {
     try {
       await adapter.stop();
-      console.log(`[bridge-manager] Stopped adapter: ${type}`);
+      console.log(`[bridge-manager] Stopped adapter: ${adapterId}`);
     } catch (err) {
-      console.error(`[bridge-manager] Error stopping adapter ${type}:`, err);
+      console.error(`[bridge-manager] Error stopping adapter ${adapterId}:`, err);
     }
   }
 
@@ -778,10 +787,13 @@ export function getStatus(): BridgeStatus {
   return {
     running: state.running,
     startedAt: state.startedAt,
-    adapters: Array.from(state.adapters.entries()).map(([type, adapter]) => {
-      const meta = state.adapterMeta.get(type);
+    adapters: Array.from(state.adapters.entries()).map(([adapterId, adapter]) => {
+      const meta = state.adapterMeta.get(adapterId);
       return {
+        adapterId,
         channelType: adapter.channelType,
+        profileId: adapter.profileId,
+        label: adapter.label,
         running: adapter.isRunning(),
         connectedAt: state.startedAt,
         lastMessageAt: meta?.lastMessageAt ?? null,
@@ -796,7 +808,7 @@ export function getStatus(): BridgeStatus {
  */
 export function registerAdapter(adapter: BaseChannelAdapter): void {
   const state = getState();
-  state.adapters.set(adapter.channelType, adapter);
+  state.adapters.set(adapter.adapterId, adapter);
 }
 
 /**
@@ -806,8 +818,9 @@ export function registerAdapter(adapter: BaseChannelAdapter): void {
  */
 function runAdapterLoop(adapter: BaseChannelAdapter): void {
   const state = getState();
+  const adapterKey = adapter.adapterId;
   const abort = new AbortController();
-  state.loopAborts.set(adapter.channelType, abort);
+  state.loopAborts.set(adapterKey, abort);
 
   (async () => {
     while (state.running && adapter.isRunning()) {
@@ -826,7 +839,12 @@ function runAdapterLoop(adapter: BaseChannelAdapter): void {
         if (
           msg.callbackData ||
           msg.text.trim().startsWith('/') ||
-          isNumericPermissionShortcut(adapter.channelType, msg.text.trim(), msg.address.chatId)
+          isNumericPermissionShortcut(
+            adapter.channelType,
+            msg.text.trim(),
+            msg.address.chatId,
+            msg.address.channelInstanceId,
+          )
         ) {
           await handleMessage(adapter, msg);
         } else {
@@ -842,11 +860,11 @@ function runAdapterLoop(adapter: BaseChannelAdapter): void {
       } catch (err) {
         if (abort.signal.aborted) break;
         const errMsg = err instanceof Error ? err.message : String(err);
-        console.error(`[bridge-manager] Error in ${adapter.channelType} loop:`, err);
+        console.error(`[bridge-manager] Error in ${adapterKey} loop:`, err);
         // Track last error per adapter
-        const meta = state.adapterMeta.get(adapter.channelType) || { lastMessageAt: null, lastError: null };
+        const meta = state.adapterMeta.get(adapterKey) || { lastMessageAt: null, lastError: null };
         meta.lastError = errMsg;
-        state.adapterMeta.set(adapter.channelType, meta);
+        state.adapterMeta.set(adapterKey, meta);
         // Brief delay to prevent tight error loops
         await new Promise(r => setTimeout(r, 1000));
       }
@@ -854,10 +872,10 @@ function runAdapterLoop(adapter: BaseChannelAdapter): void {
   })().catch(err => {
     if (!abort.signal.aborted) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[bridge-manager] ${adapter.channelType} loop crashed:`, err);
-      const meta = state.adapterMeta.get(adapter.channelType) || { lastMessageAt: null, lastError: null };
+      console.error(`[bridge-manager] ${adapterKey} loop crashed:`, err);
+      const meta = state.adapterMeta.get(adapterKey) || { lastMessageAt: null, lastError: null };
       meta.lastError = errMsg;
-      state.adapterMeta.set(adapter.channelType, meta);
+      state.adapterMeta.set(adapterKey, meta);
     }
   });
 }
@@ -873,9 +891,9 @@ async function handleMessage(
 
   // Update lastMessageAt for this adapter
   const adapterState = getState();
-  const meta = adapterState.adapterMeta.get(adapter.channelType) || { lastMessageAt: null, lastError: null };
+  const meta = adapterState.adapterMeta.get(adapter.adapterId) || { lastMessageAt: null, lastError: null };
   meta.lastMessageAt = new Date().toISOString();
-  adapterState.adapterMeta.set(adapter.channelType, meta);
+  adapterState.adapterMeta.set(adapter.adapterId, meta);
 
   // Acknowledge the update offset after processing completes (or fails).
   // This ensures the adapter only advances its committed offset once the
@@ -888,7 +906,15 @@ async function handleMessage(
 
   // Handle callback queries (permission buttons)
   if (msg.callbackData) {
-    const handled = broker.handlePermissionCallback(msg.callbackData, msg.address.chatId, msg.callbackMessageId);
+    const handled = broker.handlePermissionCallback(
+      msg.callbackData,
+      msg.address.chatId,
+      msg.callbackMessageId,
+      {
+        channelType: msg.address.channelType,
+        channelInstanceId: msg.address.channelInstanceId,
+      },
+    );
     if (handled) {
       // Send confirmation
       const confirmMsg: OutboundMessage = {
@@ -933,13 +959,20 @@ async function handleMessage(
     // eslint-disable-next-line no-control-regex
     const normalized = rawText.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
     if (/^[123]$/.test(normalized)) {
-      const pendingLinks = store.listPendingPermissionLinksByChat(msg.address.chatId);
+      const pendingLinks = store.listPendingPermissionLinksByChat(
+        msg.address.chatId,
+        msg.address.channelType,
+        msg.address.channelInstanceId,
+      );
       if (pendingLinks.length === 1) {
         const actionMap: Record<string, string> = { '1': 'allow', '2': 'allow_session', '3': 'deny' };
         const action = actionMap[normalized];
         const permId = pendingLinks[0].permissionRequestId;
         const callbackData = `perm:${action}:${permId}`;
-        const handled = broker.handlePermissionCallback(callbackData, msg.address.chatId);
+        const handled = broker.handlePermissionCallback(callbackData, msg.address.chatId, undefined, {
+          channelType: msg.address.channelType,
+          channelInstanceId: msg.address.channelInstanceId,
+        });
         const label = normalized === '1' ? 'Allow' : normalized === '2' ? 'Allow Session' : 'Deny';
         if (handled) {
           await deliver(adapter, {
@@ -991,6 +1024,7 @@ async function handleMessage(
     console.warn(`[bridge-manager] Input truncated from ${rawText.length} to ${text.length} chars for chat ${msg.address.chatId}`);
     store.insertAuditLog({
       channelType: adapter.channelType,
+      channelInstanceId: msg.address.channelInstanceId || adapter.profileId,
       chatId: msg.address.chatId,
       direction: 'inbound',
       messageId: msg.messageId,
@@ -1010,6 +1044,7 @@ async function handleMessage(
     const workflow = store.upsertPlanWorkflow({
       bindingId: binding.id,
       channelType: adapter.channelType,
+      channelInstanceId: msg.address.channelInstanceId || adapter.profileId,
       chatId: msg.address.chatId,
       codepilotSessionId: binding.codepilotSessionId,
       status: 'planning',
@@ -1033,7 +1068,8 @@ async function handleMessage(
   const turnStartedAtMs = Date.now();
   const sentAutoImagePaths = new Set<string>();
   const sentInlineToolResultImageDigests = new Set<string>();
-  const autoImageSendEnabled = store.getSetting('bridge_feishu_auto_image_send') !== 'false';
+  const autoImageSendEnabled = adapter.allowsAutoImageSend?.()
+    ?? (store.getSetting('bridge_feishu_auto_image_send') !== 'false');
 
   // Notify adapter that message processing is starting (e.g., typing indicator)
   adapter.onMessageStart?.(msg.address);
@@ -1672,6 +1708,7 @@ async function handleMessage(
               store.upsertStructuredInputRequest({
                 requestId: request.requestId,
                 channelType: adapter.channelType,
+                channelInstanceId: msg.address.channelInstanceId || adapter.profileId,
                 chatId: msg.address.chatId,
                 codepilotSessionId: binding.codepilotSessionId,
                 address: msg.address,
@@ -2036,6 +2073,7 @@ async function handleCommand(
   if (dangerCheck.dangerous) {
     store.insertAuditLog({
       channelType: adapter.channelType,
+      channelInstanceId: msg.address.channelInstanceId || adapter.profileId,
       chatId: msg.address.chatId,
       direction: 'inbound',
       messageId: msg.messageId,
@@ -2147,7 +2185,9 @@ async function handleCommand(
     }
 
     case '/sessions': {
-      const bindings = router.listBindings(adapter.channelType);
+      const bindings = router
+        .listBindings(adapter.channelType)
+        .filter((binding) => binding.channelInstanceId === adapter.profileId);
       if (bindings.length === 0) {
         response = 'No sessions found.';
       } else {
@@ -2186,7 +2226,10 @@ async function handleCommand(
         break;
       }
       const callbackData = `perm:${permAction}:${permId}`;
-      const handled = broker.handlePermissionCallback(callbackData, msg.address.chatId);
+      const handled = broker.handlePermissionCallback(callbackData, msg.address.chatId, undefined, {
+        channelType: msg.address.channelType,
+        channelInstanceId: msg.address.channelInstanceId,
+      });
       if (handled) {
         response = `Permission ${permAction}: recorded.`;
       } else {

@@ -93,53 +93,64 @@ npm run build:all
 mkdir -p ~/.agents-to-im
 cp config.env.example ~/.agents-to-im/config.env
 $EDITOR ~/.agents-to-im/config.env
+
+# 修改配置或代码后的本地快速重启
+bash scripts/daemon.sh restart
 ```
 
-构建完成后，也可以直接运行交互式配置向导：
+推荐的安装 / 运行入口：
 
 ```bash
-node dist/cli-bin.mjs
+npx github:francize/agents-to-im
 ```
 
 必填配置：
 
 - `CTI_DEFAULT_WORKDIR`
-- `CTI_FEISHU_APP_ID`
-- `CTI_FEISHU_APP_SECRET`
+- `CTI_FEISHU_PROFILE_IDS`
+- `CTI_FEISHU_PROFILE_<ID>_APP_ID`
+- `CTI_FEISHU_PROFILE_<ID>_APP_SECRET`
+- `CTI_RUNTIME_CLAUDE_FEISHU_PROFILE`
+- `CTI_RUNTIME_CODEX_FEISHU_PROFILE`
 
 常见可选配置：
 
 - `CTI_DEFAULT_MODE`
-- `CTI_FEISHU_DOMAIN`
-- `CTI_FEISHU_ALLOWED_USERS`
+- `CTI_FEISHU_PROFILE_<ID>_DOMAIN`
+- `CTI_FEISHU_PROFILE_<ID>_ALLOWED_USERS`
+- `CTI_FEISHU_PROFILE_<ID>_TOOL_OUTPUT_CARDS`
+- `CTI_FEISHU_PROFILE_<ID>_AUTO_IMAGE_SEND`
+- `CTI_FEISHU_PROFILE_<ID>_LABEL`
 - `CTI_CLAUDE_DEFAULT_MODEL`
 - `CTI_CODEX_DEFAULT_MODEL`
 - `CTI_CLAUDE_CODE_EXECUTABLE`
 - `CTI_AUTO_APPROVE`
-- `CTI_FEISHU_TOOL_OUTPUT_CARDS`
-- `CTI_FEISHU_AUTO_IMAGE_SEND`
 
 Codex 会话会直接复用本地 `~/.codex/config.toml` 或 `$CODEX_HOME/config.toml` 中的认证、trusted 目录、sandbox、approval policy 和默认模型行为。
 
 ### 3. 启动 bridge
 
 ```bash
-node dist/cli-bin.mjs start
+npx github:francize/agents-to-im start
 ```
 
 常用本地命令：
 
 ```bash
-node dist/cli-bin.mjs status
-node dist/cli-bin.mjs doctor
-node dist/cli-bin.mjs logs 200
-node dist/cli-bin.mjs stop
+npx github:francize/agents-to-im restart
+npx github:francize/agents-to-im status
+npx github:francize/agents-to-im doctor
+npx github:francize/agents-to-im logs 200
+npx github:francize/agents-to-im stop
+bash scripts/daemon.sh restart
 ```
+
+修改 `config.env`、更新代码、或重新发布飞书事件 / 权限后，优先执行 `restart`，不要手工 `stop && start`。
 
 ### 4. 5 分钟验证
 
-1. 运行 `node dist/cli-bin.mjs doctor`
-2. 运行 `node dist/cli-bin.mjs status`，确认 bridge 正在运行
+1. 运行 `npx github:francize/agents-to-im doctor`
+2. 运行 `npx github:francize/agents-to-im status`，确认 bridge 正在运行
 3. 打开 `http://127.0.0.1:3456`，确认本地状态面板可访问
 4. 私聊 Bot，发送 `/new:claude` 或 `/new:codex`
 5. 如果是 Claude，会先在私聊里选择 mode；随后确认 Bot 自动创建了一个新群、完成会话绑定，并在群里继续回复
@@ -214,7 +225,7 @@ bridge 会把状态保存在 `~/.agents-to-im/`，所以一个群是可恢复的
 
 ## 排障与参考文档
 
-- bridge 启动失败：先运行 `node dist/cli-bin.mjs doctor`
+- bridge 启动失败：先运行 `npx github:francize/agents-to-im doctor`
 - 私聊 Bot 没反应：检查应用是否已发布、Bot 是否已开启、长连接是否已配置
 - `/new:*` 建了群但没有绑定成功：优先检查应用权限和本地 runtime 可用性
 - 流式卡片退化成普通消息：检查 CardKit 和 message update 权限

@@ -15,7 +15,7 @@ import {
   PendingStructuredInputs,
   type PermissionResolution,
 } from './permission-gateway.js';
-import { sseEvent } from './sse-utils.js';
+import { emitCanonicalTurnEvent } from './sse-utils.js';
 
 const MIME_EXT: Record<string, string> = {
   'image/png': '.png',
@@ -546,10 +546,13 @@ export class CodexProvider implements LLMProvider {
         wakeQueue = null;
       });
 
-      controller.enqueue(sseEvent('status', {
-        session_id: threadId,
-        ...(bootstrap.model ? { model: bootstrap.model } : {}),
-      }));
+      emitCanonicalTurnEvent(controller, {
+        type: 'status',
+        data: {
+          session_id: threadId,
+          ...(bootstrap.model ? { model: bootstrap.model } : {}),
+        },
+      });
 
       const { input, tempFiles: createdTemps } = await buildUserInput(params.prompt, params.files);
       tempFiles.push(...createdTemps);
@@ -622,14 +625,17 @@ export class CodexProvider implements LLMProvider {
           case 'thread/tokenUsage/updated':
             tokenUsage = mapTokenUsage((paramsRecord.tokenUsage as JsonRecord | undefined)?.last as TokenUsageBreakdown | undefined);
             if (tokenUsage) {
-              controller.enqueue(sseEvent('activity_event', {
-                kind: 'context_usage',
-                id: `context:${activeTurnId || threadId}`,
-                turnId: activeTurnId || undefined,
-                inputTokens: tokenUsage.input_tokens,
-                outputTokens: tokenUsage.output_tokens,
-                cacheReadInputTokens: tokenUsage.cache_read_input_tokens,
-              } satisfies ActivityEvent));
+              emitCanonicalTurnEvent(controller, {
+                type: 'activity_event',
+                data: {
+                  kind: 'context_usage',
+                  id: `context:${activeTurnId || threadId}`,
+                  turnId: activeTurnId || undefined,
+                  inputTokens: tokenUsage.input_tokens,
+                  outputTokens: tokenUsage.output_tokens,
+                  cacheReadInputTokens: tokenUsage.cache_read_input_tokens,
+                } satisfies ActivityEvent,
+              });
             }
             break;
           case 'turn/started':
@@ -642,13 +648,13 @@ export class CodexProvider implements LLMProvider {
             break;
           case 'item/agentMessage/delta':
             if (typeof paramsRecord.delta === 'string') {
-              controller.enqueue(sseEvent('text', paramsRecord.delta));
+              emitCanonicalTurnEvent(controller, { type: 'text', data: paramsRecord.delta });
             }
             break;
           case 'item/reasoning/textDelta':
           case 'item/reasoning/summaryTextDelta':
             if (typeof paramsRecord.delta === 'string') {
-              controller.enqueue(sseEvent('status', { reasoning: paramsRecord.delta }));
+              emitCanonicalTurnEvent(controller, { type: 'status', data: { reasoning: paramsRecord.delta } });
             }
             break;
           case 'item/commandExecution/outputDelta':
@@ -665,11 +671,11 @@ export class CodexProvider implements LLMProvider {
             this.handleToolCallDelta(controller, paramsRecord, activeTurnId || extractTurnId(message));
             break;
           case 'turn/plan/updated':
-            controller.enqueue(sseEvent('plan_state', paramsRecord));
+            emitCanonicalTurnEvent(controller, { type: 'plan_state', data: paramsRecord });
             break;
           case 'item/plan/delta':
             if (typeof paramsRecord.delta === 'string') {
-              controller.enqueue(sseEvent('plan_delta', paramsRecord.delta));
+              emitCanonicalTurnEvent(controller, { type: 'plan_delta', data: paramsRecord.delta });
             }
             break;
           case 'item/completed':
@@ -683,7 +689,7 @@ export class CodexProvider implements LLMProvider {
             );
             break;
           case 'serverRequest/resolved':
-            controller.enqueue(sseEvent('server_request_resolved', paramsRecord));
+            emitCanonicalTurnEvent(controller, { type: 'server_request_resolved', data: paramsRecord });
             break;
           case 'codex/event/exec_command_begin':
           case 'codex/event/exec_command_output_delta':
@@ -699,19 +705,25 @@ export class CodexProvider implements LLMProvider {
               activeTurnId || extractTurnId(message),
             );
             if (legacyEvent) {
-              controller.enqueue(sseEvent('activity_event', legacyEvent));
+              emitCanonicalTurnEvent(controller, { type: 'activity_event', data: legacyEvent });
             }
             break;
           }
           case 'error':
-            controller.enqueue(sseEvent('error', String((paramsRecord.error as JsonRecord | undefined)?.message || 'Turn failed')));
+            emitCanonicalTurnEvent(controller, {
+              type: 'error',
+              data: String((paramsRecord.error as JsonRecord | undefined)?.message || 'Turn failed'),
+            });
             break;
           case 'turn/completed':
-            controller.enqueue(sseEvent('result', {
-              ...(tokenUsage ? { usage: tokenUsage } : {}),
-              session_id: threadId,
-              is_error: !!(paramsRecord.turn as JsonRecord | undefined)?.error,
-            }));
+            emitCanonicalTurnEvent(controller, {
+              type: 'result',
+              data: {
+                ...(tokenUsage ? { usage: tokenUsage } : {}),
+                session_id: threadId,
+                is_error: !!(paramsRecord.turn as JsonRecord | undefined)?.error,
+              },
+            });
             controller.close();
             return;
         }
@@ -722,7 +734,7 @@ export class CodexProvider implements LLMProvider {
       const message = error instanceof Error ? error.message : String(error);
       console.error('[codex-provider] Error:', error instanceof Error ? error.stack || error.message : error);
       try {
-        controller.enqueue(sseEvent('error', message));
+        emitCanonicalTurnEvent(controller, { type: 'error', data: message });
         controller.close();
       } catch {
         // no-op
@@ -800,7 +812,7 @@ export class CodexProvider implements LLMProvider {
 
     if (message.method === 'item/tool/requestUserInput') {
       const request = parseStructuredInputRequest(String(message.id), params);
-      controller.enqueue(sseEvent('structured_input_request', request));
+      emitCanonicalTurnEvent(controller, { type: 'structured_input_request', data: request });
       const response = await this.pendingStructuredInputs.waitFor(request.requestId);
       await client.respond(message.id, response);
       return;
@@ -809,15 +821,18 @@ export class CodexProvider implements LLMProvider {
     if (isApprovalRequestMethod(message.method)) {
       const requestId = String(message.id);
       const { toolName, toolInput } = approvalToolPayload(message.method, params);
-      controller.enqueue(sseEvent('approval_request', {
-        permissionRequestId: requestId,
-        toolName,
-        toolInput,
-        suggestions: [],
-        method: message.method,
-        threadId: typeof params.threadId === 'string' ? params.threadId : '',
-        turnId: typeof params.turnId === 'string' ? params.turnId : '',
-      }));
+      emitCanonicalTurnEvent(controller, {
+        type: 'approval_request',
+        data: {
+          permissionRequestId: requestId,
+          toolName,
+          toolInput,
+          suggestions: [],
+          method: message.method,
+          threadId: typeof params.threadId === 'string' ? params.threadId : '',
+          turnId: typeof params.turnId === 'string' ? params.turnId : '',
+        },
+      });
       const resolution = await this.pendingApprovals.waitFor(requestId);
       await client.respond(message.id, approvalResponseFor(message.method, params, resolution));
       return;
@@ -857,14 +872,14 @@ export class CodexProvider implements LLMProvider {
       case 'agentMessage': {
         const text = typeof item.text === 'string' ? item.text : '';
         if (text) {
-          controller.enqueue(sseEvent('text_segment', text));
+          emitCanonicalTurnEvent(controller, { type: 'text_segment', data: text });
         }
         break;
       }
       case 'plan': {
         const text = typeof item.text === 'string' ? item.text : '';
         if (text) {
-          controller.enqueue(sseEvent('plan_result', text));
+          emitCanonicalTurnEvent(controller, { type: 'plan_result', data: text });
         }
         break;
       }
@@ -874,27 +889,36 @@ export class CodexProvider implements LLMProvider {
         const output = typeof item.aggregatedOutput === 'string' ? item.aggregatedOutput : '';
         const exitCode = typeof item.exitCode === 'number' ? item.exitCode : null;
         const isError = exitCode !== null && exitCode !== 0;
-        controller.enqueue(sseEvent('activity_event', {
-          kind: 'command_execution',
-          id: toolId,
-          turnId: resolvedTurnId,
-          status: isError ? 'failed' : 'completed',
-          command,
-          cwd: typeof item.cwd === 'string' ? item.cwd : undefined,
-          output,
-          exitCode,
-          durationMs: typeof item.durationMs === 'number' ? item.durationMs : null,
-        } satisfies ActivityEvent));
-        controller.enqueue(sseEvent('tool_use', {
-          id: toolId,
-          name: 'Bash',
-          input: { command, cwd: item.cwd },
-        }));
-        controller.enqueue(sseEvent('tool_result', {
-          tool_use_id: toolId,
-          content: output || (isError ? `Exit code: ${exitCode}` : 'Done'),
-          is_error: isError,
-        }));
+        emitCanonicalTurnEvent(controller, {
+          type: 'activity_event',
+          data: {
+            kind: 'command_execution',
+            id: toolId,
+            turnId: resolvedTurnId,
+            status: isError ? 'failed' : 'completed',
+            command,
+            cwd: typeof item.cwd === 'string' ? item.cwd : undefined,
+            output,
+            exitCode,
+            durationMs: typeof item.durationMs === 'number' ? item.durationMs : null,
+          } satisfies ActivityEvent,
+        });
+        emitCanonicalTurnEvent(controller, {
+          type: 'tool_use',
+          data: {
+            id: toolId,
+            name: 'Bash',
+            input: { command, cwd: item.cwd },
+          },
+        });
+        emitCanonicalTurnEvent(controller, {
+          type: 'tool_result',
+          data: {
+            tool_use_id: toolId,
+            content: output || (isError ? `Exit code: ${exitCode}` : 'Done'),
+            is_error: isError,
+          },
+        });
         break;
       }
       case 'fileChange': {
@@ -907,24 +931,33 @@ export class CodexProvider implements LLMProvider {
             return `${String(record.kind || 'update')}: ${String(record.path || '')}`;
           })
           .join('\n');
-        controller.enqueue(sseEvent('activity_event', {
-          kind: 'file_change',
-          id: toolId,
-          turnId: resolvedTurnId,
-          status: 'completed',
-          summary: summary || '已完成文件修改',
-          changes: entries,
-        } satisfies ActivityEvent));
-        controller.enqueue(sseEvent('tool_use', {
-          id: toolId,
-          name: 'Edit',
-          input: { files: changes },
-        }));
-        controller.enqueue(sseEvent('tool_result', {
-          tool_use_id: toolId,
-          content: summary || 'File changes applied',
-          is_error: false,
-        }));
+        emitCanonicalTurnEvent(controller, {
+          type: 'activity_event',
+          data: {
+            kind: 'file_change',
+            id: toolId,
+            turnId: resolvedTurnId,
+            status: 'completed',
+            summary: summary || '已完成文件修改',
+            changes: entries,
+          } satisfies ActivityEvent,
+        });
+        emitCanonicalTurnEvent(controller, {
+          type: 'tool_use',
+          data: {
+            id: toolId,
+            name: 'Edit',
+            input: { files: changes },
+          },
+        });
+        emitCanonicalTurnEvent(controller, {
+          type: 'tool_result',
+          data: {
+            tool_use_id: toolId,
+            content: summary || 'File changes applied',
+            is_error: false,
+          },
+        });
         break;
       }
       case 'mcpToolCall': {
@@ -942,25 +975,31 @@ export class CodexProvider implements LLMProvider {
           'tool_call',
         );
         if (activity) {
-          controller.enqueue(sseEvent('activity_event', activity));
+          emitCanonicalTurnEvent(controller, { type: 'activity_event', data: activity });
         }
-        controller.enqueue(sseEvent('tool_use', {
-          id: toolId,
-          name: `mcp__${server}__${tool}`,
-          input: item.arguments,
-        }));
-        controller.enqueue(sseEvent('tool_result', {
-          tool_use_id: toolId,
-          content: typeof content === 'string' ? content : content ? JSON.stringify(content) : String(error?.message || 'Done'),
-          is_error: !!error,
-        }));
+        emitCanonicalTurnEvent(controller, {
+          type: 'tool_use',
+          data: {
+            id: toolId,
+            name: `mcp__${server}__${tool}`,
+            input: item.arguments,
+          },
+        });
+        emitCanonicalTurnEvent(controller, {
+          type: 'tool_result',
+          data: {
+            tool_use_id: toolId,
+            content: typeof content === 'string' ? content : content ? JSON.stringify(content) : String(error?.message || 'Done'),
+            is_error: !!error,
+          },
+        });
         break;
       }
       case 'reasoning': {
         const parts = Array.isArray(item.content) ? item.content.filter((part): part is string => typeof part === 'string') : [];
         const text = parts.join('\n').trim();
         if (text) {
-          controller.enqueue(sseEvent('status', { reasoning: text, turn_id: resolvedTurnId }));
+          emitCanonicalTurnEvent(controller, { type: 'status', data: { reasoning: text, turn_id: resolvedTurnId } });
         }
         break;
       }
@@ -975,25 +1014,31 @@ export class CodexProvider implements LLMProvider {
     if (!item) return;
     const itemType = normalizeItemType(item.type);
     if (itemType === 'commandExecution') {
-      controller.enqueue(sseEvent('activity_event', {
-        kind: 'command_execution',
-        id: typeof item.id === 'string' ? item.id : `command:${turnId || Date.now()}`,
-        turnId: turnId || undefined,
-        status: 'running',
-        command: typeof item.command === 'string' ? item.command : '',
-        cwd: typeof item.cwd === 'string' ? item.cwd : undefined,
-      } satisfies ActivityEvent));
+      emitCanonicalTurnEvent(controller, {
+        type: 'activity_event',
+        data: {
+          kind: 'command_execution',
+          id: typeof item.id === 'string' ? item.id : `command:${turnId || Date.now()}`,
+          turnId: turnId || undefined,
+          status: 'running',
+          command: typeof item.command === 'string' ? item.command : '',
+          cwd: typeof item.cwd === 'string' ? item.cwd : undefined,
+        } satisfies ActivityEvent,
+      });
       return;
     }
     if (itemType === 'fileChange') {
-      controller.enqueue(sseEvent('activity_event', {
-        kind: 'file_change',
-        id: typeof item.id === 'string' ? item.id : `file-change:${turnId || Date.now()}`,
-        turnId: turnId || undefined,
-        status: 'running',
-        summary: '正在修改文件…',
-        changes: extractFileChangeEntries(item.changes),
-      } satisfies ActivityEvent));
+      emitCanonicalTurnEvent(controller, {
+        type: 'activity_event',
+        data: {
+          kind: 'file_change',
+          id: typeof item.id === 'string' ? item.id : `file-change:${turnId || Date.now()}`,
+          turnId: turnId || undefined,
+          status: 'running',
+          summary: '正在修改文件…',
+          changes: extractFileChangeEntries(item.changes),
+        } satisfies ActivityEvent,
+      });
       return;
     }
     if (itemType === 'mcpToolCall') {
@@ -1008,7 +1053,7 @@ export class CodexProvider implements LLMProvider {
         'tool_call',
       );
       if (activity) {
-        controller.enqueue(sseEvent('activity_event', activity));
+        emitCanonicalTurnEvent(controller, { type: 'activity_event', data: activity });
       }
     }
   }
@@ -1018,15 +1063,18 @@ export class CodexProvider implements LLMProvider {
     params: JsonRecord,
     turnId: string,
   ): void {
-    controller.enqueue(sseEvent('activity_event', {
-      kind: 'command_execution',
-      id: firstString(params.itemId, params.id) || `command:${turnId || Date.now()}`,
-      turnId: turnId || undefined,
-      status: 'running',
-      command: firstString(params.command, params.cmd),
-      cwd: firstString(params.cwd) || undefined,
-      output: firstString(params.delta, params.output) || undefined,
-    } satisfies ActivityEvent));
+    emitCanonicalTurnEvent(controller, {
+      type: 'activity_event',
+      data: {
+        kind: 'command_execution',
+        id: firstString(params.itemId, params.id) || `command:${turnId || Date.now()}`,
+        turnId: turnId || undefined,
+        status: 'running',
+        command: firstString(params.command, params.cmd),
+        cwd: firstString(params.cwd) || undefined,
+        output: firstString(params.delta, params.output) || undefined,
+      } satisfies ActivityEvent,
+    });
   }
 
   private handleFileChangeDelta(
@@ -1036,14 +1084,17 @@ export class CodexProvider implements LLMProvider {
   ): void {
     const changes = extractFileChangeEntries(params.changes);
     const summary = firstString(params.delta, params.summary) || '正在修改文件…';
-    controller.enqueue(sseEvent('activity_event', {
-      kind: 'file_change',
-      id: firstString(params.itemId, params.id) || `file-change:${turnId || Date.now()}`,
-      turnId: turnId || undefined,
-      status: 'running',
-      summary,
-      changes,
-    } satisfies ActivityEvent));
+    emitCanonicalTurnEvent(controller, {
+      type: 'activity_event',
+      data: {
+        kind: 'file_change',
+        id: firstString(params.itemId, params.id) || `file-change:${turnId || Date.now()}`,
+        turnId: turnId || undefined,
+        status: 'running',
+        summary,
+        changes,
+      } satisfies ActivityEvent,
+    });
   }
 
   private handleToolCallDelta(
@@ -1059,7 +1110,7 @@ export class CodexProvider implements LLMProvider {
       'tool_call',
     );
     if (activity) {
-      controller.enqueue(sseEvent('activity_event', activity));
+      emitCanonicalTurnEvent(controller, { type: 'activity_event', data: activity });
     }
   }
 }

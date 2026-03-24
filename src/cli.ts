@@ -5,6 +5,7 @@
  * Usage:
  *   npx github:francize/agents-to-im        → Interactive setup wizard
  *   npx github:francize/agents-to-im start   → Start the bridge
+ *   npx github:francize/agents-to-im restart → Restart the bridge
  *   npx github:francize/agents-to-im stop    → Stop the bridge
  *   npx github:francize/agents-to-im status  → Show bridge status
  *   npx github:francize/agents-to-im doctor  → Run diagnostics
@@ -212,13 +213,17 @@ async function setupWizard() {
     `CTI_DEFAULT_WORKDIR=${workDir}`,
     `CTI_DEFAULT_MODE=${mode}`,
     '',
-    '# Feishu / Lark app credentials',
-    `CTI_FEISHU_APP_ID=${appId}`,
-    `CTI_FEISHU_APP_SECRET=${actualSecret || ''}`,
+    '# Feishu / Lark profiles',
+    'CTI_FEISHU_PROFILE_IDS=default',
+    `CTI_FEISHU_PROFILE_DEFAULT_APP_ID=${appId}`,
+    `CTI_FEISHU_PROFILE_DEFAULT_APP_SECRET=${actualSecret || ''}`,
+    `CTI_FEISHU_PROFILE_DEFAULT_LABEL=Default Bot`,
+    'CTI_RUNTIME_CLAUDE_FEISHU_PROFILE=default',
+    'CTI_RUNTIME_CODEX_FEISHU_PROFILE=default',
   ];
 
-  if (domain) lines.push(`CTI_FEISHU_DOMAIN=${domain}`);
-  if (allowedUsers) lines.push(`CTI_FEISHU_ALLOWED_USERS=${allowedUsers}`);
+  if (domain) lines.push(`CTI_FEISHU_PROFILE_DEFAULT_DOMAIN=${domain}`);
+  if (allowedUsers) lines.push(`CTI_FEISHU_PROFILE_DEFAULT_ALLOWED_USERS=${allowedUsers}`);
   if (autoApprove) lines.push('', 'CTI_AUTO_APPROVE=true');
   if (claudeModel) lines.push('', `CTI_CLAUDE_DEFAULT_MODEL=${claudeModel}`);
   if (claudeCliPath) lines.push(`CTI_CLAUDE_CODE_EXECUTABLE=${claudeCliPath}`);
@@ -245,6 +250,7 @@ async function setupWizard() {
   console.log(`  ${c.dim}Config:${c.reset}     ${CONFIG_PATH}`);
   console.log('');
   info(`Start the bridge: ${c.cyan}npx github:francize/agents-to-im start${c.reset}`);
+  info(`Quick restart:     ${c.cyan}npx github:francize/agents-to-im restart${c.reset}`);
   info(`Check status:     ${c.cyan}npx github:francize/agents-to-im status${c.reset}`);
   info(`Run diagnostics:  ${c.cyan}npx github:francize/agents-to-im doctor${c.reset}`);
   console.log('');
@@ -332,8 +338,18 @@ function runDoctor() {
     // Check required fields
     try {
       const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
-      const hasAppId = content.includes('CTI_FEISHU_APP_ID=') && !content.includes('CTI_FEISHU_APP_ID=your-app-id');
-      const hasSecret = content.includes('CTI_FEISHU_APP_SECRET=') && !content.includes('CTI_FEISHU_APP_SECRET=your-app-secret');
+      const hasAppId = (
+        (content.includes('CTI_FEISHU_PROFILE_DEFAULT_APP_ID=')
+          && !content.includes('CTI_FEISHU_PROFILE_DEFAULT_APP_ID=your-app-id'))
+        || (content.includes('CTI_FEISHU_APP_ID=')
+          && !content.includes('CTI_FEISHU_APP_ID=your-app-id'))
+      );
+      const hasSecret = (
+        (content.includes('CTI_FEISHU_PROFILE_DEFAULT_APP_SECRET=')
+          && !content.includes('CTI_FEISHU_PROFILE_DEFAULT_APP_SECRET=your-app-secret'))
+        || (content.includes('CTI_FEISHU_APP_SECRET=')
+          && !content.includes('CTI_FEISHU_APP_SECRET=your-app-secret'))
+      );
       if (hasAppId) { ok('Feishu App ID configured'); } else { fail('Feishu App ID missing or placeholder'); }
       if (hasSecret) { ok('Feishu App Secret configured'); } else { fail('Feishu App Secret missing or placeholder'); }
     } catch { fail('Cannot read config file'); }
@@ -423,6 +439,9 @@ switch (command) {
   case 'start':
     delegateToDaemon('start');
     break;
+  case 'restart':
+    delegateToDaemon('restart');
+    break;
   case 'stop':
     delegateToDaemon('stop');
     break;
@@ -452,6 +471,7 @@ switch (command) {
     console.log('  Commands:');
     console.log(`    ${c.cyan}(none)${c.reset}    Interactive setup wizard`);
     console.log(`    ${c.cyan}start${c.reset}     Start the bridge daemon`);
+    console.log(`    ${c.cyan}restart${c.reset}   Restart the bridge daemon`);
     console.log(`    ${c.cyan}stop${c.reset}      Stop the bridge daemon`);
     console.log(`    ${c.cyan}status${c.reset}    Show bridge status`);
     console.log(`    ${c.cyan}doctor${c.reset}    Run diagnostics`);

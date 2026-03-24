@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { CTI_HOME } from '../config.js';
+import type { Config } from '../config.js';
 import { MultiplexLLMProvider } from '../multiplex-llm-provider.js';
 import { PendingPermissions } from '../permission-gateway.js';
 import { JsonFileStore } from '../store.js';
@@ -18,6 +19,25 @@ function makeSettings(): Map<string, string> {
     ['bridge_default_mode', 'code'],
     ['bridge_default_runtime', 'claude'],
   ]);
+}
+
+function makeConfig(): Config {
+  return {
+    defaultWorkDir: '/tmp',
+    defaultMode: 'code',
+    feishuProfiles: [
+      {
+        id: 'default',
+        label: '默认 Bot',
+        toolOutputCards: true,
+        autoImageSend: true,
+      },
+    ],
+    runtimeFeishuProfiles: {
+      claude: 'default',
+      codex: 'default',
+    },
+  };
 }
 
 async function collectStream(stream: ReadableStream<string>): Promise<string[]> {
@@ -42,10 +62,7 @@ describe('MultiplexLLMProvider', () => {
       runtime: 'codex',
       model: 'gpt-5-codex',
     });
-    const provider = new MultiplexLLMProvider(store, new PendingPermissions(), {
-      defaultWorkDir: '/tmp',
-      defaultMode: 'code',
-    });
+    const provider = new MultiplexLLMProvider(store, new PendingPermissions(), makeConfig());
 
     let selectedRuntime = '';
     (provider as any).getProvider = async (runtime: string) => {
@@ -75,10 +92,7 @@ describe('MultiplexLLMProvider', () => {
       runtime: 'claude',
       model: 'claude-sonnet-4-6',
     });
-    const provider = new MultiplexLLMProvider(store, new PendingPermissions(), {
-      defaultWorkDir: '/tmp',
-      defaultMode: 'code',
-    });
+    const provider = new MultiplexLLMProvider(store, new PendingPermissions(), makeConfig());
 
     (provider as any).getProvider = async () => ({
       streamChat: () => new ReadableStream<string>({
@@ -103,10 +117,7 @@ describe('MultiplexLLMProvider', () => {
       runtime: 'codex',
       model: 'gpt-5-codex',
     });
-    const provider = new MultiplexLLMProvider(store, new PendingPermissions(), {
-      defaultWorkDir: '/tmp',
-      defaultMode: 'code',
-    });
+    const provider = new MultiplexLLMProvider(store, new PendingPermissions(), makeConfig());
 
     assert.deepEqual(provider.getSessionCapabilities(claudeSession.id), {
       nativePlanProtocol: false,

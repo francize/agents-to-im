@@ -23,7 +23,12 @@ import type {
   OutboundRefInput,
   UpsertChannelBindingInput,
 } from './bridge/host.js';
-import type { ChannelBinding, ChannelType } from './bridge/types.js';
+import {
+  DEFAULT_CHANNEL_INSTANCE_ID,
+  resolveChannelInstanceId,
+  type ChannelBinding,
+  type ChannelType,
+} from './bridge/types.js';
 import { normalizeClaudePermissionMode } from './claude-mode.js';
 import { CTI_HOME } from './config.js';
 import type { RuntimeName, SessionExt, SessionRecord, TitleStatus } from './runtime-types.js';
@@ -62,6 +67,10 @@ function uuid(): string {
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function bindingKey(channelType: string, chatId: string, channelInstanceId?: string): string {
+  return `${channelType}:${resolveChannelInstanceId({ channelInstanceId })}:${chatId}`;
 }
 
 // ── Lock entry ──
@@ -118,8 +127,13 @@ export class JsonFileStore implements BridgeStore {
     let bindingsChanged = false;
     for (const [key, b] of Object.entries(bindings)) {
       const normalized = this.normalizeChannelBindingRecord(b);
-      if (normalized !== b) bindingsChanged = true;
-      this.bindings.set(key, normalized);
+      const normalizedKey = bindingKey(
+        normalized.channelType,
+        normalized.chatId,
+        normalized.channelInstanceId,
+      );
+      if (normalized !== b || normalizedKey !== key) bindingsChanged = true;
+      this.bindings.set(normalizedKey, normalized);
     }
     if (bindingsChanged) this.persistBindings();
 
@@ -128,25 +142,37 @@ export class JsonFileStore implements BridgeStore {
       path.join(DATA_DIR, 'permissions.json'),
       {},
     );
+    let permissionsChanged = false;
     for (const [id, p] of Object.entries(perms)) {
-      this.permissionLinks.set(id, p);
+      const normalized = this.normalizePermissionLinkRecord(p);
+      if (normalized !== p) permissionsChanged = true;
+      this.permissionLinks.set(id, normalized);
     }
+    if (permissionsChanged) this.persistPermissions();
 
     const workflows = readJson<Record<string, PlanWorkflowRecord>>(
       path.join(DATA_DIR, 'plan-workflows.json'),
       {},
     );
+    let workflowsChanged = false;
     for (const [id, workflow] of Object.entries(workflows)) {
-      this.planWorkflows.set(id, workflow);
+      const normalized = this.normalizePlanWorkflowRecord(workflow);
+      if (normalized !== workflow) workflowsChanged = true;
+      this.planWorkflows.set(id, normalized);
     }
+    if (workflowsChanged) this.persistPlanWorkflows();
 
     const structuredInputs = readJson<Record<string, StructuredInputRequestRecord>>(
       path.join(DATA_DIR, 'structured-inputs.json'),
       {},
     );
+    let structuredInputsChanged = false;
     for (const [id, request] of Object.entries(structuredInputs)) {
-      this.structuredInputRequests.set(id, request);
+      const normalized = this.normalizeStructuredInputRequestRecord(request);
+      if (normalized !== request) structuredInputsChanged = true;
+      this.structuredInputRequests.set(id, normalized);
     }
+    if (structuredInputsChanged) this.persistStructuredInputs();
 
     // Offsets
     const offsets = readJson<Record<string, string>>(
@@ -285,8 +311,48 @@ export class JsonFileStore implements BridgeStore {
     );
     return {
       ...binding,
+      channelInstanceId: resolveChannelInstanceId(record),
       mode,
       claudePermissionMode,
+    };
+  }
+
+  private normalizePermissionLinkRecord(link: PermissionLinkRecord): PermissionLinkRecord {
+    const record = link as PermissionLinkRecord & Record<string, unknown>;
+    return {
+      ...link,
+      channelType: typeof record.channelType === 'string' && record.channelType
+        ? record.channelType
+        : 'feishu',
+      channelInstanceId: resolveChannelInstanceId(record),
+    };
+  }
+
+  private normalizePlanWorkflowRecord(workflow: PlanWorkflowRecord): PlanWorkflowRecord {
+    const record = workflow as PlanWorkflowRecord & Record<string, unknown>;
+    const channelInstanceId = resolveChannelInstanceId(record);
+    return {
+      ...workflow,
+      channelInstanceId,
+      address: {
+        ...workflow.address,
+        channelInstanceId: resolveChannelInstanceId(workflow.address || { channelInstanceId }),
+      },
+    };
+  }
+
+  private normalizeStructuredInputRequestRecord(
+    request: StructuredInputRequestRecord,
+  ): StructuredInputRequestRecord {
+    const record = request as StructuredInputRequestRecord & Record<string, unknown>;
+    const channelInstanceId = resolveChannelInstanceId(record);
+    return {
+      ...request,
+      channelInstanceId,
+      address: {
+        ...request.address,
+        channelInstanceId: resolveChannelInstanceId(request.address || { channelInstanceId }),
+      },
     };
   }
 
@@ -297,12 +363,12 @@ export class JsonFileStore implements BridgeStore {
 
   // ── Channel Bindings ──
 
-  getChannelBinding(channelType: string, chatId: string): ChannelBinding | null {
-    return this.bindings.get(`${channelType}:${chatId}`) ?? null;
+  getChannelBinding(channelType: string, chatId: string, channelInstanceId?: string): ChannelBinding | null {
+    return this.bindings.get(bindingKey(channelType, chatId, channelInstanceId)) ?? null;
   }
 
   upsertChannelBinding(data: UpsertChannelBindingInput): ChannelBinding {
-    const key = `${data.channelType}:${data.chatId}`;
+    const key = bindingKey(data.channelType, data.chatId, data.channelInstanceId);
     const existing = this.bindings.get(key);
     if (existing) {
       const updated = this.normalizeChannelBindingRecord({
@@ -322,6 +388,7 @@ export class JsonFileStore implements BridgeStore {
     const binding = this.normalizeChannelBindingRecord({
       id: uuid(),
       channelType: data.channelType,
+      channelInstanceId: resolveChannelInstanceId(data),
       chatId: data.chatId,
       codepilotSessionId: data.codepilotSessionId,
       sdkSessionId: '',
@@ -620,8 +687,10 @@ export class JsonFileStore implements BridgeStore {
   // ── Permission Links ──
 
   insertPermissionLink(link: PermissionLinkInput): void {
-    const record: PermissionLinkRecord = {
+    const record = this.normalizePermissionLinkRecord({
       permissionRequestId: link.permissionRequestId,
+      channelType: link.channelType,
+      channelInstanceId: resolveChannelInstanceId(link),
       chatId: link.chatId,
       messageId: link.messageId,
       ...(typeof (link as PermissionLinkInput & { openMessageId?: string }).openMessageId === 'string'
@@ -629,7 +698,7 @@ export class JsonFileStore implements BridgeStore {
         : {}),
       resolved: false,
       suggestions: link.suggestions,
-    };
+    });
     this.permissionLinks.set(link.permissionRequestId, record);
     this.persistPermissions();
   }
@@ -646,10 +715,19 @@ export class JsonFileStore implements BridgeStore {
     return true;
   }
 
-  listPendingPermissionLinksByChat(chatId: string): PermissionLinkRecord[] {
+  listPendingPermissionLinksByChat(
+    chatId: string,
+    channelType?: string,
+    channelInstanceId?: string,
+  ): PermissionLinkRecord[] {
     const result: PermissionLinkRecord[] = [];
     for (const link of this.permissionLinks.values()) {
-      if (link.chatId === chatId && !link.resolved) {
+      if (
+        link.chatId === chatId
+        && !link.resolved
+        && (!channelType || link.channelType === channelType)
+        && (!channelInstanceId || link.channelInstanceId === channelInstanceId)
+      ) {
         result.push(link);
       }
     }
@@ -658,16 +736,21 @@ export class JsonFileStore implements BridgeStore {
 
   upsertPlanWorkflow(workflow: PlanWorkflowInput): PlanWorkflowRecord {
     const existing = workflow.workflowId ? this.planWorkflows.get(workflow.workflowId) : undefined;
-    const record: PlanWorkflowRecord = {
+    const channelInstanceId = resolveChannelInstanceId(workflow);
+    const record = this.normalizePlanWorkflowRecord({
       workflowId: existing?.workflowId || workflow.workflowId || uuid(),
       bindingId: workflow.bindingId,
       channelType: workflow.channelType,
+      channelInstanceId,
       chatId: workflow.chatId,
       codepilotSessionId: workflow.codepilotSessionId,
       status: workflow.status,
       previousMode: workflow.previousMode,
       requestText: workflow.requestText,
-      address: workflow.address,
+      address: {
+        ...workflow.address,
+        channelInstanceId: resolveChannelInstanceId(workflow.address || { channelInstanceId }),
+      },
       routeKey: workflow.routeKey,
       ...(workflow.requestMessageId ? { requestMessageId: workflow.requestMessageId } : {}),
       ...(workflow.planMessageId ? { planMessageId: workflow.planMessageId } : {}),
@@ -680,7 +763,7 @@ export class JsonFileStore implements BridgeStore {
       resolved: workflow.resolved ?? existing?.resolved ?? false,
       createdAt: existing?.createdAt || now(),
       updatedAt: now(),
-    };
+    });
     this.planWorkflows.set(record.workflowId, record);
     this.persistPlanWorkflows();
     return { ...record };
@@ -700,9 +783,17 @@ export class JsonFileStore implements BridgeStore {
     return null;
   }
 
-  getActivePlanWorkflowByChat(channelType: string, chatId: string): PlanWorkflowRecord | null {
+  getActivePlanWorkflowByChat(
+    channelType: string,
+    chatId: string,
+    channelInstanceId?: string,
+  ): PlanWorkflowRecord | null {
     for (const workflow of this.planWorkflows.values()) {
-      if (workflow.channelType === channelType && workflow.chatId === chatId) {
+      if (
+        workflow.channelType === channelType
+        && workflow.chatId === chatId
+        && workflow.channelInstanceId === resolveChannelInstanceId({ channelInstanceId })
+      ) {
         return { ...workflow };
       }
     }
@@ -715,11 +806,11 @@ export class JsonFileStore implements BridgeStore {
   ): PlanWorkflowRecord | null {
     const record = this.planWorkflows.get(workflowId);
     if (!record) return null;
-    const next: PlanWorkflowRecord = {
+    const next = this.normalizePlanWorkflowRecord({
       ...record,
       ...updates,
       updatedAt: now(),
-    };
+    });
     this.planWorkflows.set(workflowId, next);
     this.persistPlanWorkflows();
     return { ...next };
@@ -742,12 +833,17 @@ export class JsonFileStore implements BridgeStore {
 
   upsertStructuredInputRequest(request: StructuredInputRequestInput): StructuredInputRequestRecord {
     const existing = this.structuredInputRequests.get(request.requestId);
-    const record: StructuredInputRequestRecord = {
+    const channelInstanceId = resolveChannelInstanceId(request);
+    const record = this.normalizeStructuredInputRequestRecord({
       requestId: request.requestId,
       channelType: request.channelType,
+      channelInstanceId,
       chatId: request.chatId,
       codepilotSessionId: request.codepilotSessionId,
-      address: request.address,
+      address: {
+        ...request.address,
+        channelInstanceId: resolveChannelInstanceId(request.address || { channelInstanceId }),
+      },
       routeKey: request.routeKey,
       threadId: request.threadId,
       turnId: request.turnId,
@@ -759,7 +855,7 @@ export class JsonFileStore implements BridgeStore {
       resolved: request.resolved ?? existing?.resolved ?? false,
       createdAt: existing?.createdAt || now(),
       updatedAt: now(),
-    };
+    });
     this.structuredInputRequests.set(record.requestId, record);
     this.persistStructuredInputs();
     return { ...record };
@@ -776,11 +872,11 @@ export class JsonFileStore implements BridgeStore {
   ): StructuredInputRequestRecord | null {
     const current = this.structuredInputRequests.get(requestId);
     if (!current) return null;
-    const next: StructuredInputRequestRecord = {
+    const next = this.normalizeStructuredInputRequestRecord({
       ...current,
       ...updates,
       updatedAt: now(),
-    };
+    });
     this.structuredInputRequests.set(requestId, next);
     this.persistStructuredInputs();
     return { ...next };

@@ -1,23 +1,29 @@
 # Usage Guide
 
-这个 skill 现在是 Feishu/Lark 单通道版本。你通过 `/agents-to-im ...` 管理 daemon，但真正的模型对话发生在 Bot 自动创建的群里。
+当前通过 `npx github:francize/agents-to-im ...` 管理 daemon，但真正的模型对话发生在 Bot 自动创建的群里。
 
 ## setup
 
 `setup` 不再是多平台向导，而是 Feishu-only 配置说明：
 
 ```bash
-/agents-to-im setup
+npx github:francize/agents-to-im
 ```
 
 你需要准备：
-- `CTI_FEISHU_APP_ID`
-- `CTI_FEISHU_APP_SECRET`
+- `CTI_FEISHU_PROFILE_IDS`
+- `CTI_FEISHU_PROFILE_<ID>_APP_ID`
+- `CTI_FEISHU_PROFILE_<ID>_APP_SECRET`
+- `CTI_RUNTIME_CLAUDE_FEISHU_PROFILE`
+- `CTI_RUNTIME_CODEX_FEISHU_PROFILE`
 - `CTI_DEFAULT_WORKDIR`
 
 可选项：
-- `CTI_FEISHU_DOMAIN`
-- `CTI_FEISHU_ALLOWED_USERS`
+- `CTI_FEISHU_PROFILE_<ID>_DOMAIN`
+- `CTI_FEISHU_PROFILE_<ID>_ALLOWED_USERS`
+- `CTI_FEISHU_PROFILE_<ID>_TOOL_OUTPUT_CARDS`
+- `CTI_FEISHU_PROFILE_<ID>_AUTO_IMAGE_SEND`
+- `CTI_FEISHU_PROFILE_<ID>_LABEL`
 - `CTI_CLAUDE_DEFAULT_MODEL`
 - `CTI_CODEX_DEFAULT_MODEL`
 - `CTI_CLAUDE_CODE_EXECUTABLE`
@@ -34,17 +40,28 @@ Codex 直接复用本地 `codex` CLI 和 `~/.codex/config.toml`（或 `$CODEX_HO
 启动 bridge daemon：
 
 ```bash
-/agents-to-im start
+npx github:francize/agents-to-im start
 ```
 
-如果启动失败，优先执行 `/agents-to-im doctor`。
+如果启动失败，优先执行 `npx github:francize/agents-to-im doctor`。
+
+## restart
+
+配置或代码变化后的推荐恢复方式：
+
+```bash
+npx github:francize/agents-to-im restart
+bash scripts/daemon.sh restart
+```
+
+修改 `config.env`、更新代码、或重新发布飞书事件 / 权限后，优先执行 `restart`。
 
 ## stop
 
 停止 daemon：
 
 ```bash
-/agents-to-im stop
+npx github:francize/agents-to-im stop
 ```
 
 ## status
@@ -52,7 +69,7 @@ Codex 直接复用本地 `codex` CLI 和 `~/.codex/config.toml`（或 `$CODEX_HO
 查看 daemon 运行状态：
 
 ```bash
-/agents-to-im status
+npx github:francize/agents-to-im status
 ```
 
 输出会包含：
@@ -66,8 +83,8 @@ Codex 直接复用本地 `codex` CLI 和 `~/.codex/config.toml`（或 `$CODEX_HO
 查看最近日志：
 
 ```bash
-/agents-to-im logs
-/agents-to-im logs 200
+npx github:francize/agents-to-im logs
+npx github:francize/agents-to-im logs 200
 ```
 
 日志文件默认位于 `~/.agents-to-im/logs/`，会自动脱敏。
@@ -77,7 +94,7 @@ Codex 直接复用本地 `codex` CLI 和 `~/.codex/config.toml`（或 `$CODEX_HO
 执行本地诊断：
 
 ```bash
-/agents-to-im doctor
+npx github:francize/agents-to-im doctor
 ```
 
 当前检查项包括：

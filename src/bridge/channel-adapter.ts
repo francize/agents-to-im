@@ -21,6 +21,21 @@ export abstract class BaseChannelAdapter {
   /** Which channel type this adapter handles */
   abstract readonly channelType: ChannelType;
 
+  /** Stable adapter instance identifier. */
+  get adapterId(): string {
+    return this.channelType;
+  }
+
+  /** Stable profile identifier, if the adapter is backed by a named profile. */
+  get profileId(): string {
+    return this.adapterId;
+  }
+
+  /** Human-readable adapter label for status surfaces and redirect hints. */
+  get label(): string {
+    return this.profileId;
+  }
+
   /**
    * Start the adapter (connect, begin polling/websocket, etc.).
    * Must be idempotent — calling start() on an already-running adapter is a no-op.
@@ -143,6 +158,12 @@ export abstract class BaseChannelAdapter {
     _event: ActivityEvent,
     _replyToMessageId?: string,
   ): Promise<SendResult>;
+
+  /**
+   * Whether the adapter allows automatic local image uploads for generated output.
+   * Undefined falls back to store-level defaults for legacy adapters.
+   */
+  allowsAutoImageSend?(): boolean;
 }
 
 // ── Adapter Registry ────────────────────────────────────────────
