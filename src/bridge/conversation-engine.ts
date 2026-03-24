@@ -55,6 +55,7 @@ export type OnActivityEvent = (event: ActivityEvent) => Promise<void> | void;
 export interface ConversationResult {
   responseText: string;
   responseSegments: string[];
+  contentBlocks: MessageContentBlock[];
   tokenUsage: TokenUsage | null;
   hasError: boolean;
   errorMessage: string;
@@ -136,6 +137,7 @@ export async function processMessage(
     return {
       responseText: '',
       responseSegments: [],
+      contentBlocks: [],
       tokenUsage: null,
       hasError: true,
       errorMessage: 'Session is busy processing another request',
@@ -635,6 +637,7 @@ async function consumeStream(
     return {
       responseText,
       responseSegments,
+      contentBlocks: [...contentBlocks],
       tokenUsage,
       hasError,
       errorMessage,
@@ -670,6 +673,7 @@ async function consumeStream(
     return {
       responseText: '',
       responseSegments: [],
+      contentBlocks: [...contentBlocks],
       tokenUsage,
       hasError: true,
       errorMessage: isAbort ? 'Task stopped by user' : (e instanceof Error ? e.message : 'Stream consumption error'),

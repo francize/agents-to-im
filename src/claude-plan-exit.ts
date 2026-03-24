@@ -12,6 +12,204 @@ export const CLAUDE_PLAN_EXIT_CLEAR_BYPASS_LABEL = 'Yes, clear context and bypas
 export const CLAUDE_PLAN_FOLLOW_UP_REJECT_MESSAGE =
   'The user wants to continue planning in a follow-up turn. Stop here without executing anything and wait for the next user message.';
 
+export function truncateClaudePlanCardText(text: string, maxChars = 7000): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  return `${trimmed.slice(0, maxChars).trim()}\n\n...`;
+}
+
+function buildClaudePlanExitElements(
+  planText: string,
+  allowedPrompts: ClaudePlanAllowedPrompt[],
+  showClearContext: boolean,
+): Array<Record<string, unknown>> {
+  const elements: Array<Record<string, unknown>> = [
+    {
+      tag: 'markdown',
+      content: 'Claude 已经写好计划。确认后会退出 PLAN，并按所选模式继续执行。',
+    },
+    {
+      tag: 'markdown',
+      content: truncateClaudePlanCardText(planText || 'Claude 已生成计划，请确认是否继续。'),
+    },
+  ];
+
+  if (allowedPrompts.length > 0) {
+    elements.push({
+      tag: 'markdown',
+      content: [
+        '**执行时会申请的提示级权限**',
+        ...allowedPrompts.map((item) => `- ${item.tool}: ${item.prompt}`),
+      ].join('\n'),
+    });
+  }
+
+  elements.push({
+    tag: 'markdown',
+    content: showClearContext
+      ? '如需继续规划，请直接在本线程回复你希望 Claude 调整的地方。“清空上下文后执行”会结束当前 PLAN 会话，并用新会话按已确认计划开始实施。'
+      : '如需继续规划，请直接在本线程回复你希望 Claude 调整的地方。',
+  });
+
+  return elements;
+}
+
+function buildClaudePlanExitCardShell(elements: Array<Record<string, unknown>>): Record<string, unknown> {
+  return {
+    schema: '2.0',
+    config: {
+      update_multi: true,
+      wide_screen_mode: true,
+      width_mode: 'fill',
+    },
+    header: {
+      title: {
+        tag: 'plain_text',
+        content: '计划已就绪',
+      },
+      template: 'blue',
+    },
+    body: {
+      elements,
+    },
+  };
+}
+
+function buildClaudePlanActionColumns(
+  workflowId: string,
+  showClearContext: boolean,
+): Array<Record<string, unknown>> {
+  const columns: Array<Record<string, unknown>> = [
+    {
+      tag: 'column',
+      width: 'auto',
+      elements: [
+        {
+          tag: 'button',
+          type: 'primary',
+          text: { tag: 'plain_text', content: CLAUDE_PLAN_EXIT_BYPASS_LABEL },
+          behaviors: [{ type: 'callback', value: { callback_data: `planexit:approve:bypass:${workflowId}` } }],
+        },
+      ],
+    },
+    {
+      tag: 'column',
+      width: 'auto',
+      elements: [
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: CLAUDE_PLAN_EXIT_MANUAL_LABEL },
+          behaviors: [{ type: 'callback', value: { callback_data: `planexit:approve:manual:${workflowId}` } }],
+        },
+      ],
+    },
+  ];
+
+  if (showClearContext) {
+    columns.push({
+      tag: 'column',
+      width: 'auto',
+      elements: [
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: CLAUDE_PLAN_EXIT_CLEAR_BYPASS_LABEL },
+          behaviors: [{ type: 'callback', value: { callback_data: `planexit:clear:bypass:${workflowId}` } }],
+        },
+      ],
+    });
+  }
+
+  return columns;
+}
+
+function buildHandledClaudePlanActionColumns(
+  action: string,
+  variant: string,
+  showClearContext: boolean,
+): Array<Record<string, unknown>> {
+  const makeButton = (
+    label: string,
+    options: {
+      selected?: boolean;
+    } = {},
+  ): Record<string, unknown> => ({
+    tag: 'button',
+    type: options.selected ? 'primary' : 'default',
+    text: { tag: 'plain_text', content: label },
+    disabled: true,
+  });
+
+  const columns: Array<Record<string, unknown>> = [
+    {
+      tag: 'column',
+      width: 'auto',
+      elements: [
+        makeButton(CLAUDE_PLAN_EXIT_BYPASS_LABEL, {
+          selected: action === 'approve' && variant === 'bypass',
+        }),
+      ],
+    },
+    {
+      tag: 'column',
+      width: 'auto',
+      elements: [
+        makeButton(CLAUDE_PLAN_EXIT_MANUAL_LABEL, {
+          selected: action === 'approve' && variant === 'manual',
+        }),
+      ],
+    },
+  ];
+
+  if (showClearContext) {
+    columns.push({
+      tag: 'column',
+      width: 'auto',
+      elements: [
+        makeButton(CLAUDE_PLAN_EXIT_CLEAR_BYPASS_LABEL, {
+          selected: action === 'clear' && variant === 'bypass',
+        }),
+      ],
+    });
+  }
+
+  return columns;
+}
+
+export function buildClaudePlanExitCard(
+  workflowId: string,
+  planText: string,
+  allowedPrompts: ClaudePlanAllowedPrompt[],
+  showClearContext: boolean,
+): Record<string, unknown> {
+  const elements = buildClaudePlanExitElements(planText, allowedPrompts, showClearContext);
+  elements.push({
+    tag: 'column_set',
+    flex_mode: 'flow',
+    horizontal_spacing: '8px',
+    horizontal_align: 'left',
+    columns: buildClaudePlanActionColumns(workflowId, showClearContext),
+  });
+  return buildClaudePlanExitCardShell(elements);
+}
+
+export function buildHandledClaudePlanExitCard(
+  planText: string,
+  allowedPrompts: ClaudePlanAllowedPrompt[],
+  showClearContext: boolean,
+  action: string,
+  variant: string,
+): Record<string, unknown> {
+  const elements = buildClaudePlanExitElements(planText, allowedPrompts, showClearContext);
+  elements.push({
+    tag: 'column_set',
+    flex_mode: 'flow',
+    horizontal_spacing: '8px',
+    horizontal_align: 'left',
+    columns: buildHandledClaudePlanActionColumns(action, variant, showClearContext),
+  });
+  return buildClaudePlanExitCardShell(elements);
+}
+
 export function parseClaudePlanText(input: Record<string, unknown>): string {
   return typeof input.plan === 'string' ? input.plan.trim() : '';
 }

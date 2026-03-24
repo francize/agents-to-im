@@ -27,9 +27,7 @@ import {
 } from '../bridge/markdown/feishu.js';
 import {
   CLAUDE_PLAN_FOLLOW_UP_REJECT_MESSAGE,
-  CLAUDE_PLAN_EXIT_BYPASS_LABEL,
-  CLAUDE_PLAN_EXIT_CLEAR_BYPASS_LABEL,
-  CLAUDE_PLAN_EXIT_MANUAL_LABEL,
+  buildHandledClaudePlanExitCard,
   buildClaudePlanExecutionPrompt,
   buildClaudePlanFollowUpPrompt,
   buildClaudePlanModeUpdates,
@@ -238,31 +236,6 @@ function buildHandledPlanCard(action: string): Record<string, unknown> {
     default:
       return buildStatusCard('计划已处理', '该计划确认卡已处理。', 'grey');
   }
-}
-
-function buildHandledClaudePlanCard(action: string, variant: string): Record<string, unknown> {
-  if (action === 'approve' && variant === 'bypass') {
-    return buildStatusCard(
-      '计划已确认',
-      `已选择：\`${CLAUDE_PLAN_EXIT_BYPASS_LABEL}\`\n\nClaude 将退出 PLAN 并继续执行。该确认卡已关闭。`,
-      'green',
-    );
-  }
-  if (action === 'approve' && variant === 'manual') {
-    return buildStatusCard(
-      '计划已确认',
-      `已选择：\`${CLAUDE_PLAN_EXIT_MANUAL_LABEL}\`\n\nClaude 将退出 PLAN 并继续执行；后续编辑仍需人工审批。该确认卡已关闭。`,
-      'green',
-    );
-  }
-  if (action === 'clear' && variant === 'bypass') {
-    return buildStatusCard(
-      '计划已确认',
-      `已选择：\`${CLAUDE_PLAN_EXIT_CLEAR_BYPASS_LABEL}\`\n\n当前 PLAN 会话已结束，桥会在新会话中按已确认计划继续执行。`,
-      'blue',
-    );
-  }
-  return buildStatusCard('计划已处理', 'Claude 计划确认卡已处理。', 'grey');
 }
 
 function ensureRobotPrefix(text: string): string {
@@ -888,6 +861,10 @@ function isNonEmptyString(value: string | undefined): value is string {
   return typeof value === 'string' && value.length > 0;
 }
 
+function resolveActionOpenMessageId(event: StructuredActionEvent): string {
+  return event.open_message_id || event.context?.open_message_id || '';
+}
+
 export function findMissingAppScopes(visibleScopes: readonly string[]): string[] {
   const granted = new Set(visibleScopes);
   return FEISHU_REQUIRED_APP_SCOPES.filter((scope) => !granted.has(scope));
@@ -1135,9 +1112,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
   endPreview(address: ChannelAddress, draftId: number): void {
     const routeKey = routeKeyForAddress(address);
     const key = previewKey(routeKey, draftId);
+    const artifact = this.previewArtifacts.get(key);
     this.previewArtifacts.delete(key);
     if (this.activePreviewByRoute.get(routeKey) === key) {
       this.activePreviewByRoute.delete(routeKey);
+    }
+    if (artifact?.messageId && !artifact.lastText.trim()) {
+      void this.deleteMessageQuietly(artifact.messageId);
     }
   }
 
@@ -1437,8 +1418,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
       const [, action, ...permissionParts] = callbackData.split(':');
       const permissionRequestId = permissionParts.join(':');
       const link = store.getPermissionLink(permissionRequestId);
-      if (link && handlePermissionCallback(callbackData, link.chatId, event.open_message_id)) {
-        await this.patchActionCardSafely(link.messageId, buildHandledPermissionCard(action || ''), 'permission');
+      const actionMessageId = resolveActionOpenMessageId(event);
+      if (link && handlePermissionCallback(callbackData, link.chatId, actionMessageId)) {
+        await this.patchActionCardSafely(
+          link.messageId,
+          buildHandledPermissionCard(action || ''),
+          'permission',
+          actionMessageId || link.openMessageId,
+        );
         return { toast: { type: 'success', content: 'Permission updated' } };
       }
       return { toast: { type: 'warning', content: 'Permission already handled' } };
@@ -1459,12 +1446,33 @@ export class FeishuAdapter extends BaseChannelAdapter {
     messageId: string | undefined,
     card: Record<string, unknown>,
     kind: string,
+    openMessageId?: string,
   ): Promise<void> {
-    if (!this.restClient || !messageId || !this.restClient.im?.message?.patch) return;
-    try {
-      await this.patchInteractiveCard(messageId, card);
-    } catch (error) {
-      console.warn(`[feishu-adapter] Failed to patch ${kind} card ${messageId}:`, error);
+    if (!this.restClient || !this.restClient.im?.message?.patch) return;
+    const attempts = [
+      openMessageId
+        ? { id: openMessageId, messageIdType: 'open_message_id' as const }
+        : null,
+      messageId
+        ? { id: messageId, messageIdType: 'message_id' as const }
+        : null,
+    ].filter((value, index, list): value is { id: string; messageIdType: 'message_id' | 'open_message_id' } =>
+      !!value && list.findIndex((item) => item?.id === value.id && item?.messageIdType === value.messageIdType) === index,
+    );
+    if (attempts.length === 0) return;
+
+    for (const attempt of attempts) {
+      try {
+        console.log(`[feishu-adapter] Patching ${kind} card via ${attempt.messageIdType}: ${attempt.id}`);
+        await this.patchInteractiveCard(attempt.id, card, { messageIdType: attempt.messageIdType });
+        console.log(`[feishu-adapter] Patched ${kind} card via ${attempt.messageIdType}: ${attempt.id}`);
+        return;
+      } catch (error) {
+        console.warn(
+          `[feishu-adapter] Failed to patch ${kind} card via ${attempt.messageIdType} ${attempt.id}:`,
+          error,
+        );
+      }
     }
   }
 
@@ -2039,11 +2047,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!workflow) {
       return { toast: { type: 'warning', content: 'PLAN workflow not found' } };
     }
+    const actionMessageId = resolveActionOpenMessageId(event as StructuredActionEvent);
     const knownIds = [
       workflow.actionCardMessageId,
       workflow.actionCardOpenMessageId,
     ].filter((value): value is string => !!value);
-    if (knownIds.length > 1 && !knownIds.includes(event.open_message_id)) {
+    if (knownIds.length > 1 && !knownIds.includes(actionMessageId)) {
       return { toast: { type: 'warning', content: 'PLAN card is stale' } };
     }
     if (workflow.status !== 'awaiting_confirmation') {
@@ -2056,6 +2065,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const binding = store.getChannelBinding(this.channelType, workflow.chatId);
     switch (action) {
       case 'execute':
+        await this.patchActionCardSafely(
+          workflow.actionCardMessageId,
+          buildHandledPlanCard(action),
+          'plan',
+          actionMessageId || workflow.actionCardOpenMessageId,
+        );
         if (binding) {
           store.updateChannelBinding(binding.id, { mode: 'code' });
         }
@@ -2067,23 +2082,32 @@ export class FeishuAdapter extends BaseChannelAdapter {
           workflowId,
           workflow.requestText,
         ));
-        await this.patchActionCardSafely(workflow.actionCardMessageId, buildHandledPlanCard(action), 'plan');
         return { toast: { type: 'success', content: '开始执行已确认计划' } };
       case 'continue':
+        await this.patchActionCardSafely(
+          workflow.actionCardMessageId,
+          buildHandledPlanCard(action),
+          'plan',
+          actionMessageId || workflow.actionCardOpenMessageId,
+        );
         store.updatePlanWorkflow(workflowId, {
           status: 'awaiting_input',
           resolved: true,
         });
         await this.syncChatName(workflow.chatId);
-        await this.patchActionCardSafely(workflow.actionCardMessageId, buildHandledPlanCard(action), 'plan');
         return { toast: { type: 'success', content: '继续保持 PLAN 模式' } };
       case 'cancel':
+        await this.patchActionCardSafely(
+          workflow.actionCardMessageId,
+          buildHandledPlanCard(action),
+          'plan',
+          actionMessageId || workflow.actionCardOpenMessageId,
+        );
         if (binding) {
           store.updateChannelBinding(binding.id, { mode: workflow.previousMode });
         }
         store.deletePlanWorkflow(workflowId);
         await this.syncChatName(workflow.chatId);
-        await this.patchActionCardSafely(workflow.actionCardMessageId, buildHandledPlanCard(action), 'plan');
         return { toast: { type: 'success', content: '已取消 PLAN 流程' } };
       default:
         store.updatePlanWorkflow(workflowId, { resolved: false });
@@ -2109,11 +2133,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return { toast: { type: 'warning', content: 'Claude plan workflow not found' } };
     }
 
+    const actionMessageId = resolveActionOpenMessageId(event as StructuredActionEvent);
     const knownIds = [
       workflow.actionCardMessageId,
       workflow.actionCardOpenMessageId,
     ].filter((value): value is string => !!value);
-    if (knownIds.length > 1 && !knownIds.includes(event.open_message_id)) {
+    if (knownIds.length > 1 && !knownIds.includes(actionMessageId)) {
       return { toast: { type: 'warning', content: 'Claude plan card is stale' } };
     }
     if (workflow.status !== 'awaiting_confirmation') {
@@ -2145,6 +2170,18 @@ export class FeishuAdapter extends BaseChannelAdapter {
         store.updatePlanWorkflow(workflowId, { resolved: false });
         return { toast: { type: 'warning', content: '会话绑定不存在' } };
       }
+      await this.patchActionCardSafely(
+        workflow.actionCardMessageId,
+        buildHandledClaudePlanExitCard(
+          workflow.planText || '',
+          workflow.allowedPrompts || [],
+          true,
+          action,
+          variant,
+        ),
+        'claude-plan',
+        actionMessageId || workflow.actionCardOpenMessageId,
+      );
       if (binding) {
         store.updateChannelBinding(binding.id, { mode: 'code' });
       }
@@ -2169,11 +2206,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
           },
         ));
       }
-      await this.patchActionCardSafely(
-        workflow.actionCardMessageId,
-        buildHandledClaudePlanCard(action, variant),
-        'claude-plan',
-      );
       return {
         toast: {
           type: 'success',
@@ -2187,6 +2219,18 @@ export class FeishuAdapter extends BaseChannelAdapter {
         store.updatePlanWorkflow(workflowId, { resolved: false });
         return { toast: { type: 'warning', content: '会话绑定不存在' } };
       }
+      await this.patchActionCardSafely(
+        workflow.actionCardMessageId,
+        buildHandledClaudePlanExitCard(
+          workflow.planText || '',
+          workflow.allowedPrompts || [],
+          true,
+          action,
+          variant,
+        ),
+        'claude-plan',
+        actionMessageId || workflow.actionCardOpenMessageId,
+      );
 
       const session = store.createRuntimeSession({
         runtime: 'claude',
@@ -2225,11 +2269,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
           planText: workflow.planText,
         },
       ));
-      await this.patchActionCardSafely(
-        workflow.actionCardMessageId,
-        buildHandledClaudePlanCard(action, variant),
-        'claude-plan',
-      );
       return { toast: { type: 'success', content: '已清空上下文，并在新会话中开始执行' } };
     }
 
@@ -2573,14 +2612,42 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
   }
 
-  private async patchInteractiveCard(messageId: string, card: Record<string, unknown>): Promise<void> {
-    const response = await this.restClient!.im.message.patch({
+  private async patchInteractiveCard(
+    messageId: string,
+    card: Record<string, unknown>,
+    options?: { messageIdType?: 'message_id' | 'open_message_id' },
+  ): Promise<void> {
+    const response = await (this.restClient!.im.message as {
+      patch: (payload: {
+        path: { message_id: string };
+        data: { content: string };
+        params?: { message_id_type: 'open_message_id' };
+      }) => Promise<{ code?: number; msg?: string }>;
+    }).patch({
       path: { message_id: messageId },
+      ...(options?.messageIdType === 'open_message_id'
+        ? { params: { message_id_type: 'open_message_id' as const } }
+        : {}),
       data: {
         content: JSON.stringify(card),
       },
     });
     assertLarkOk(response, 'im.message.patch');
+  }
+
+  private async deleteMessageQuietly(messageId: string): Promise<void> {
+    const messageApi = this.restClient?.im?.message as {
+      delete?: (payload: { path: { message_id: string } }) => Promise<{ code?: number; msg?: string }>;
+    } | undefined;
+    if (!messageApi?.delete) return;
+    try {
+      const response = await messageApi.delete({
+        path: { message_id: messageId },
+      });
+      assertLarkOk(response, 'im.message.delete');
+    } catch (error) {
+      console.warn('[feishu-adapter] Failed to delete stale preview placeholder:', error);
+    }
   }
 
   private async runScopeDiagnostic(): Promise<void> {

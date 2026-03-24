@@ -347,6 +347,45 @@ describe('FeishuAdapter', () => {
     assert.match(createdCardPayload, /🤖 努力回答中\.\.\./);
   });
 
+  it('deletes a prime-only preview placeholder when the preview ends without real text', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+
+    let deleteCalls = 0;
+    let deletedMessageId = '';
+    const adapter = new FeishuAdapter() as any;
+    adapter.previewArtifacts.set('group-cardkit-prime:main:77', {
+      key: 'group-cardkit-prime:main:77',
+      routeKey: 'group-cardkit-prime:main',
+      chatId: 'group-cardkit-prime',
+      draftId: 77,
+      messageId: 'preview-prime-msg',
+      lastText: '',
+      sequence: 0,
+      mode: 'cardkit',
+    });
+    adapter.activePreviewByRoute.set('group-cardkit-prime:main', 'group-cardkit-prime:main:77');
+    adapter.restClient = {
+      im: {
+        message: {
+          delete: async (payload: { path: { message_id: string } }) => {
+            deleteCalls += 1;
+            deletedMessageId = payload.path.message_id;
+            return { code: 0, data: {} };
+          },
+        },
+      },
+    };
+
+    adapter.endPreview({ channelType: 'feishu', chatId: 'group-cardkit-prime' }, 77);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(deleteCalls, 1);
+    assert.equal(deletedMessageId, 'preview-prime-msg');
+    assert.equal(adapter.previewArtifacts.size, 0);
+    assert.equal(adapter.activePreviewByRoute.size, 0);
+  });
+
   it('upserts the latest lightweight activity card in place on the same message', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});
@@ -732,11 +771,15 @@ describe('FeishuAdapter', () => {
     });
 
     let patchedCard: Record<string, unknown> | null = null;
+    let patchTarget = '';
+    let patchParams: Record<string, unknown> | undefined;
     const adapter = new FeishuAdapter() as any;
     adapter.restClient = {
       im: {
         message: {
-          patch: async (payload: { data: { content: string } }) => {
+          patch: async (payload: { path: { message_id: string }; params?: Record<string, unknown>; data: { content: string } }) => {
+            patchTarget = payload.path.message_id;
+            patchParams = payload.params;
             patchedCard = JSON.parse(payload.data.content);
             return { code: 0, data: {} };
           },
@@ -757,6 +800,8 @@ describe('FeishuAdapter', () => {
 
     assert.equal(result.toast.type, 'success');
     assert.equal(store.getPermissionLink('req-perm-1')?.resolved, true);
+    assert.equal(patchTarget, 'open-perm-1');
+    assert.deepEqual(patchParams, { message_id_type: 'open_message_id' });
     assert.equal((patchedCard as any)?.header?.title?.content, '授权已处理');
     assert.match((patchedCard as any)?.body?.elements?.[0]?.content || '', /本会话允许/);
     assert.equal((patchedCard as any)?.body?.elements?.length, 1);
@@ -1606,11 +1651,13 @@ describe('FeishuAdapter', () => {
   it('approves Claude ExitPlanMode with manual approvals and keeps requested prompt rules', async () => {
     const store = new JsonFileStore(makeSettings());
     const resolutions: unknown[] = [];
+    let patchedBeforeResolve = false;
     initBridgeContext({
       store,
       llm: {} as any,
       permissions: {
         resolvePendingPermission: (_id: string, resolution: unknown) => {
+          patchedBeforeResolve = patchedCard !== null;
           resolutions.push(resolution);
           return true;
         },
@@ -1644,12 +1691,16 @@ describe('FeishuAdapter', () => {
       routeKey: 'group-claude-plan:thread:thread-1',
       requestMessageId: 'user-1',
       actionCardMessageId: 'card-msg-1',
+      actionCardOpenMessageId: 'open-card-1',
       approvalRequestId: 'perm-exit-1',
+      planText: '# Plan\n\n1. Create the HTML file\n2. Capture a screenshot',
       allowedPrompts: [{ tool: 'Bash', prompt: '在浏览器中打开 HTML 文件' }],
       resolved: false,
     });
 
     let patchedCard: Record<string, unknown> | null = null;
+    let patchTarget = '';
+    let patchParams: Record<string, unknown> | undefined;
     const adapter = new FeishuAdapter() as any;
     adapter.restClient = {
       im: {
@@ -1657,7 +1708,9 @@ describe('FeishuAdapter', () => {
           update: async () => ({ code: 0, data: {} }),
         },
         message: {
-          patch: async (payload: { data: { content: string } }) => {
+          patch: async (payload: { path: { message_id: string }; params?: Record<string, unknown>; data: { content: string } }) => {
+            patchTarget = payload.path.message_id;
+            patchParams = payload.params;
             patchedCard = JSON.parse(payload.data.content);
             return { code: 0, data: {} };
           },
@@ -1670,7 +1723,9 @@ describe('FeishuAdapter', () => {
         open_id: 'ou_123',
         tenant_key: 'tenant',
         token: 'token',
-        open_message_id: 'card-msg-1',
+        context: {
+          open_message_id: 'open-card-1',
+        },
         action: {
           value: { callback_data: 'planexit:approve:manual:wf-claude-manual' },
           tag: 'button',
@@ -1680,15 +1735,26 @@ describe('FeishuAdapter', () => {
     );
 
     assert.equal(result.toast.type, 'success');
+    assert.equal(patchTarget, 'open-card-1');
+    assert.deepEqual(patchParams, { message_id_type: 'open_message_id' });
     assert.equal(store.getChannelBinding('feishu', 'group-claude-plan')?.mode, 'code');
     assert.equal(store.getPlanWorkflow('wf-claude-manual'), null);
+    assert.equal(patchedBeforeResolve, true);
     assert.deepEqual(resolutions[0], {
       behavior: 'allow',
       updatedPermissions: buildClaudePlanModeUpdates('default', [{ tool: 'Bash', prompt: '在浏览器中打开 HTML 文件' }]),
     });
-    assert.equal((patchedCard as any)?.header?.title?.content, '计划已确认');
-    assert.match((patchedCard as any)?.body?.elements?.[0]?.content || '', /Yes, manually approve edits/);
-    assert.equal((patchedCard as any)?.body?.elements?.length, 1);
+    assert.equal((patchedCard as any)?.header?.title?.content, '计划已就绪');
+    assert.match((patchedCard as any)?.body?.elements?.[1]?.content || '', /Create the HTML file/);
+    assert.equal((patchedCard as any)?.body?.elements?.at(-1)?.tag, 'column_set');
+    const actionColumns = (patchedCard as any)?.body?.elements?.at(-1)?.columns || [];
+    assert.equal(actionColumns.length, 3);
+    assert.equal(actionColumns[0]?.elements?.[0]?.disabled, true);
+    assert.equal(actionColumns[1]?.elements?.[0]?.disabled, true);
+    assert.equal(actionColumns[2]?.elements?.[0]?.disabled, true);
+    assert.equal(actionColumns[1]?.elements?.[0]?.type, 'primary');
+    assert.equal(actionColumns[1]?.elements?.[0]?.text?.content, 'Yes, manually approve edits');
+    assert.equal((patchedCard as any)?.body?.elements?.length, 5);
   });
 
   it('executes a Claude follow-up plan confirmation card even when no pending ExitPlanMode request remains', async () => {

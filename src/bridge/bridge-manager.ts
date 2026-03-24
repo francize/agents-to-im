@@ -8,9 +8,11 @@
  */
 
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
+import os from 'node:os';
 import path from 'node:path';
 
-import type { StructuredInputRequestInfo } from './host.js';
+import type { MessageContentBlock, StructuredInputRequestInfo } from './host.js';
 import type {
   ActivityEvent,
   BridgeStatus,
@@ -29,6 +31,7 @@ import { markdownToTelegramChunks } from './markdown/telegram.js';
 import { markdownToDiscordChunks } from './markdown/discord.js';
 import { getBridgeContext } from './context.js';
 import {
+  buildClaudePlanExitCard,
   buildClaudePlanExecutionPrompt,
   buildClaudePlanModeUpdates,
   CLAUDE_PLAN_EXIT_BYPASS_LABEL,
@@ -37,6 +40,7 @@ import {
   parseClaudeAllowedPrompts,
   parseClaudePlanFilePath,
   parseClaudePlanText,
+  truncateClaudePlanCardText,
 } from '../claude-plan-exit.js';
 import { escapeHtml } from './adapters/telegram-utils.js';
 import {
@@ -125,12 +129,6 @@ function isClaudePlanExitPermission(perm: engine.PermissionRequestInfo): boolean
   return perm.toolName === 'ExitPlanMode';
 }
 
-function truncateClaudePlanCardText(text: string, maxChars = 7000): string {
-  const trimmed = text.trim();
-  if (trimmed.length <= maxChars) return trimmed;
-  return `${trimmed.slice(0, maxChars).trim()}\n\n...`;
-}
-
 function hasActivePreviewDraft(state: StreamingPreviewState): boolean {
   return !!(
     state.placeholderPrimed
@@ -195,105 +193,6 @@ function buildClaudePlanExitFallbackText(
   return lines.join('\n');
 }
 
-function buildClaudePlanExitCard(
-  workflowId: string,
-  planText: string,
-  allowedPrompts: Array<{ tool: string; prompt: string }>,
-  showClearContext: boolean,
-): Record<string, unknown> {
-  const elements: Array<Record<string, unknown>> = [
-    {
-      tag: 'markdown',
-      content: 'Claude 已经写好计划。确认后会退出 PLAN，并按所选模式继续执行。',
-    },
-    {
-      tag: 'markdown',
-      content: truncateClaudePlanCardText(planText || 'Claude 已生成计划，请确认是否继续。'),
-    },
-  ];
-
-  if (allowedPrompts.length > 0) {
-    elements.push({
-      tag: 'markdown',
-      content: [
-        '**执行时会申请的提示级权限**',
-        ...allowedPrompts.map((item) => `- ${item.tool}: ${item.prompt}`),
-      ].join('\n'),
-    });
-  }
-
-  elements.push(
-    {
-      tag: 'markdown',
-      content: showClearContext
-        ? '如需继续规划，请直接在本线程回复你希望 Claude 调整的地方。“清空上下文后执行”会结束当前 PLAN 会话，并用新会话按已确认计划开始实施。'
-        : '如需继续规划，请直接在本线程回复你希望 Claude 调整的地方。',
-    },
-    {
-      tag: 'column_set',
-      flex_mode: 'flow',
-      horizontal_spacing: '8px',
-      horizontal_align: 'left',
-      columns: [
-        {
-          tag: 'column',
-          width: 'auto',
-          elements: [
-            {
-              tag: 'button',
-              type: 'primary',
-              text: { tag: 'plain_text', content: CLAUDE_PLAN_EXIT_BYPASS_LABEL },
-              behaviors: [{ type: 'callback', value: { callback_data: `planexit:approve:bypass:${workflowId}` } }],
-            },
-          ],
-        },
-        {
-          tag: 'column',
-          width: 'auto',
-          elements: [
-            {
-              tag: 'button',
-              text: { tag: 'plain_text', content: CLAUDE_PLAN_EXIT_MANUAL_LABEL },
-              behaviors: [{ type: 'callback', value: { callback_data: `planexit:approve:manual:${workflowId}` } }],
-            },
-          ],
-        },
-        ...(showClearContext
-          ? [{
-              tag: 'column',
-              width: 'auto',
-              elements: [
-                {
-                  tag: 'button',
-                  text: { tag: 'plain_text', content: CLAUDE_PLAN_EXIT_CLEAR_BYPASS_LABEL },
-                  behaviors: [{ type: 'callback', value: { callback_data: `planexit:clear:bypass:${workflowId}` } }],
-                },
-              ],
-            }]
-          : []),
-      ],
-    },
-  );
-
-  return {
-    schema: '2.0',
-    config: {
-      update_multi: true,
-      width_mode: 'fill',
-    },
-    header: {
-      title: {
-        tag: 'plain_text',
-        content: '计划已就绪',
-      },
-      template: 'blue',
-    },
-    body: {
-      elements,
-    },
-  };
-}
-
 function buildStructuredInputPreface(request: StructuredInputRequestInfo): string {
   const headers = request.questions
     .map((question) => question.header.trim())
@@ -352,6 +251,59 @@ function isFreshNonEmptyFile(filePath: string, turnStartedAtMs: number): boolean
   } catch {
     return false;
   }
+}
+
+function imageExtensionForMediaType(mediaType: string): string {
+  switch (mediaType.toLowerCase()) {
+    case 'image/jpeg':
+      return '.jpg';
+    case 'image/gif':
+      return '.gif';
+    case 'image/webp':
+      return '.webp';
+    case 'image/png':
+    default:
+      return '.png';
+  }
+}
+
+function extractInlineToolResultImages(blocks: MessageContentBlock[]): Array<{
+  digest: string;
+  mediaType: string;
+  data: string;
+}> {
+  const images: Array<{ digest: string; mediaType: string; data: string }> = [];
+  const seen = new Set<string>();
+
+  for (const block of blocks) {
+    if (block.type !== 'tool_result' || block.is_error) continue;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(block.content);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(parsed)) continue;
+
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue;
+      const record = item as Record<string, unknown>;
+      if (record.type !== 'image') continue;
+      const source = record.source;
+      if (!source || typeof source !== 'object') continue;
+      const imageSource = source as Record<string, unknown>;
+      const mediaType = typeof imageSource.media_type === 'string' ? imageSource.media_type.trim() : '';
+      const data = typeof imageSource.data === 'string' ? imageSource.data.trim() : '';
+      if (imageSource.type !== 'base64' || !mediaType.startsWith('image/') || !data) continue;
+      const digest = createHash('sha1').update(data).digest('hex');
+      if (seen.has(digest)) continue;
+      seen.add(digest);
+      images.push({ digest, mediaType, data });
+    }
+  }
+
+  return images;
 }
 
 /**
@@ -1037,6 +989,7 @@ async function handleMessage(
   const binding = router.resolve(msg.address);
   const turnStartedAtMs = Date.now();
   const sentAutoImagePaths = new Set<string>();
+  const sentInlineToolResultImageDigests = new Set<string>();
   const autoImageSendEnabled = store.getSetting('bridge_feishu_auto_image_send') !== 'false';
 
   // Notify adapter that message processing is starting (e.g., typing indicator)
@@ -1344,6 +1297,42 @@ async function handleMessage(
     }
   };
 
+  const maybeSendInlineToolResultImages = async (blocks: MessageContentBlock[]): Promise<void> => {
+    if (!autoImageSendEnabled || !adapter.sendImage) return;
+
+    const images = extractInlineToolResultImages(blocks);
+    for (const image of images) {
+      if (sentInlineToolResultImageDigests.has(image.digest)) continue;
+      const tempPath = path.join(
+        os.tmpdir(),
+        `cti-inline-tool-result-${image.digest}${imageExtensionForMediaType(image.mediaType)}`,
+      );
+      try {
+        fs.writeFileSync(tempPath, Buffer.from(image.data, 'base64'));
+        const result = await adapter.sendImage({
+          address: msg.address,
+          filePath: tempPath,
+          replyToMessageId: msg.messageId,
+        });
+        if (result.ok) {
+          sentInlineToolResultImageDigests.add(image.digest);
+        } else {
+          console.warn(
+            `[bridge-manager] Failed to auto-send inline tool-result image ${image.digest}: ${result.error || 'unknown error'}`,
+          );
+        }
+      } catch (error) {
+        console.warn(`[bridge-manager] Failed to auto-send inline tool-result image ${image.digest}:`, error);
+      } finally {
+        try {
+          fs.rmSync(tempPath, { force: true });
+        } catch {
+          // Best effort cleanup.
+        }
+      }
+    }
+  };
+
   const handleActivityEvent = async (event: ActivityEvent): Promise<void> => {
     if (event.kind !== 'context_usage') {
       await maybeSendAutoImages(event);
@@ -1637,6 +1626,7 @@ async function handleMessage(
     // Send response text — render via channel-appropriate format
     let responseDelivery: SendResult | null = null;
     await settlePreview(previewState);
+    await maybeSendInlineToolResultImages(result.contentBlocks);
     const remainingSegments = result.responseSegments
       .filter((segment) => segment.trim())
       .slice(streamedSegmentCount);

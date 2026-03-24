@@ -1146,6 +1146,71 @@ describe('bridge-manager plan workflow', () => {
     assert.equal(adapter.sent[0].text, '截图已经生成。');
   });
 
+  it('auto-sends inline base64 images returned from tool_result blocks before the assistant summary', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Z3w8AAAAASUVORK5CYII=';
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'tool_result',
+              data: JSON.stringify({
+                tool_use_id: 'tool-image-1',
+                content: JSON.stringify([
+                  {
+                    type: 'image',
+                    source: {
+                      type: 'base64',
+                      media_type: 'image/png',
+                      data: pngBase64,
+                    },
+                  },
+                ]),
+                is_error: false,
+              }),
+            })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '效果如上图所示。' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-inline-image-1' }) })}\n`);
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-inline-image',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-inline-image',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-inline-image', threadId: 'thread-1' },
+      text: '发我截图',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sentImages.length === 1 && adapter.sent.length === 1);
+
+    assert.match(adapter.sentImages[0].filePath, /cti-inline-tool-result-.*\.png$/);
+    assert.equal(adapter.sentImages[0].replyToMessageId, 'msg-inline-image');
+    assert.equal(adapter.sent[0].text, '效果如上图所示。');
+  });
+
   it('auto-sends a completed file_change image by resolving relative paths against the binding cwd', async () => {
     const store = new JsonFileStore(makeSettings());
     const imagePath = path.resolve('/tmp/test-cwd/shot.png');

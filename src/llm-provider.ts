@@ -87,6 +87,13 @@ const API_AUTH_USER_MESSAGE =
   'API credential error. Check your ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN in config.env, ' +
   'or verify your organization has access to the requested model.';
 
+/**
+ * Claude CLI-managed local config (for example `~/.claude.json` project-local
+ * MCP registrations shown in `/mcp`) is only visible to the SDK when the
+ * `local` source is enabled.
+ */
+export const CLAUDE_SETTING_SOURCES = ['local', 'user', 'project'] as const;
+
 // ── Cross-runtime model guard ──
 
 const NON_CLAUDE_MODEL_RE = /^(gpt-|o[1-9][-_]|codex[-_]|davinci|text-|openai\/)/i;
@@ -679,9 +686,10 @@ export class SDKLLMProvider implements LLMProvider {
               permissionMode: (params.permissionMode as 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan') || undefined,
               allowDangerouslySkipPermissions: true,
               includePartialMessages: true,
-              // Keep user-level Claude auth/billing settings available while still
-              // allowing project settings to override repo-local behavior.
-              settingSources: ['user', 'project'],
+              // Keep local CLI-managed config (for MCPs in `~/.claude.json`),
+              // user auth/billing settings, and project overrides aligned with
+              // native Claude Code behavior.
+              settingSources: [...CLAUDE_SETTING_SOURCES],
               toolConfig: {
                 askUserQuestion: {
                   previewFormat: 'markdown',

@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  CLAUDE_SETTING_SOURCES,
   buildAskUserQuestionResponse,
   isAuthError,
   classifyAuthError,
@@ -68,6 +69,12 @@ describe('classifyAuthError', () => {
   it('prefers "cli" when both patterns match', () => {
     // "Not logged in" should be cli even if "unauthorized" is also present
     assert.equal(classifyAuthError('Not logged in, unauthorized'), 'cli');
+  });
+});
+
+describe('CLAUDE_SETTING_SOURCES', () => {
+  it('includes local config so CLI-managed MCP servers remain visible to the SDK', () => {
+    assert.deepEqual(CLAUDE_SETTING_SOURCES, ['local', 'user', 'project']);
   });
 });
 
