@@ -45,6 +45,26 @@ describe('FeishuAdapter', () => {
     fs.rmSync(DATA_DIR, { recursive: true, force: true });
   });
 
+  it('validates explicit profile config before bridge context is initialized', () => {
+    const adapter = new FeishuAdapter({
+      profile: {
+        id: 'profile-codex',
+        label: 'Codex Bot',
+        appId: 'app-id',
+        appSecret: 'app-secret',
+        toolOutputCards: true,
+        autoImageSend: true,
+      },
+      runtimeProfileMap: {
+        claude: 'profile-codex',
+        codex: 'profile-codex',
+      },
+      profileLabels: {},
+    });
+
+    assert.equal(adapter.validateConfig(), null);
+  });
+
   it('sends a Claude mode selection card instead of creating a group immediately from /new:claude in DM', async () => {
     const store = new JsonFileStore(makeSettings());
     let ensuredRuntime = '';
@@ -237,6 +257,8 @@ describe('FeishuAdapter', () => {
 
     assert.equal(claudeMessage.includes('/perm'), false);
     assert.equal(codexMessage.includes('/perm'), false);
+    assert.equal(claudeMessage.includes('/stop'), true);
+    assert.equal(codexMessage.includes('/stop'), true);
   });
 
   it('reset keeps runtime and clears persisted sdk session id', async () => {
@@ -1193,6 +1215,51 @@ describe('FeishuAdapter', () => {
     assert.equal(store.getChannelBinding('feishu', 'group-mode')?.mode, 'plan');
     assert.equal(store.getActivePlanWorkflowByBinding(binding.id), null);
     assert.equal(updatedNames.at(-1), 'Codex 新会话 [PLAN]');
+  });
+
+  it('queues /stop in a bound group instead of treating it as an unsupported command', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-stop',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5-codex',
+    });
+
+    const replies: string[] = [];
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        message: {
+          create: async () => ({ code: 0, data: { message_id: 'msg-1' } }),
+          reply: async (payload: { data: { content: string } }) => {
+            replies.push(payload.data.content);
+            return { code: 0, data: { message_id: 'msg-2' } };
+          },
+        },
+      },
+    };
+
+    await adapter.handleGroupMessage(
+      { id: 'ou_123', type: 'open_id' },
+      {
+        messageId: 'cmd-stop-1',
+        address: { channelType: 'feishu', chatId: 'group-stop', threadId: 'thread-1' },
+        text: '/stop',
+        timestamp: Date.now(),
+      },
+    );
+
+    assert.equal(replies.length, 0);
+    assert.equal((adapter as any).queue.length, 1);
+    assert.equal((adapter as any).queue[0].text, '/stop');
   });
 
   it('shows the Claude mode card for /mode in Claude groups regardless of text arguments', async () => {

@@ -40,6 +40,7 @@ flowchart LR
 | 权限确认 | 优先按钮，`/perm` 兜底 |
 | 活动卡 / 计划卡 | 已支持 |
 | 结构化提问卡 | 聊天场景安全时支持 |
+| 多 Bot profile | 已支持，按 runtime 映射到不同 Feishu/Lark Bot |
 | 本地状态面板 | 默认 `http://127.0.0.1:3456` |
 
 ## 快速开始
@@ -59,13 +60,8 @@ flowchart LR
 4. 添加：
    - `im.message.receive_v1`
    - `card.action.trigger`
-5. 给应用补齐以下能力所需的权限：
-   - 接收和读取 IM 消息
-   - 发送与更新 IM 消息
-   - 读取与更新群聊
-   - 拉人入群
-   - CardKit 读写
-6. 每次改权限或事件后，都重新发布应用版本。
+5. 权限配置优先使用飞书开放平台的“导入权限”能力，一次性导入 [references/setup-guides.md](references/setup-guides.md) 里的完整 scopes JSON。
+6. 每次改权限或事件后，都重新发布应用版本，然后执行一次 `agents-to-im restart`。
 
 完整检查清单见 [references/setup-guides.md](references/setup-guides.md)。
 
@@ -76,13 +72,14 @@ flowchart LR
 ```text
 帮我在这台机器上配置 agents-to-im。
 请先阅读 README.zh-CN.md 和 references/setup-guides.md，然后完成：
-1. 检查或创建 Feishu/Lark 应用
-2. 填写 ~/.agents-to-im/config.env
-3. 验证 Claude Code 和/或 Codex 本地 runtime 是否可用
-4. 启动 bridge 并检查诊断结果
+1. 安装持久可用的 agents-to-im CLI 命令
+2. 检查或创建 Feishu/Lark 应用
+3. 填写 ~/.agents-to-im/config.env
+4. 验证 Claude Code 和/或 Codex 本地 runtime 是否可用
+5. 启动 bridge 并检查诊断结果
 ```
 
-手动从源码安装：
+源码 checkout 方式仅建议在你要开发或调试本项目时使用：
 
 ```bash
 git clone https://github.com/francize/agents-to-im.git
@@ -98,11 +95,25 @@ $EDITOR ~/.agents-to-im/config.env
 bash scripts/daemon.sh restart
 ```
 
-推荐的安装 / 运行入口：
+推荐安装流程：
 
 ```bash
-npx github:francize/agents-to-im
+npm install -g github:francize/agents-to-im
+agents-to-im
 ```
+
+日常维护统一使用安装后的 `agents-to-im` 命令：
+
+```bash
+agents-to-im start
+agents-to-im restart
+agents-to-im status
+agents-to-im doctor
+agents-to-im logs 200
+agents-to-im stop
+```
+
+如果你只是想临时跑一次，`npx github:francize/agents-to-im` 仍然可用，但不再建议作为日常维护入口。
 
 必填配置：
 
@@ -128,20 +139,33 @@ npx github:francize/agents-to-im
 
 Codex 会话会直接复用本地 `~/.codex/config.toml` 或 `$CODEX_HOME/config.toml` 中的认证、trusted 目录、sandbox、approval policy 和默认模型行为。
 
+单 Bot 最小示例：
+
+```env
+CTI_FEISHU_PROFILE_IDS=default
+CTI_FEISHU_PROFILE_DEFAULT_APP_ID=cli_xxx
+CTI_FEISHU_PROFILE_DEFAULT_APP_SECRET=xxx
+CTI_RUNTIME_CLAUDE_FEISHU_PROFILE=default
+CTI_RUNTIME_CODEX_FEISHU_PROFILE=default
+CTI_DEFAULT_WORKDIR=/path/to/workdir
+```
+
+如果你要让 Claude 和 Codex 分别走不同 Bot，再新增一个 profile 并修改 runtime 映射即可，完整示例见 [references/setup-guides.md](references/setup-guides.md)。
+
 ### 3. 启动 bridge
 
 ```bash
-npx github:francize/agents-to-im start
+agents-to-im start
 ```
 
 常用本地命令：
 
 ```bash
-npx github:francize/agents-to-im restart
-npx github:francize/agents-to-im status
-npx github:francize/agents-to-im doctor
-npx github:francize/agents-to-im logs 200
-npx github:francize/agents-to-im stop
+agents-to-im restart
+agents-to-im status
+agents-to-im doctor
+agents-to-im logs 200
+agents-to-im stop
 bash scripts/daemon.sh restart
 ```
 
@@ -149,8 +173,8 @@ bash scripts/daemon.sh restart
 
 ### 4. 5 分钟验证
 
-1. 运行 `npx github:francize/agents-to-im doctor`
-2. 运行 `npx github:francize/agents-to-im status`，确认 bridge 正在运行
+1. 运行 `agents-to-im doctor`
+2. 运行 `agents-to-im status`，确认 bridge 正在运行
 3. 打开 `http://127.0.0.1:3456`，确认本地状态面板可访问
 4. 私聊 Bot，发送 `/new:claude` 或 `/new:codex`
 5. 如果是 Claude，会先在私聊里选择 mode；随后确认 Bot 自动创建了一个新群、完成会话绑定，并在群里继续回复
@@ -208,6 +232,7 @@ bridge 会把状态保存在 `~/.agents-to-im/`，所以一个群是可恢复的
 | `/mode` | 在 Claude 群里弹出 Claude mode 卡片；在 Codex 群里仍可用 `/mode plan\|code\|ask` 切换 bridge 模式 |
 | `/plan` | 进入交互式计划流程 |
 | `/plan <需求>` | 直接开始生成计划 |
+| `/stop` | 中断当前大模型输出，效果等价于在本地 CLI 里按一次 `Esc` / `Command+C` |
 | `/reset` | 替换当前会话并保留群的 runtime |
 | `/perm allow\|allow_session\|deny <id>` | 权限确认的兜底命令 |
 
@@ -225,7 +250,7 @@ bridge 会把状态保存在 `~/.agents-to-im/`，所以一个群是可恢复的
 
 ## 排障与参考文档
 
-- bridge 启动失败：先运行 `npx github:francize/agents-to-im doctor`
+- bridge 启动失败：先运行 `agents-to-im doctor`
 - 私聊 Bot 没反应：检查应用是否已发布、Bot 是否已开启、长连接是否已配置
 - `/new:*` 建了群但没有绑定成功：优先检查应用权限和本地 runtime 可用性
 - 流式卡片退化成普通消息：检查 CardKit 和 message update 权限

@@ -36,6 +36,7 @@ class FakeCodexClient {
   public calls: Array<{ method: string; params: unknown }> = [];
   public responses: Array<{ id: string | number; result: unknown }> = [];
   public responseErrors: Array<{ id: string | number; code: number; message: string }> = [];
+  public notifications: Array<{ method: string; params: unknown }> = [];
   private listener: ((message: any) => void) | null = null;
 
   constructor(
@@ -73,6 +74,10 @@ class FakeCodexClient {
 
   async respond(id: string | number, result: unknown): Promise<void> {
     this.responses.push({ id, result });
+  }
+
+  async notify(method: string, params?: unknown): Promise<void> {
+    this.notifications.push({ method, params });
   }
 
   async respondError(id: string | number, code: number, message: string): Promise<void> {
@@ -432,6 +437,71 @@ describe('CodexProvider', () => {
     assert.ok(activities.some((event) => event.kind === 'file_change' && event.status === 'running'));
     assert.ok(activities.some((event) => event.kind === 'file_change' && event.status === 'completed'));
     assert.ok(activities.some((event) => event.kind === 'lightweight_activity' && /已搜索/.test(event.text)));
+  });
+
+  it('interrupts the active turn when the bridge aborts a codex stream', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const fake = new FakeCodexClient({
+      'thread/start': async () => ({ thread: { id: 'thread-stop' }, model: 'gpt-5.4' }),
+      'turn/start': async () => {
+        queueMicrotask(() => {
+          fake.emit({
+            kind: 'notification',
+            method: 'turn/started',
+            params: {
+              threadId: 'thread-stop',
+              turn: { id: 'turn-stop' },
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'item/agentMessage/delta',
+            params: {
+              threadId: 'thread-stop',
+              turnId: 'turn-stop',
+              itemId: 'agent-stop',
+              delta: '正在处理...',
+            },
+          });
+        });
+        return { turn: { id: 'turn-stop' } };
+      },
+      'turn/interrupt': async (params) => {
+        queueMicrotask(() => {
+          fake.emit({
+            kind: 'notification',
+            method: 'turn/completed',
+            params: {
+              threadId: (params as { threadId: string }).threadId,
+              turn: { id: (params as { turnId: string }).turnId, error: null },
+            },
+          });
+        });
+        return {};
+      },
+    });
+
+    const provider = new CodexProvider();
+    (provider as any).client = fake;
+
+    const abortController = new AbortController();
+    const stream = provider.streamChat({
+      prompt: '继续执行',
+      sessionId: 'session-stop',
+      model: 'gpt-5.4',
+      abortController,
+    });
+
+    await waitFor(() => fake.calls.some((call) => call.method === 'turn/start'));
+    abortController.abort();
+
+    await collectStream(stream);
+
+    const interruptCall = fake.calls.find((call) => call.method === 'turn/interrupt');
+    assert.deepEqual(interruptCall?.params, {
+      threadId: 'thread-stop',
+      turnId: 'turn-stop',
+    });
   });
 
   it('keeps started and completed command activities on the same fallback id when item ids are missing', async () => {

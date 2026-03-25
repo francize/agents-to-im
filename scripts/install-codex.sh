@@ -61,6 +61,6 @@ echo "Pruning dev dependencies..."
 
 echo ""
 echo "Done! Start a new Codex session and use:"
-echo "  agents-to-im setup    — configure IM platform credentials"
+echo "  agents-to-im          — interactive setup wizard"
 echo "  agents-to-im start    — start the bridge daemon"
 echo "  agents-to-im doctor   — diagnose issues"

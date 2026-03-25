@@ -192,6 +192,15 @@ export class CodexAppServerClient {
     this.writePayload({ jsonrpc: '2.0', id, result });
   }
 
+  async notify(method: string, params?: unknown): Promise<void> {
+    await this.prepare();
+    this.writePayload({
+      jsonrpc: '2.0',
+      method,
+      ...(params !== undefined ? { params } : {}),
+    });
+  }
+
   async respondError(id: JsonRpcId, code: number, message: string, data?: unknown): Promise<void> {
     await this.prepare();
     this.writePayload({

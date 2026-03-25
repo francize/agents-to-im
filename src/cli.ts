@@ -2,13 +2,13 @@
 /**
  * Interactive CLI for agents-to-im.
  *
- * Usage:
- *   npx github:francize/agents-to-im        → Interactive setup wizard
- *   npx github:francize/agents-to-im start   → Start the bridge
- *   npx github:francize/agents-to-im restart → Restart the bridge
- *   npx github:francize/agents-to-im stop    → Stop the bridge
- *   npx github:francize/agents-to-im status  → Show bridge status
- *   npx github:francize/agents-to-im doctor  → Run diagnostics
+ * Daily usage:
+ *   agents-to-im         → Interactive setup wizard
+ *   agents-to-im start   → Start the bridge
+ *   agents-to-im restart → Restart the bridge
+ *   agents-to-im stop    → Stop the bridge
+ *   agents-to-im status  → Show bridge status
+ *   agents-to-im doctor  → Run diagnostics
  */
 
 import fs from 'node:fs';
@@ -249,10 +249,11 @@ async function setupWizard() {
   console.log(`  ${c.dim}Mode:${c.reset}       ${mode}`);
   console.log(`  ${c.dim}Config:${c.reset}     ${CONFIG_PATH}`);
   console.log('');
-  info(`Start the bridge: ${c.cyan}npx github:francize/agents-to-im start${c.reset}`);
-  info(`Quick restart:     ${c.cyan}npx github:francize/agents-to-im restart${c.reset}`);
-  info(`Check status:     ${c.cyan}npx github:francize/agents-to-im status${c.reset}`);
-  info(`Run diagnostics:  ${c.cyan}npx github:francize/agents-to-im doctor${c.reset}`);
+  info(`Install CLI once: ${c.cyan}npm install -g github:francize/agents-to-im${c.reset}`);
+  info(`Start the bridge: ${c.cyan}agents-to-im start${c.reset}`);
+  info(`Quick restart:    ${c.cyan}agents-to-im restart${c.reset}`);
+  info(`Check status:     ${c.cyan}agents-to-im status${c.reset}`);
+  info(`Run diagnostics:  ${c.cyan}agents-to-im doctor${c.reset}`);
   console.log('');
 }
 
@@ -296,7 +297,8 @@ function showStatus() {
     ok(`Config: ${CONFIG_PATH}`);
   } else {
     fail(`Config not found: ${CONFIG_PATH}`);
-    info(`Run setup: ${c.cyan}npx github:francize/agents-to-im${c.reset}`);
+    info(`Install CLI once: ${c.cyan}npm install -g github:francize/agents-to-im${c.reset}`);
+    info(`Run setup: ${c.cyan}agents-to-im${c.reset}`);
   }
 
   // Dashboard URL
@@ -355,7 +357,8 @@ function runDoctor() {
     } catch { fail('Cannot read config file'); }
   } else {
     fail(`Config not found: ${CONFIG_PATH}`);
-    info(`Run: ${c.cyan}npx github:francize/agents-to-im${c.reset}`);
+    info(`Install CLI once: ${c.cyan}npm install -g github:francize/agents-to-im${c.reset}`);
+    info(`Run: ${c.cyan}agents-to-im${c.reset}`);
   }
 
   // 4. Data directory

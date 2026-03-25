@@ -1258,9 +1258,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
   }
 
   validateConfig(): string | null {
-    const store = getBridgeContext().store;
-    const appId = this.options.profile.appId || store.getSetting('bridge_feishu_app_id') || '';
-    const appSecret = this.options.profile.appSecret || store.getSetting('bridge_feishu_app_secret') || '';
+    const store = this.tryGetStore();
+    const appId = this.options.profile.appId || store?.getSetting('bridge_feishu_app_id') || '';
+    const appSecret = this.options.profile.appSecret || store?.getSetting('bridge_feishu_app_secret') || '';
     if (!appId) return `${this.label}: CTI_FEISHU_PROFILE_${this.profileId.toUpperCase()}_APP_ID is required`;
     if (!appSecret) return `${this.label}: CTI_FEISHU_PROFILE_${this.profileId.toUpperCase()}_APP_SECRET is required`;
     return null;
@@ -1784,10 +1784,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return [
         `已创建 Claude 会话，当前 mode：**${modeTitle}**。`,
         '后续直接在本群发送消息继续对话。',
-        '可用命令：`/mode` 切换 mode、`/reset` 重置会话。权限请求请直接使用卡片按钮处理。',
+        '可用命令：`/stop` 中断当前输出、`/mode` 切换 mode、`/reset` 重置会话。权限请求请直接使用卡片按钮处理。',
       ].join('\n');
     }
-    return '已创建 codex 会话。后续请直接在本群继续对话。';
+    return [
+      '已创建 codex 会话。',
+      '后续请直接在本群继续对话。',
+      '可用命令：`/stop` 中断当前输出、`/mode` 切换 mode、`/reset` 重置会话。',
+    ].join('\n');
   }
 
   private async ensureRuntimeAvailable(runtime: RuntimeName): Promise<void> {
@@ -1889,6 +1893,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
       await this.handleResetCommand(inbound.address, inbound.messageId);
       return;
     }
+    if (lower === '/stop') {
+      if (!binding) {
+        await this.sendAsPost(inbound.address, '当前群尚未绑定会话。请先私聊 Bot 发送 `/new:claude` 或 `/new:codex`。', inbound.messageId);
+        return;
+      }
+      this.enqueue(inbound);
+      return;
+    }
     if (lower.startsWith('/mode')) {
       if (!binding) {
         await this.sendAsPost(inbound.address, '当前群尚未绑定会话。请先私聊 Bot 发送 `/new:claude` 或 `/new:codex`。', inbound.messageId);
@@ -1910,7 +1922,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return;
     }
     if (lower.startsWith('/')) {
-      await this.sendAsPost(inbound.address, '该群仅支持普通对话、`/plan`、`/mode`、`/reset`。权限请求请直接使用卡片按钮处理；如需新会话，请私聊 Bot。', inbound.messageId);
+      await this.sendAsPost(inbound.address, '该群仅支持普通对话、`/plan`、`/mode`、`/stop`、`/reset`。权限请求请直接使用卡片按钮处理；如需新会话，请私聊 Bot。', inbound.messageId);
       return;
     }
 
@@ -2927,13 +2939,21 @@ export class FeishuAdapter extends BaseChannelAdapter {
   }
 
   private getClientConfig(): { appId: string; appSecret: string; domain: lark.Domain } {
-    const store = getBridgeContext().store;
-    const appId = this.options.profile.appId || store.getSetting('bridge_feishu_app_id') || '';
-    const appSecret = this.options.profile.appSecret || store.getSetting('bridge_feishu_app_secret') || '';
-    const domain = (this.options.profile.domain || store.getSetting('bridge_feishu_domain') || '') === 'lark'
+    const store = this.tryGetStore();
+    const appId = this.options.profile.appId || store?.getSetting('bridge_feishu_app_id') || '';
+    const appSecret = this.options.profile.appSecret || store?.getSetting('bridge_feishu_app_secret') || '';
+    const domain = (this.options.profile.domain || store?.getSetting('bridge_feishu_domain') || '') === 'lark'
       ? lark.Domain.Lark
       : lark.Domain.Feishu;
     return { appId, appSecret, domain };
+  }
+
+  private tryGetStore(): JsonFileStore | null {
+    try {
+      return getBridgeContext().store as JsonFileStore;
+    } catch {
+      return null;
+    }
   }
 
   private getStore(): JsonFileStore {

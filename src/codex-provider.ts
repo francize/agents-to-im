@@ -531,6 +531,7 @@ export class CodexProvider implements LLMProvider {
     const client = await this.ensureClient();
     const tempFiles: string[] = [];
     let unsubscribe: (() => void) | null = null;
+    let abortListener: (() => void) | null = null;
 
     try {
       const bootstrap = await this.bootstrapThread(client, params);
@@ -595,9 +596,33 @@ export class CodexProvider implements LLMProvider {
         turnStart = await client.call<{ turn?: { id?: string } }>('turn/start', turnParams);
       }
       let activeTurnId = typeof turnStart?.turn?.id === 'string' ? turnStart.turn.id : '';
+      let turnInterrupted = false;
+
+      const interruptActiveTurn = async (): Promise<void> => {
+        if (turnInterrupted || !threadId || !activeTurnId) return;
+        turnInterrupted = true;
+        try {
+          await client.call('turn/interrupt', {
+            threadId,
+            turnId: activeTurnId,
+          });
+        } catch (error) {
+          console.warn('[codex-provider] Failed to interrupt active turn:', error);
+        }
+      };
+
+      abortListener = (): void => {
+        if (wakeQueue) {
+          wakeQueue();
+          wakeQueue = null;
+        }
+        void interruptActiveTurn();
+      };
+      params.abortController?.signal.addEventListener('abort', abortListener, { once: true });
 
       while (true) {
         if (params.abortController?.signal.aborted) {
+          await interruptActiveTurn();
           break;
         }
 
@@ -740,6 +765,9 @@ export class CodexProvider implements LLMProvider {
         // no-op
       }
     } finally {
+      if (abortListener) {
+        params.abortController?.signal.removeEventListener('abort', abortListener);
+      }
       unsubscribe?.();
       for (const tmp of tempFiles) {
         try {

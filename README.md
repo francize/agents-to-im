@@ -40,6 +40,7 @@ flowchart LR
 | Permission approvals | Buttons first, `/perm` fallback |
 | Activity and plan cards | Supported |
 | Structured input cards | Supported when safe for chat input |
+| Multiple bot profiles | Supported, with runtime-to-Feishu-profile mapping |
 | Local dashboard | `http://127.0.0.1:3456` by default |
 
 ## Quick Start
@@ -59,13 +60,8 @@ flowchart LR
 4. Add:
    - `im.message.receive_v1`
    - `card.action.trigger`
-5. Grant enough scopes for:
-   - receiving and reading IM messages
-   - sending and updating IM messages
-   - reading and updating chats
-   - adding chat members
-   - CardKit read/write
-6. Publish the app after changing permissions or events.
+5. Prefer using Feishu's permission import to import the full scopes JSON from [references/setup-guides.md](references/setup-guides.md) in one shot.
+6. After changing permissions or events, publish the app again and run `agents-to-im restart`.
 
 For the full checklist, see [references/setup-guides.md](references/setup-guides.md).
 
@@ -76,13 +72,14 @@ If you want an AI coding agent to guide the setup, give it this prompt:
 ```text
 Set up agents-to-im for this machine.
 Read README.md and references/setup-guides.md, then guide me through:
-1. Creating or checking the Feishu/Lark app
-2. Filling ~/.agents-to-im/config.env
-3. Verifying Claude Code and/or Codex local runtime availability
-4. Starting the bridge and checking diagnostics
+1. Installing the persistent agents-to-im CLI command
+2. Creating or checking the Feishu/Lark app
+3. Filling ~/.agents-to-im/config.env
+4. Verifying Claude Code and/or Codex local runtime availability
+5. Starting the bridge and checking diagnostics
 ```
 
-Manual install from source:
+Source checkout is only recommended when you want to develop or debug the project locally:
 
 ```bash
 git clone https://github.com/francize/agents-to-im.git
@@ -98,11 +95,25 @@ $EDITOR ~/.agents-to-im/config.env
 bash scripts/daemon.sh restart
 ```
 
-Recommended install / run entry:
+Recommended install flow:
 
 ```bash
-npx github:francize/agents-to-im
+npm install -g github:francize/agents-to-im
+agents-to-im
 ```
+
+Daily maintenance should use the installed `agents-to-im` command:
+
+```bash
+agents-to-im start
+agents-to-im restart
+agents-to-im status
+agents-to-im doctor
+agents-to-im logs 200
+agents-to-im stop
+```
+
+If you only want a temporary one-shot run, `npx github:francize/agents-to-im` still works, but it is no longer the recommended daily maintenance path.
 
 Required config:
 
@@ -128,20 +139,33 @@ Common optional config:
 
 Codex sessions reuse your local `~/.codex/config.toml` or `$CODEX_HOME/config.toml` for auth, trusted directories, sandbox, approval policy, and default model behavior.
 
+Single-bot minimal example:
+
+```env
+CTI_FEISHU_PROFILE_IDS=default
+CTI_FEISHU_PROFILE_DEFAULT_APP_ID=cli_xxx
+CTI_FEISHU_PROFILE_DEFAULT_APP_SECRET=xxx
+CTI_RUNTIME_CLAUDE_FEISHU_PROFILE=default
+CTI_RUNTIME_CODEX_FEISHU_PROFILE=default
+CTI_DEFAULT_WORKDIR=/path/to/workdir
+```
+
+If Claude and Codex should use different bots, add another profile and change the runtime mapping. A fuller example is in [references/setup-guides.md](references/setup-guides.md).
+
 ### 3. Start the bridge
 
 ```bash
-npx github:francize/agents-to-im start
+agents-to-im start
 ```
 
 Useful local commands:
 
 ```bash
-npx github:francize/agents-to-im restart
-npx github:francize/agents-to-im status
-npx github:francize/agents-to-im doctor
-npx github:francize/agents-to-im logs 200
-npx github:francize/agents-to-im stop
+agents-to-im restart
+agents-to-im status
+agents-to-im doctor
+agents-to-im logs 200
+agents-to-im stop
 bash scripts/daemon.sh restart
 ```
 
@@ -149,8 +173,8 @@ After changing `config.env`, pulling new code, or republishing Feishu events/sco
 
 ### 4. 5-minute validation
 
-1. Run `npx github:francize/agents-to-im doctor`.
-2. Run `npx github:francize/agents-to-im status` and confirm the bridge is running.
+1. Run `agents-to-im doctor`.
+2. Run `agents-to-im status` and confirm the bridge is running.
 3. Open `http://127.0.0.1:3456` and confirm the local dashboard is reachable.
 4. DM the bot with `/new:claude` or `/new:codex`.
 5. For Claude, pick a mode from the card, then confirm the bot creates a fresh group, binds it to a new session, and replies inside that group.
@@ -208,6 +232,7 @@ Any other DM message returns help text instead of starting a session.
 | `/mode` | In Claude groups: open the Claude mode card. In Codex groups: use `/mode plan\|code\|ask` to switch bridge mode |
 | `/plan` | Start an interactive planning flow |
 | `/plan <request>` | Start planning immediately |
+| `/stop` | Interrupt the current model output, similar to pressing `Esc` / `Command+C` in the local CLI |
 | `/reset` | Replace the current session and keep the group's runtime |
 | `/perm allow\|allow_session\|deny <id>` | Fallback for permission approval |
 
@@ -225,7 +250,7 @@ The result is a better fit for teams that primarily work in Feishu/Lark and want
 
 ## Troubleshooting and References
 
-- Bridge fails to start: run `npx github:francize/agents-to-im doctor`.
+- Bridge fails to start: run `agents-to-im doctor`.
 - Bot does not answer in DM: confirm the app is published, Bot is enabled, and Long Connection is configured.
 - `/new:*` creates a group but fails to bind: check app scopes and local runtime availability.
 - Streaming cards fall back to plain messages: verify CardKit and message update permissions.
