@@ -341,6 +341,70 @@ function summarizeToolCall(name: string, input: unknown): string {
   return target ? `正在调用 ${name} (${target})…` : `正在调用 ${name}…`;
 }
 
+function truncatePreview(text: string, maxChars = 220): string {
+  const normalized = normalizeLine(text);
+  if (!normalized) return '';
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars - 3).trimEnd()}...`;
+}
+
+function stringifyPreview(value: unknown): string {
+  if (typeof value === 'string') return truncatePreview(value);
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return truncatePreview(String(value));
+  }
+  if (Array.isArray(value)) {
+    return truncatePreview(value.map((entry) => stringifyPreview(entry)).filter(Boolean).join(' '));
+  }
+  if (value && typeof value === 'object') {
+    const record = value as JsonRecord;
+    const text = firstString(record.text, record.content, record.message, record.summary, record.detail);
+    if (text) return truncatePreview(text);
+    try {
+      return truncatePreview(JSON.stringify(value));
+    } catch {
+      return '';
+    }
+  }
+  return '';
+}
+
+function formatToolActivityName(toolName: string): string {
+  const trimmed = toolName.trim();
+  if (!trimmed) return '工具';
+  if (trimmed.startsWith('MCP:')) return trimmed;
+  if (trimmed.includes('/')) {
+    const [server, ...rest] = trimmed.split('/');
+    if (server && rest.length > 0) {
+      return `MCP: ${server} ${rest.join('/')}`.trim();
+    }
+  }
+  return trimmed;
+}
+
+function buildToolActivity(
+  toolUseId: string,
+  status: 'running' | 'completed' | 'failed',
+  toolName: string,
+  options?: {
+    inputPreview?: string;
+    resultPreview?: string;
+    turnId?: string;
+    source?: string;
+  },
+): ActivityEvent {
+  return {
+    kind: 'tool_activity',
+    turnId: options?.turnId,
+    toolUseId,
+    toolName: formatToolActivityName(toolName),
+    status,
+    ...(options?.inputPreview ? { inputPreview: options.inputPreview } : {}),
+    ...(options?.resultPreview ? { resultPreview: options.resultPreview } : {}),
+    ...(options?.source ? { source: options.source } : {}),
+  };
+}
+
 function buildLightweightActivity(
   scopeId: string,
   status: 'running' | 'completed' | 'failed',
@@ -992,19 +1056,22 @@ export class CodexProvider implements LLMProvider {
         const toolId = typeof item.id === 'string' ? item.id : `tool:${resolvedTurnId || Date.now()}`;
         const server = typeof item.server === 'string' ? item.server : '';
         const tool = typeof item.tool === 'string' ? item.tool : '';
+        const toolName = `${server}/${tool}`.replace(/^\/+/, '');
         const result = item.result as JsonRecord | null | undefined;
         const error = item.error as JsonRecord | null | undefined;
         const content = result?.content ?? result?.structuredContent ?? result?.structured_content;
-        const activity = buildLightweightActivity(
-          resolvedTurnId || toolId,
+        const activity = buildToolActivity(
+          toolId,
           error ? 'failed' : 'completed',
-          summarizeToolCall(`${server}/${tool}`, item.arguments),
-          resolvedTurnId,
-          'tool_call',
+          toolName,
+          {
+            turnId: resolvedTurnId,
+            source: 'tool_call',
+            inputPreview: stringifyPreview(item.arguments),
+            resultPreview: stringifyPreview(error?.message || content),
+          },
         );
-        if (activity) {
-          emitCanonicalTurnEvent(controller, { type: 'activity_event', data: activity });
-        }
+        emitCanonicalTurnEvent(controller, { type: 'activity_event', data: activity });
         emitCanonicalTurnEvent(controller, {
           type: 'tool_use',
           data: {
@@ -1070,19 +1137,20 @@ export class CodexProvider implements LLMProvider {
       return;
     }
     if (itemType === 'mcpToolCall') {
-      const activity = buildLightweightActivity(
-        turnId || String(item.id || Date.now()),
-        'running',
-        summarizeToolCall(
+      const toolId = firstString(item.id) || `tool:${turnId || Date.now()}`;
+      emitCanonicalTurnEvent(controller, {
+        type: 'activity_event',
+        data: buildToolActivity(
+          toolId,
+          'running',
           `${firstString(item.server)}/${firstString(item.tool)}`.replace(/^\/+/, ''),
-          item.arguments,
+          {
+            turnId: turnId || undefined,
+            source: 'tool_call',
+            inputPreview: stringifyPreview(item.arguments),
+          },
         ),
-        turnId || undefined,
-        'tool_call',
-      );
-      if (activity) {
-        emitCanonicalTurnEvent(controller, { type: 'activity_event', data: activity });
-      }
+      });
     }
   }
 
@@ -1130,15 +1198,22 @@ export class CodexProvider implements LLMProvider {
     params: JsonRecord,
     turnId: string,
   ): void {
-    const activity = buildLightweightActivity(
-      turnId || firstString(params.itemId, params.id) || `tool:${Date.now()}`,
-      'running',
-      summarizeToolCall(firstString(params.toolName, params.tool, params.name) || '工具', params.input || params.arguments),
-      turnId || undefined,
-      'tool_call',
-    );
-    if (activity) {
-      emitCanonicalTurnEvent(controller, { type: 'activity_event', data: activity });
-    }
+    const toolUseId = firstString(params.itemId, params.id) || `tool:${turnId || Date.now()}`;
+    const explicitToolName = firstString(params.toolName);
+    const rawToolName = explicitToolName || `${firstString(params.server)}/${firstString(params.tool, params.name)}`.replace(/^\/+/, '');
+    emitCanonicalTurnEvent(controller, {
+      type: 'activity_event',
+      data: buildToolActivity(
+        toolUseId,
+        'running',
+        rawToolName || '工具',
+        {
+          turnId: turnId || undefined,
+          source: 'tool_call',
+          inputPreview: stringifyPreview(params.input || params.arguments),
+          resultPreview: stringifyPreview(params.delta || params.output),
+        },
+      ),
+    });
   }
 }

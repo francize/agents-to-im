@@ -51,6 +51,7 @@ import {
   sanitizeInput,
   validateMode,
 } from './security/validators.js';
+import { appendLocalCommandExchange } from './local-command-history.js';
 
 const GLOBAL_KEY = '__bridge_manager__';
 
@@ -2090,6 +2091,8 @@ async function handleCommand(
   }
 
   let response = '';
+  let historySessionId = '';
+  let shouldAppendLocalHistory = false;
 
   switch (command) {
     case '/start':
@@ -2168,6 +2171,8 @@ async function handleCommand(
       const binding = router.resolve(msg.address);
       router.updateBinding(binding.id, { mode: args });
       response = `Mode set to <b>${args}</b>`;
+      historySessionId = binding.codepilotSessionId;
+      shouldAppendLocalHistory = true;
       break;
     }
 
@@ -2212,6 +2217,8 @@ async function handleCommand(
       } else {
         response = 'No task is currently running.';
       }
+      historySessionId = binding.codepilotSessionId;
+      shouldAppendLocalHistory = true;
       break;
     }
 
@@ -2266,6 +2273,9 @@ async function handleCommand(
       parseMode: 'HTML',
       replyToMessageId: msg.messageId,
     });
+    if (shouldAppendLocalHistory && historySessionId) {
+      appendLocalCommandExchange(store, historySessionId, text, response);
+    }
   }
 }
 

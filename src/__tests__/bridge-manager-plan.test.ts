@@ -288,6 +288,46 @@ describe('bridge-manager plan workflow', () => {
     assert.equal(workflow?.requestText, '先帮我规划实现方案');
   });
 
+  it('writes local /stop replies into session history for the next model turn', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: {} as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-stop',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5-codex',
+    });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-stop-1',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-stop' },
+      text: '/stop',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length === 1);
+
+    assert.match(adapter.sent[0].text, /No task is currently running/);
+    const history = store.getMessages(session.id).messages.slice(-2);
+    assert.equal(history[0]?.content, '/stop');
+    assert.match(history[1]?.content || '', /No task is currently running/);
+  });
+
   it('treats Claude ExitPlanMode as a dedicated plan approval instead of a generic permission card', async () => {
     const store = new JsonFileStore(makeSettings());
     initBridgeContext({
@@ -400,7 +440,8 @@ describe('bridge-manager plan workflow', () => {
           llmCalls.push(params);
           return new ReadableStream<string>({
             start(controller) {
-              controller.enqueue(`data: ${JSON.stringify({ type: 'text', data: '# 原生计划\\n\\n1. 先确认范围\\n2. 再开始实施' })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '# 原生计划\\n\\n1. 先确认范围\\n2. 再开始实施' })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({ type: 'plan_result', data: '# 原生计划\\n\\n1. 先确认范围\\n2. 再开始实施' })}\n`);
               controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-native-1' }) })}\n`);
               controller.close();
             },

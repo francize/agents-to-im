@@ -504,6 +504,113 @@ describe('CodexProvider', () => {
     });
   });
 
+  it('emits tool_activity events for MCP tool calls so channel adapters can render streaming cards', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const fake = new FakeCodexClient({
+      'thread/start': async () => ({ thread: { id: 'thread-mcp-card' }, model: 'gpt-5.4' }),
+      'turn/start': async () => {
+        queueMicrotask(() => {
+          fake.emit({
+            kind: 'notification',
+            method: 'turn/started',
+            params: {
+              threadId: 'thread-mcp-card',
+              turn: { id: 'turn-mcp-card' },
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'item/started',
+            params: {
+              threadId: 'thread-mcp-card',
+              turnId: 'turn-mcp-card',
+              item: {
+                type: 'mcpToolCall',
+                id: 'tool-mcp-1',
+                server: 'chrome-devtools',
+                tool: 'take_screenshot',
+                arguments: {
+                  path: '/tmp/demo.html',
+                },
+              },
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'item/toolCall/outputDelta',
+            params: {
+              threadId: 'thread-mcp-card',
+              turnId: 'turn-mcp-card',
+              itemId: 'tool-mcp-1',
+              toolName: 'MCP: chrome-devtools take_screenshot',
+              delta: 'Captured viewport screenshot',
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'item/completed',
+            params: {
+              threadId: 'thread-mcp-card',
+              turnId: 'turn-mcp-card',
+              item: {
+                type: 'mcpToolCall',
+                id: 'tool-mcp-1',
+                server: 'chrome-devtools',
+                tool: 'take_screenshot',
+                arguments: {
+                  path: '/tmp/demo.html',
+                },
+                result: {
+                  content: 'Took a screenshot of the current page',
+                },
+              },
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'turn/completed',
+            params: {
+              threadId: 'thread-mcp-card',
+              turn: { id: 'turn-mcp-card', error: null },
+            },
+          });
+        });
+        return { turn: { id: 'turn-mcp-card' } };
+      },
+    });
+
+    const provider = new CodexProvider();
+    (provider as any).client = fake;
+
+    const chunks = await collectStream(provider.streamChat({
+      prompt: '继续',
+      sessionId: 'session-mcp-card',
+      model: 'gpt-5.4',
+    }));
+
+    const events = parseSSEChunks(chunks);
+    const activities = events
+      .filter((event) => event.type === 'activity_event')
+      .map((event) => JSON.parse(event.data));
+    const toolActivities = activities.filter((event) => event.kind === 'tool_activity');
+
+    assert.ok(toolActivities.some((event) =>
+      event.toolUseId === 'tool-mcp-1'
+      && event.status === 'running'
+      && event.toolName === 'MCP: chrome-devtools take_screenshot'
+      && (event.inputPreview || '').includes('demo.html')
+    ));
+    assert.ok(toolActivities.some((event) =>
+      event.toolUseId === 'tool-mcp-1'
+      && event.status === 'completed'
+      && /Took a screenshot/.test(event.resultPreview || '')
+    ));
+    assert.equal(
+      activities.some((event) => event.kind === 'lightweight_activity' && /take_screenshot/.test(event.text || '')),
+      false,
+    );
+  });
+
   it('keeps started and completed command activities on the same fallback id when item ids are missing', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
     const fake = new FakeCodexClient({

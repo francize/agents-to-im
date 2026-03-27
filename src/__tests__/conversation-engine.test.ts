@@ -86,6 +86,55 @@ describe('conversation-engine', () => {
     );
   });
 
+  it('dedupes a codex native plan when both agent text and plan_result carry the same plan body', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(sseEvent('text_segment', '# 原生计划\n\n1. 先确认范围\n2. 再开始实施'));
+            controller.enqueue(sseEvent('plan_result', '# 原生计划\n\n1. 先确认范围\n2. 再开始实施'));
+            controller.enqueue(sseEvent('result', { session_id: 'thread-plan-dedupe' }));
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-plan-dedupe',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    const result = await processMessage(
+      binding,
+      '给我一个计划',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { collaborationModeOverride: 'plan' },
+    );
+
+    assert.deepEqual(result.responseSegments, [
+      '# 原生计划\n\n1. 先确认范围\n2. 再开始实施',
+    ]);
+    assert.equal(result.responseText, '# 原生计划\n\n1. 先确认范围\n2. 再开始实施');
+  });
+
   it('merges a very short leading segment into the next segment before notifying the bridge', async () => {
     const store = new JsonFileStore(makeSettings());
     initBridgeContext({

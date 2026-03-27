@@ -115,6 +115,36 @@ function renderPlanMarkdown(explanation: string, steps: unknown[], body: string)
   return lines.join('\n').trim();
 }
 
+function normalizeComparableText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function isDuplicatePlanSegment(candidate: string, renderedPlan: string): boolean {
+  const normalizedCandidate = normalizeComparableText(candidate);
+  const normalizedPlan = normalizeComparableText(renderedPlan);
+  if (!normalizedCandidate || !normalizedPlan) return false;
+  if (normalizedCandidate === normalizedPlan) return true;
+  if (normalizedCandidate.length >= 80 && normalizedPlan.includes(normalizedCandidate)) return true;
+  if (normalizedPlan.length >= 80 && normalizedCandidate.includes(normalizedPlan)) return true;
+  return false;
+}
+
+function dropTrailingDuplicatePlanText(
+  responseSegments: string[],
+  contentBlocks: MessageContentBlock[],
+  renderedPlan: string,
+): void {
+  while (responseSegments.length > 0 && isDuplicatePlanSegment(responseSegments.at(-1) || '', renderedPlan)) {
+    responseSegments.pop();
+    for (let index = contentBlocks.length - 1; index >= 0; index -= 1) {
+      if (contentBlocks[index]?.type === 'text') {
+        contentBlocks.splice(index, 1);
+        break;
+      }
+    }
+  }
+}
+
 function resolveLegacyPermissionMode(binding: ChannelBinding): ClaudePermissionMode {
   switch (binding.mode) {
     case 'plan':
@@ -269,6 +299,7 @@ export async function processMessage(
       stream,
       sessionId,
       runtime,
+      options?.collaborationModeOverride,
       onPermissionRequest,
       onPartialText,
       onStructuredInputRequest,
@@ -292,6 +323,7 @@ async function consumeStream(
   stream: ReadableStream<string>,
   sessionId: string,
   runtime: 'claude' | 'codex',
+  collaborationModeOverride?: ProcessMessageOptions['collaborationModeOverride'],
   onPermissionRequest?: OnPermissionRequest,
   onPartialText?: OnPartialText,
   onStructuredInputRequest?: OnStructuredInputRequest,
@@ -646,6 +678,9 @@ async function consumeStream(
     // Flush remaining text
     await flushTextBoundary(true);
     const renderedPlan = renderPlanMarkdown(planExplanation, planSteps, planBody);
+    if (runtime === 'codex' && collaborationModeOverride === 'plan' && renderedPlan) {
+      dropTrailingDuplicatePlanText(responseSegments, contentBlocks, renderedPlan);
+    }
     if (renderedPlan && responseSegments.at(-1) !== renderedPlan) {
       await appendTextSegment(renderedPlan);
     }
@@ -685,6 +720,9 @@ async function consumeStream(
     // Best-effort save on stream error
     await flushTextBoundary(true);
     const renderedPlan = renderPlanMarkdown(planExplanation, planSteps, planBody);
+    if (runtime === 'codex' && collaborationModeOverride === 'plan' && renderedPlan) {
+      dropTrailingDuplicatePlanText(responseSegments, contentBlocks, renderedPlan);
+    }
     if (renderedPlan && responseSegments.at(-1) !== renderedPlan) {
       await appendTextSegment(renderedPlan);
     }

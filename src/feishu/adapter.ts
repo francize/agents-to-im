@@ -8,6 +8,7 @@ import type {
   ChannelAddress,
   ChannelBinding,
   ChannelType,
+  FileAttachment,
   InboundMessage,
   OutboundImage,
   OutboundMessage,
@@ -18,6 +19,7 @@ import { DEFAULT_CHANNEL_INSTANCE_ID, resolveChannelInstanceId } from '../bridge
 import type { StructuredInputRequestInfo, StructuredInputResponse } from '../bridge/host.js';
 import { BaseChannelAdapter } from '../bridge/channel-adapter.js';
 import { getBridgeContext } from '../bridge/context.js';
+import { appendLocalCommandExchange } from '../bridge/local-command-history.js';
 import { handlePermissionCallback } from '../bridge/permission-broker.js';
 import { validateMode } from '../bridge/security/validators.js';
 import {
@@ -52,6 +54,7 @@ const TYPING_EMOJI = 'Typing';
 const STREAM_PLACEHOLDER_TEXT = '🤖 努力回答中...';
 const PLAN_SUFFIX = ' [PLAN]';
 const STRUCTURED_INPUT_PREFIX = 'structured-input';
+const PENDING_INBOUND_IMAGE_TTL_MS = 15 * 60 * 1000;
 export const FEISHU_REQUIRED_APP_SCOPES = [
   'im:message:send_as_bot',
   'im:message:readonly',
@@ -123,6 +126,17 @@ interface PendingActivitySend {
   needsRecoveryPatch: boolean;
 }
 
+interface PendingInboundImage {
+  key: string;
+  chatId: string;
+  threadId?: string;
+  senderId: string;
+  messageId: string;
+  createdAt: number;
+  attachments?: FileAttachment[];
+  errorMessage?: string;
+}
+
 export interface FeishuAdapterOptions {
   profile: FeishuProfileConfig;
   runtimeProfileMap: Record<RuntimeName, string>;
@@ -157,6 +171,10 @@ function routeKeyForAddress(address: Pick<ChannelAddress, 'chatId' | 'threadId'>
 
 function previewKey(routeKey: string, draftId: number): string {
   return `${routeKey}:${draftId}`;
+}
+
+function pendingInboundImageKey(chatId: string, senderId: string, messageId: string, threadId?: string): string {
+  return `${chatId}:${threadId || 'main'}:${senderId}:${messageId}`;
 }
 
 function activityKey(routeKey: string, activityId: string): string {
@@ -724,9 +742,18 @@ function buildStructuredInputQuestionElements(request: StructuredInputRequestInf
   ];
 
   for (const question of request.questions) {
+    const singleSelectReasonLines = question.options?.length && !question.multiSelect
+      ? question.options
+          .filter((option) => option.description)
+          .map((option, index) => `${index + 1}. ${option.label}：${option.description}`)
+      : [];
     elements.push({
       tag: 'markdown',
-      content: `**${question.header || question.id}**\n${question.question}`,
+      content: [
+        `**${question.header || question.id}**`,
+        question.question,
+        ...(singleSelectReasonLines.length > 0 ? ['', '可选项说明：', ...singleSelectReasonLines] : []),
+      ].join('\n'),
     });
 
     if (question.options?.length && !question.multiSelect) {
@@ -848,6 +875,13 @@ function buildResolvedStructuredInputElements(
     const submitted = answers?.[question.id]?.answers
       ?.map((answer) => answer.trim())
       .filter(Boolean) || [];
+    const formattedSubmitted = submitted.map((answer) => {
+      const option = question.options?.find((candidate) => candidate.label.trim() === answer);
+      if (option?.description) {
+        return `${answer} (${option.description})`;
+      }
+      return answer;
+    });
     elements.push({
       tag: 'div',
       text: {
@@ -859,8 +893,8 @@ function buildResolvedStructuredInputElements(
       tag: 'div',
       text: {
         tag: 'plain_text',
-        content: submitted.length > 0
-          ? `已提交：${submitted.join(' / ')}`
+        content: formattedSubmitted.length > 0
+          ? `已提交：${formattedSubmitted.join(' / ')}`
           : '已提交：未记录答案',
       },
     });
@@ -905,7 +939,10 @@ function buildStructuredInputFallbackText(request: StructuredInputRequestInfo): 
     lines.push(`${index + 1}. ${question.header || question.id}`);
     lines.push(question.question);
     if (question.options?.length) {
-      lines.push(`可选项：${question.options.map((option) => option.label).join(' / ')}`);
+      const optionsText = question.options
+        .map((option) => option.description ? `${option.label}：${option.description}` : option.label)
+        .join(' / ');
+      lines.push(`可选项：${optionsText}`);
       if (question.multiSelect) {
         lines.push('如果需要多个选项，请使用逗号分隔输入。');
       }
@@ -1007,6 +1044,30 @@ function parseTextContent(content: string): string {
   }
 }
 
+function parseImageResourceKey(content: string): string {
+  try {
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    const candidate = typeof parsed.image_key === 'string'
+      ? parsed.image_key
+      : typeof parsed.file_key === 'string'
+        ? parsed.file_key
+        : '';
+    return candidate.trim();
+  } catch {
+    return '';
+  }
+}
+
+function extensionForMimeType(mimeType: string): string {
+  const normalized = mimeType.toLowerCase();
+  if (normalized.includes('png')) return 'png';
+  if (normalized.includes('jpeg') || normalized.includes('jpg')) return 'jpg';
+  if (normalized.includes('webp')) return 'webp';
+  if (normalized.includes('gif')) return 'gif';
+  if (normalized.includes('bmp')) return 'bmp';
+  return 'bin';
+}
+
 function normalizeMarkdown(message: OutboundMessage): string {
   let text = message.text;
   if (message.parseMode === 'HTML') {
@@ -1084,6 +1145,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private activePreviewByRoute = new Map<string, string>();
   private activityArtifacts = new Map<string, ActivityArtifact>();
   private pendingActivitySends = new Map<string, PendingActivitySend>();
+  private pendingInboundImages = new Map<string, PendingInboundImage>();
   private pendingTitles = new Set<string>();
   private outboundMessageQueues = new Map<string, Promise<void>>();
   private lastOutboundMessageAt = new Map<string, number>();
@@ -1239,6 +1301,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     this.activePreviewByRoute.clear();
     this.activityArtifacts.clear();
     this.pendingActivitySends.clear();
+    this.pendingInboundImages.clear();
     this.pendingTitles.clear();
     this.outboundMessageQueues.clear();
     this.lastOutboundMessageAt.clear();
@@ -1407,16 +1470,31 @@ export class FeishuAdapter extends BaseChannelAdapter {
       getBridgeContext().permissions.resolvePendingStructuredInput?.(request.requestId, { answers: {} });
       return { ok: true };
     }
-    const result = await this.sendInteractiveCard(
-      address,
-      buildStructuredInputCard(request),
-      replyToMessageId,
-    );
-    return {
-      ok: true,
-      messageId: result.messageId,
-      openMessageId: result.openMessageId,
-    };
+    try {
+      const result = await this.sendInteractiveCard(
+        address,
+        buildStructuredInputCard(request),
+        replyToMessageId,
+      );
+      return {
+        ok: true,
+        messageId: result.messageId,
+        openMessageId: result.openMessageId,
+      };
+    } catch (error) {
+      console.warn('[feishu-adapter] Failed to send structured input card, falling back to post:', error);
+      const fallback = await this.sendAsPost(
+        address,
+        buildStructuredInputFallbackText(request),
+        replyToMessageId,
+      );
+      return {
+        ok: fallback.ok,
+        error: fallback.error,
+        messageId: fallback.messageId,
+        openMessageId: fallback.openMessageId,
+      };
+    }
   }
 
   async resolveStructuredInputRequest(requestId: string): Promise<void> {
@@ -1613,6 +1691,88 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
   }
 
+  private appendBindingCommandExchange(binding: ChannelBinding | null, commandText: string, replyText: string): void {
+    if (!binding?.codepilotSessionId) return;
+    appendLocalCommandExchange(this.getStore(), binding.codepilotSessionId, commandText, replyText);
+  }
+
+  private prunePendingInboundImages(now = Date.now()): void {
+    for (const [key, entry] of this.pendingInboundImages) {
+      if (now - entry.createdAt > PENDING_INBOUND_IMAGE_TTL_MS) {
+        this.pendingInboundImages.delete(key);
+      }
+    }
+  }
+
+  private getPendingInboundImage(chatId: string, senderId: string, messageId: string, threadId?: string): PendingInboundImage | null {
+    const key = pendingInboundImageKey(chatId, senderId, messageId, threadId);
+    const entry = this.pendingInboundImages.get(key) || null;
+    if (!entry) return null;
+    if (Date.now() - entry.createdAt <= PENDING_INBOUND_IMAGE_TTL_MS) {
+      return entry;
+    }
+    this.pendingInboundImages.delete(key);
+    return {
+      ...entry,
+      errorMessage: '这张图片已过期，请重新发送图片后再直接回复文字。',
+      attachments: undefined,
+    };
+  }
+
+  private setPendingInboundImage(entry: PendingInboundImage): void {
+    this.pendingInboundImages.set(entry.key, entry);
+  }
+
+  private async downloadInboundImageAttachment(messageId: string, imageKey: string): Promise<FileAttachment> {
+    if (!this.restClient?.im?.messageResource?.get) {
+      throw new Error('Feishu 图片资源下载能力不可用');
+    }
+    const response = await this.restClient.im.messageResource.get({
+      params: { type: 'image' },
+      path: {
+        message_id: messageId,
+        file_key: imageKey,
+      },
+    });
+    const stream = response.getReadableStream();
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    const buffer = Buffer.concat(chunks);
+    const contentType = typeof response.headers?.['content-type'] === 'string'
+      ? response.headers['content-type']
+      : 'image/png';
+    const extension = extensionForMimeType(contentType);
+    return {
+      id: `feishu-image:${messageId}`,
+      name: `feishu-image-${messageId}.${extension}`,
+      type: contentType,
+      size: buffer.length,
+      data: buffer.toString('base64'),
+    };
+  }
+
+  private resolveReferencedInboundImages(
+    chatId: string,
+    senderId: string,
+    threadId: string | undefined,
+    referenceIds: Array<string | undefined>,
+  ): { attachments?: FileAttachment[]; errorMessage?: string } {
+    for (const referenceId of referenceIds) {
+      if (!referenceId) continue;
+      const entry = this.getPendingInboundImage(chatId, senderId, referenceId, threadId);
+      if (!entry) continue;
+      if (entry.attachments?.length) {
+        return { attachments: entry.attachments };
+      }
+      return {
+        errorMessage: entry.errorMessage || '这张图片暂时无法读取，请重新发送图片后再直接回复文字。',
+      };
+    }
+    return {};
+  }
+
   private async handleIncomingEvent(data: FeishuMessageEventData): Promise<void> {
     const messageId = data.message.message_id;
     if (data.sender.sender_type === 'app') return;
@@ -1635,20 +1795,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const threadId = data.message.thread_id || undefined;
     const routeKey = buildRouteKey(data.message.chat_id, threadId);
     this.lastIncomingMessageId.set(routeKey, messageId);
-    const text = data.message.message_type === 'text' ? parseTextContent(data.message.content) : '';
     console.log(
       `[feishu-adapter] Inbound message ${messageId} chat=${data.message.chat_id}` +
       `${threadId ? ` thread=${threadId}` : ''} type=${data.message.message_type} chatType=${data.message.chat_type}`,
     );
-    if (!text) {
-      console.warn(
-        `[feishu-adapter] Dropped inbound message ${messageId}: empty parsed text ` +
-        `(type=${data.message.message_type}, content=${data.message.content.slice(0, 200)})`,
-      );
-      return;
-    }
 
     await this.enqueueChatTask(routeKey, async () => {
+      this.prunePendingInboundImages();
       const inbound: InboundMessage = {
         messageId,
         address: {
@@ -1658,14 +1811,106 @@ export class FeishuAdapter extends BaseChannelAdapter {
           userId: sender.id,
           ...(threadId ? { threadId } : {}),
         },
-        text,
+        text: '',
         timestamp: Number(data.message.create_time || Date.now()),
         raw: {
           rootId: data.message.root_id,
           parentId: data.message.parent_id,
           threadId,
+          messageType: data.message.message_type,
         },
       };
+
+      if (data.message.message_type === 'image') {
+        const imageKey = parseImageResourceKey(data.message.content);
+        const pendingKey = pendingInboundImageKey(
+          data.message.chat_id,
+          sender.id,
+          messageId,
+          threadId,
+        );
+        if (!imageKey) {
+          this.setPendingInboundImage({
+            key: pendingKey,
+            chatId: data.message.chat_id,
+            threadId,
+            senderId: sender.id,
+            messageId,
+            createdAt: Date.now(),
+            errorMessage: '这张图片的资源标识缺失，请重新发送图片后再直接回复文字。',
+          });
+          await this.sendAsPost(
+            inbound.address,
+            '已收到图片，但读取图片资源失败。请重新发送图片后，再直接回复这张图片补充文字。',
+            messageId,
+          );
+          return;
+        }
+        try {
+          const attachment = await this.downloadInboundImageAttachment(messageId, imageKey);
+          this.setPendingInboundImage({
+            key: pendingKey,
+            chatId: data.message.chat_id,
+            threadId,
+            senderId: sender.id,
+            messageId,
+            createdAt: Date.now(),
+            attachments: [attachment],
+          });
+          await this.sendAsPost(
+            inbound.address,
+            '已收到图片。请直接回复这张图片本身补充文字，我会把图文一起发给模型。',
+            messageId,
+          );
+        } catch (error) {
+          const errorMessage = `这张图片下载失败，请重新发送图片后再直接回复文字。${
+            error instanceof Error && error.message ? `\n原因：${error.message}` : ''
+          }`;
+          this.setPendingInboundImage({
+            key: pendingKey,
+            chatId: data.message.chat_id,
+            threadId,
+            senderId: sender.id,
+            messageId,
+            createdAt: Date.now(),
+            errorMessage,
+          });
+          console.warn('[feishu-adapter] Failed to download inbound image:', error);
+          await this.sendAsPost(inbound.address, errorMessage, messageId);
+        }
+        return;
+      }
+
+      if (data.message.message_type !== 'text') {
+        console.warn(
+          `[feishu-adapter] Dropped inbound message ${messageId}: unsupported message type ` +
+          `(type=${data.message.message_type}, content=${data.message.content.slice(0, 200)})`,
+        );
+        return;
+      }
+
+      inbound.text = parseTextContent(data.message.content);
+      if (!inbound.text) {
+        console.warn(
+          `[feishu-adapter] Dropped inbound message ${messageId}: empty parsed text ` +
+          `(type=${data.message.message_type}, content=${data.message.content.slice(0, 200)})`,
+        );
+        return;
+      }
+
+      const referencedImages = this.resolveReferencedInboundImages(
+        data.message.chat_id,
+        sender.id,
+        threadId,
+        [data.message.parent_id, data.message.root_id],
+      );
+      if (referencedImages.errorMessage) {
+        await this.sendAsPost(inbound.address, referencedImages.errorMessage, messageId);
+        return;
+      }
+      if (referencedImages.attachments?.length) {
+        inbound.attachments = referencedImages.attachments;
+      }
 
       if (data.message.chat_type === 'p2p') {
         await this.handleDirectMessage(sender, inbound);
@@ -2006,7 +2251,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
       store.updateChannelBinding(updated.id, { mode: binding.mode, sdkSessionId: '' });
     }
     await this.syncChatName(address.chatId);
-    await this.sendAsPost(address, `已重置当前群会话，runtime 保持为 ${runtime}。`, replyToMessageId);
+    const replyText = `已重置当前群会话，runtime 保持为 ${runtime}。`;
+    await this.sendAsPost(address, replyText, replyToMessageId);
+    appendLocalCommandExchange(
+      store,
+      session.id,
+      '/reset',
+      `Bridge 已重置当前群会话，runtime 保持为 ${runtime}，旧上下文已清空。`,
+    );
   }
 
   private handlePermissionCommand(chatId: string, text: string, messageId?: string): boolean {
@@ -2034,6 +2286,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         selectedMode: resolveClaudeBindingMode(binding),
         bindingId: binding.id,
       });
+      this.appendBindingCommandExchange(binding, text, 'Bridge 已打开 Claude mode 选择卡，等待用户确认新的 mode。');
       return;
     }
     const parts = text.trim().split(/\s+/);
@@ -2063,7 +2316,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
     store.updateChannelBinding(bindingId, { mode });
     await this.syncChatName(address.chatId);
-    await this.sendAsPost(address, `已切换到 ${mode} 模式。`, replyToMessageId);
+    const replyText = `已切换到 ${mode} 模式。`;
+    await this.sendAsPost(address, replyText, replyToMessageId);
+    this.appendBindingCommandExchange(binding, text, `Bridge 已将当前群会话切换到 ${mode} 模式。`);
   }
 
   private async handlePlanCommand(bindingId: string, inbound: InboundMessage): Promise<void> {
@@ -2076,17 +2331,19 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const runtime = store.getSessionExt(binding.codepilotSessionId)?.runtime || 'claude';
     const existing = store.getActivePlanWorkflowByBinding(bindingId);
     if (existing) {
+      const replyText = runtime === 'codex'
+        ? existing.status === 'awaiting_confirmation'
+          ? '当前群已有待确认的原生 PLAN 结果。请点击上一张计划卡片中的“是，实施此计划”，或直接在原线程回复告诉 Codex 如何调整；也可以使用 `/mode ...` / `/reset` 覆盖。'
+          : '当前群已有等待中的原生 PLAN 请求。请先在原线程继续输入，或使用 `/mode ...` / `/reset` 覆盖。'
+        : existing.status === 'awaiting_confirmation'
+          ? '当前群已有待确认的 Claude PLAN 结果。请点击上一张计划卡片中的执行选项，或直接在原线程回复告诉 Claude 如何调整；也可以使用 `/mode ...` / `/reset` 覆盖。'
+          : '当前群已有进行中的 Claude PLAN 流程。请先在原线程继续输入，或使用 `/mode ...` / `/reset` 覆盖。';
       await this.sendAsPost(
         inbound.address,
-        runtime === 'codex'
-          ? existing.status === 'awaiting_confirmation'
-            ? '当前群已有待确认的原生 PLAN 结果。请点击上一张计划卡片中的“是，实施此计划”，或直接在原线程回复告诉 Codex 如何调整；也可以使用 `/mode ...` / `/reset` 覆盖。'
-            : '当前群已有等待中的原生 PLAN 请求。请先在原线程继续输入，或使用 `/mode ...` / `/reset` 覆盖。'
-          : existing.status === 'awaiting_confirmation'
-            ? '当前群已有待确认的 Claude PLAN 结果。请点击上一张计划卡片中的执行选项，或直接在原线程回复告诉 Claude 如何调整；也可以使用 `/mode ...` / `/reset` 覆盖。'
-            : '当前群已有进行中的 Claude PLAN 流程。请先在原线程继续输入，或使用 `/mode ...` / `/reset` 覆盖。',
+        replyText,
         inbound.messageId,
       );
+      this.appendBindingCommandExchange(binding, inbound.text, replyText);
       return;
     }
 
@@ -2121,7 +2378,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
           resolved: true,
         });
         await this.syncChatName(inbound.address.chatId);
-        await this.sendAsPost(inbound.address, '已进入原生 PLAN 流程。下一条同线程消息将作为 plan 请求发送给 Codex。', inbound.messageId);
+        const replyText = '已进入原生 PLAN 流程。下一条同线程消息将作为 plan 请求发送给 Codex。';
+        await this.sendAsPost(inbound.address, replyText, inbound.messageId);
+        this.appendBindingCommandExchange(binding, inbound.text, 'Bridge 已进入 Codex 原生 PLAN 流程，下一条同线程消息会作为 plan 请求发送。');
         return;
       }
       const workflow = store.upsertPlanWorkflow({
@@ -2139,7 +2398,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
         resolved: true,
       });
       await this.syncChatName(inbound.address.chatId);
-      this.enqueue(this.buildNativePlanRequestInbound(inbound.address, inbound.messageId, workflow.workflowId, requestText));
+      this.enqueue(this.buildNativePlanRequestInbound(
+        inbound.address,
+        inbound.messageId,
+        workflow.workflowId,
+        requestText,
+        inbound.attachments,
+      ));
       return;
     }
 
@@ -2160,11 +2425,21 @@ export class FeishuAdapter extends BaseChannelAdapter {
     await this.syncChatName(inbound.address.chatId);
 
     if (!requestText) {
-      await this.sendAsPost(inbound.address, '已进入 PLAN 流程。下一条非命令消息将作为规划需求。', inbound.messageId);
+      const replyText = '已进入 PLAN 流程。下一条非命令消息将作为规划需求。';
+      await this.sendAsPost(inbound.address, replyText, inbound.messageId);
+      this.appendBindingCommandExchange(binding, inbound.text, 'Bridge 已进入 Claude PLAN 流程，下一条非命令消息会作为规划需求发送。');
       return;
     }
 
-    this.enqueue(this.buildPlanRequestInbound(inbound.address, inbound.messageId, workflow.workflowId, requestText));
+    this.enqueue(this.buildPlanRequestInbound(
+      inbound.address,
+      inbound.messageId,
+      workflow.workflowId,
+      requestText,
+      {
+        attachments: inbound.attachments,
+      },
+    ));
   }
 
   private async handlePlanWorkflowMessage(bindingId: string, workflowId: string, inbound: InboundMessage): Promise<boolean> {
@@ -2197,7 +2472,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
             requestMessageId: inbound.messageId,
             resolved: true,
           });
-          this.enqueue(this.buildNativePlanRequestInbound(inbound.address, inbound.messageId, workflow.workflowId, inbound.text.trim()));
+          this.enqueue(this.buildNativePlanRequestInbound(
+            inbound.address,
+            inbound.messageId,
+            workflow.workflowId,
+            inbound.text.trim(),
+            inbound.attachments,
+          ));
           return true;
         }
         store.updatePlanWorkflow(workflow.workflowId, {
@@ -2210,7 +2491,15 @@ export class FeishuAdapter extends BaseChannelAdapter {
           actionCardMessageId: '',
           resolved: true,
         });
-        this.enqueue(this.buildPlanRequestInbound(inbound.address, inbound.messageId, workflow.workflowId, inbound.text.trim()));
+        this.enqueue(this.buildPlanRequestInbound(
+          inbound.address,
+          inbound.messageId,
+          workflow.workflowId,
+          inbound.text.trim(),
+          {
+            attachments: inbound.attachments,
+          },
+        ));
         return true;
       case 'planning':
         await this.sendAsPost(inbound.address, '当前 PLAN 请求正在处理中，请等待本轮计划完成。', inbound.messageId);
@@ -2228,7 +2517,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
             actionCardOpenMessageId: '',
             resolved: true,
           });
-          this.enqueue(this.buildNativePlanRequestInbound(inbound.address, inbound.messageId, workflow.workflowId, requestText));
+          this.enqueue(this.buildNativePlanRequestInbound(
+            inbound.address,
+            inbound.messageId,
+            workflow.workflowId,
+            requestText,
+            inbound.attachments,
+          ));
           return true;
         }
         {
@@ -2265,6 +2560,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
                 planText: workflow.planText,
                 planFilePath: workflow.planFilePath,
               }),
+              attachments: inbound.attachments,
             },
           ));
         }
@@ -2281,6 +2577,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     requestText: string,
     options?: {
       promptText?: string;
+      attachments?: FileAttachment[];
     },
   ): InboundMessage {
     return {
@@ -2288,6 +2585,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       address,
       text: requestText,
       timestamp: Date.now(),
+      ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
       bridgeMeta: {
         planWorkflow: {
           kind: 'plan_request',
@@ -2300,12 +2598,19 @@ export class FeishuAdapter extends BaseChannelAdapter {
     };
   }
 
-  private buildNativePlanRequestInbound(address: ChannelAddress, messageId: string, workflowId: string, requestText: string): InboundMessage {
+  private buildNativePlanRequestInbound(
+    address: ChannelAddress,
+    messageId: string,
+    workflowId: string,
+    requestText: string,
+    attachments?: FileAttachment[],
+  ): InboundMessage {
     return {
       messageId,
       address,
       text: requestText,
       timestamp: Date.now(),
+      ...(attachments?.length ? { attachments } : {}),
       bridgeMeta: {
         planWorkflow: {
           kind: 'native_plan_request',

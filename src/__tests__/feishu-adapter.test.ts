@@ -2,6 +2,7 @@ import { beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 
 import { initBridgeContext } from '../bridge/context.js';
 import {
@@ -1215,6 +1216,11 @@ describe('FeishuAdapter', () => {
     assert.equal(store.getChannelBinding('feishu', 'group-mode')?.mode, 'plan');
     assert.equal(store.getActivePlanWorkflowByBinding(binding.id), null);
     assert.equal(updatedNames.at(-1), 'Codex 新会话 [PLAN]');
+    const history = store.getMessages(session.id).messages.slice(-2);
+    assert.equal(history[0]?.role, 'user');
+    assert.equal(history[0]?.content, '/mode plan');
+    assert.equal(history[1]?.role, 'assistant');
+    assert.match(history[1]?.content || '', /切换到 plan 模式/);
   });
 
   it('queues /stop in a bound group instead of treating it as an unsupported command', async () => {
@@ -1304,6 +1310,9 @@ describe('FeishuAdapter', () => {
     assert.equal(store.getChannelBinding('feishu', 'group-claude-mode')?.claudePermissionMode, undefined);
     assert.equal(replies.length, 1);
     assert.equal(replies[0].msgType, 'interactive');
+    const history = store.getMessages(session.id).messages.slice(-2);
+    assert.equal(history[0]?.content, '/mode bypassPermissions');
+    assert.match(history[1]?.content || '', /打开 Claude mode 选择卡/);
     const card = JSON.parse(replies[0].content);
     const buttons = card.body.elements[1].columns.map((column: any) => ({
       title: column.elements[0].text.content,
@@ -1426,6 +1435,9 @@ describe('FeishuAdapter', () => {
     const waiting = store.getActivePlanWorkflowByBinding(binding.id);
     assert.ok(waiting);
     assert.equal(waiting?.status, 'awaiting_input');
+    const history = store.getMessages(session.id).messages.slice(-2);
+    assert.equal(history[0]?.content, '/plan');
+    assert.match(history[1]?.content || '', /进入 Claude PLAN 流程/);
 
     await adapter.handleGroupMessage(
       { id: 'ou_123', type: 'open_id' },
@@ -1442,6 +1454,50 @@ describe('FeishuAdapter', () => {
     assert.equal(queued.bridgeMeta.planWorkflow.storedUserText, '请先做一个实现计划');
     assert.match(queued.bridgeMeta.planWorkflow.promptText, /只输出计划/);
     assert.equal(store.getPlanWorkflow(waiting!.workflowId)?.status, 'planning');
+  });
+
+  it('writes /reset local replies into the new session history instead of the old session', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    store.addMessage(session.id, 'user', 'before reset');
+    store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-reset',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        chat: {
+          update: async () => ({ code: 0, data: {} }),
+        },
+        message: {
+          create: async () => ({ code: 0, data: { message_id: 'msg-reset-1' } }),
+          reply: async () => ({ code: 0, data: { message_id: 'msg-reset-1' } }),
+        },
+      },
+    };
+
+    await adapter.handleResetCommand(
+      { channelType: 'feishu', chatId: 'group-reset' },
+      'reply-1',
+    );
+
+    const updated = store.getChannelBinding('feishu', 'group-reset');
+    assert.ok(updated);
+    assert.notEqual(updated?.codepilotSessionId, session.id);
+    assert.equal(store.getMessages(session.id).messages.length, 1);
+    const newHistory = store.getMessages(updated!.codepilotSessionId).messages.slice(-2);
+    assert.equal(newHistory[0]?.content, '/reset');
+    assert.match(newHistory[1]?.content || '', /旧上下文已清空/);
   });
 
   it('keeps the PLAN workflow active for codex until the native plan turn actually finishes', async () => {
@@ -1560,6 +1616,7 @@ describe('FeishuAdapter', () => {
     assert.equal(card.body.elements[0].elements[2].tag, 'select_static');
     assert.equal(card.body.elements[0].elements[2].name, 'structured-input_req_1_answer_q1');
     assert.equal(card.body.elements[0].elements[2].options[0].value, '根目录 about-codex.html');
+    assert.match(card.body.elements[0].elements[1].content, /根目录 about-codex\.html：推荐/);
     assert.equal(card.body.elements[0].elements[3].tag, 'input');
     assert.equal(card.body.elements[0].elements[3].name, 'structured-input_req_1_other_q1');
     assert.equal(card.body.elements[0].elements[4].tag, 'markdown');
@@ -1571,6 +1628,205 @@ describe('FeishuAdapter', () => {
       card.body.elements[0].elements.at(-1).columns[0].elements[0].behaviors[0].value.callback_data,
       'input:submit:req-1',
     );
+  });
+
+  it('falls back to a post message for structured input and keeps option reasons', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const adapter = new FeishuAdapter() as any;
+    const sends: Array<{ msgType: string; content: string }> = [];
+    adapter.restClient = {
+      im: {
+        message: {
+          reply: async (payload: { data: { msg_type: string; content: string } }) => {
+            if (payload.data.msg_type === 'interactive') {
+              throw new Error('interactive failed');
+            }
+            sends.push({ msgType: payload.data.msg_type, content: payload.data.content });
+            return { code: 0, data: { message_id: 'msg-fallback-1' } };
+          },
+        },
+      },
+    };
+
+    const result = await adapter.sendStructuredInputRequest(
+      { channelType: 'feishu', chatId: 'group-structured', threadId: 'thread-1' },
+      {
+        requestId: 'req-fallback',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        itemId: 'item-1',
+        questions: [
+          {
+            id: 'q1',
+            header: '模式',
+            question: '要用哪个模式？',
+            isOther: false,
+            isSecret: false,
+            options: [
+              { label: 'Plan Mode', description: '先只做规划' },
+              { label: 'Accept edits', description: '执行时逐步确认修改' },
+            ],
+          },
+        ],
+      },
+      'reply-1',
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(sends.length, 1);
+    assert.equal(sends[0].msgType, 'post');
+    assert.match(sends[0].content, /Plan Mode：先只做规划/);
+    assert.match(sends[0].content, /Accept edits：执行时逐步确认修改/);
+  });
+
+  it('downloads inbound images and attaches them when the user replies with text', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-image',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+
+    const replies: string[] = [];
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        messageResource: {
+          get: async () => ({
+            headers: { 'content-type': 'image/png' },
+            getReadableStream: () => Readable.from([Buffer.from('image-binary')]),
+            writeFile: async () => undefined,
+          }),
+        },
+        message: {
+          reply: async (payload: { data: { content: string } }) => {
+            replies.push(payload.data.content);
+            return { code: 0, data: { message_id: `msg-${replies.length}` } };
+          },
+          create: async () => ({ code: 0, data: { message_id: 'msg-create-1' } }),
+        },
+      },
+    };
+
+    await adapter.handleIncomingEvent({
+      sender: {
+        sender_id: { open_id: 'ou_123' },
+        sender_type: 'user',
+      },
+      message: {
+        message_id: 'img-msg-1',
+        chat_id: 'group-image',
+        chat_type: 'group',
+        message_type: 'image',
+        content: JSON.stringify({ image_key: 'img-key-1' }),
+        create_time: String(Date.now()),
+      },
+    });
+
+    assert.equal((adapter as any).queue.length, 0);
+    assert.match(replies[0] || '', /已收到图片/);
+
+    await adapter.handleIncomingEvent({
+      sender: {
+        sender_id: { open_id: 'ou_123' },
+        sender_type: 'user',
+      },
+      message: {
+        message_id: 'txt-msg-1',
+        chat_id: 'group-image',
+        chat_type: 'group',
+        message_type: 'text',
+        content: JSON.stringify({ text: '请描述这张图片' }),
+        create_time: String(Date.now()),
+        parent_id: 'img-msg-1',
+      },
+    });
+
+    const queued = (adapter as any).queue[0];
+    assert.equal(queued.text, '请描述这张图片');
+    assert.equal(queued.attachments?.length, 1);
+    assert.equal(Buffer.from(queued.attachments[0].data, 'base64').toString(), 'image-binary');
+    assert.equal(queued.attachments[0].type, 'image/png');
+  });
+
+  it('surfaces inbound image download failures and blocks stale replies from silently continuing', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-image-fail',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+
+    const replies: string[] = [];
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        messageResource: {
+          get: async () => {
+            throw new Error('resource unavailable');
+          },
+        },
+        message: {
+          reply: async (payload: { data: { content: string } }) => {
+            replies.push(payload.data.content);
+            return { code: 0, data: { message_id: `msg-${replies.length}` } };
+          },
+          create: async () => ({ code: 0, data: { message_id: 'msg-create-1' } }),
+        },
+      },
+    };
+
+    await adapter.handleIncomingEvent({
+      sender: {
+        sender_id: { open_id: 'ou_123' },
+        sender_type: 'user',
+      },
+      message: {
+        message_id: 'img-msg-fail',
+        chat_id: 'group-image-fail',
+        chat_type: 'group',
+        message_type: 'image',
+        content: JSON.stringify({ image_key: 'img-key-fail' }),
+        create_time: String(Date.now()),
+      },
+    });
+
+    await adapter.handleIncomingEvent({
+      sender: {
+        sender_id: { open_id: 'ou_123' },
+        sender_type: 'user',
+      },
+      message: {
+        message_id: 'txt-msg-fail',
+        chat_id: 'group-image-fail',
+        chat_type: 'group',
+        message_type: 'text',
+        content: JSON.stringify({ text: '继续分析' }),
+        create_time: String(Date.now()),
+        parent_id: 'img-msg-fail',
+      },
+    });
+
+    assert.equal((adapter as any).queue.length, 0);
+    assert.match(replies[0] || '', /图片下载失败/);
+    assert.match(replies[1] || '', /图片下载失败/);
   });
 
   it('degrades multi-select structured input questions to text input with comma guidance', async () => {
@@ -1734,7 +1990,7 @@ describe('FeishuAdapter', () => {
     assert.equal(bodyElements[0]?.tag, 'div');
     assert.equal(bodyElements[1]?.tag, 'div');
     assert.equal(bodyElements[2]?.tag, 'div');
-    assert.equal((bodyElements[2]?.text as { content?: string } | undefined)?.content, '已提交：极简');
+    assert.equal((bodyElements[2]?.text as { content?: string } | undefined)?.content, '已提交：极简 (推荐)');
   });
 
   it('keeps multi-select answers split for bridge storage', async () => {
