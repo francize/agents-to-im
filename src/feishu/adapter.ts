@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
 
 import * as lark from '@larksuiteoapi/node-sdk';
 
@@ -44,8 +45,15 @@ import {
 } from '../claude-mode.js';
 import type { ClaudePermissionMode } from '../claude-mode.js';
 import type { FeishuProfileConfig } from '../config.js';
+import {
+  listRecentNativeSessions,
+  loadNativeSessionTranscript,
+  type NativeReplayItem,
+  type NativeSessionSummary,
+} from '../native-session-history.js';
 
 import type { MultiplexLLMProvider } from '../multiplex-llm-provider.js';
+import { listRecentWorkspaces, type RecentWorkspaceOption } from '../recent-workspaces.js';
 import type { RuntimeName } from '../runtime-types.js';
 import { JsonFileStore } from '../store.js';
 
@@ -54,6 +62,7 @@ const TYPING_EMOJI = 'Typing';
 const STREAM_PLACEHOLDER_TEXT = '🤖 努力回答中...';
 const PLAN_SUFFIX = ' [PLAN]';
 const STRUCTURED_INPUT_PREFIX = 'structured-input';
+const NEW_SESSION_WORKDIR_FIELD = 'new_session_workdir';
 const PENDING_INBOUND_IMAGE_TTL_MS = 15 * 60 * 1000;
 export const FEISHU_REQUIRED_APP_SCOPES = [
   'im:message:send_as_bot',
@@ -190,6 +199,15 @@ function sanitizeTitleFallback(text: string): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, 30) || '新会话';
 }
 
+function normalizePath(rawPath: string): string {
+  const resolved = path.resolve(rawPath);
+  try {
+    return fs.realpathSync.native ? fs.realpathSync.native(resolved) : fs.realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
 function stripPlanSuffix(text: string): string {
   return text.replace(/\s*\[PLAN\]$/, '').trim();
 }
@@ -232,6 +250,9 @@ function buildClaudeModeButtons(
   scope: 'new' | 'switch',
   selectedMode?: ClaudePermissionMode,
   bindingId?: string,
+  options?: {
+    submit?: boolean;
+  },
 ): Array<Record<string, unknown>> {
   return getClaudeModeOptions().map((option) => ({
     tag: 'column' as const,
@@ -244,6 +265,7 @@ function buildClaudeModeButtons(
           content: option.title,
         },
         type: option.mode === selectedMode ? 'primary' as const : 'default' as const,
+        ...(options?.submit ? { form_action_type: 'submit' as const } : {}),
         behaviors: [
           {
             type: 'callback' as const,
@@ -302,6 +324,287 @@ function buildClaudeModeCard(
       ],
     },
   };
+}
+
+function buildWorkspaceSelect(workspaces: RecentWorkspaceOption[]): Record<string, unknown> {
+  const placeholder = workspaces[0]
+    ? `选择工作区，默认：${workspaces[0].shortLabel}`
+    : '选择工作区';
+  return {
+    tag: 'select_static',
+    name: NEW_SESSION_WORKDIR_FIELD,
+    placeholder: {
+      tag: 'plain_text',
+      content: placeholder,
+    },
+    options: workspaces.map((workspace) => ({
+      text: {
+        tag: 'plain_text',
+        content: workspace.label,
+      },
+      value: workspace.value,
+    })),
+  };
+}
+
+function buildCodexModeButtons(): Array<Record<string, unknown>> {
+  return [
+    {
+      tag: 'column',
+      width: 'auto',
+      elements: [
+        {
+          tag: 'button',
+          text: {
+            tag: 'plain_text',
+            content: '默认',
+          },
+          type: 'primary',
+          form_action_type: 'submit',
+          behaviors: [
+            {
+              type: 'callback',
+              value: {
+                callback_data: 'new-session:codex:code',
+              },
+            },
+          ],
+        },
+      ],
+    },
+    {
+      tag: 'column',
+      width: 'auto',
+      elements: [
+        {
+          tag: 'button',
+          text: {
+            tag: 'plain_text',
+            content: 'Plan',
+          },
+          type: 'default',
+          form_action_type: 'submit',
+          behaviors: [
+            {
+              type: 'callback',
+              value: {
+                callback_data: 'new-session:codex:plan',
+              },
+            },
+          ],
+        },
+      ],
+    },
+  ];
+}
+
+function buildNewCodexSessionCard(workspaces: RecentWorkspaceOption[]): Record<string, unknown> {
+  return {
+    schema: '2.0',
+    config: {
+      wide_screen_mode: true,
+      update_multi: true,
+      width_mode: 'fill',
+    },
+    header: {
+      title: {
+        tag: 'plain_text',
+        content: '创建 Codex 会话',
+      },
+      template: 'blue',
+    },
+    body: {
+      elements: [
+        {
+          tag: 'form',
+          name: 'new_session_codex',
+          elements: [
+            {
+              tag: 'markdown',
+              content: '请选择要进入的工作区，再选择进入模式。',
+            },
+            {
+              tag: 'markdown',
+              content: '最近工作区（去重后最多 5 个）：',
+            },
+            buildWorkspaceSelect(workspaces),
+            {
+              tag: 'column_set',
+              flex_mode: 'flow',
+              horizontal_spacing: '8px',
+              horizontal_align: 'left',
+              columns: buildCodexModeButtons(),
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+function buildNewClaudeSessionCard(workspaces: RecentWorkspaceOption[]): Record<string, unknown> {
+  return {
+    schema: '2.0',
+    config: {
+      wide_screen_mode: true,
+      update_multi: true,
+      width_mode: 'fill',
+    },
+    header: {
+      title: {
+        tag: 'plain_text',
+        content: '创建 Claude 会话',
+      },
+      template: 'blue',
+    },
+    body: {
+      elements: [
+        {
+          tag: 'form',
+          name: 'new_session_claude',
+          elements: [
+            {
+              tag: 'markdown',
+              content: '请选择要进入的工作区，再点击下方 Claude mode 按钮创建新群。',
+            },
+            {
+              tag: 'markdown',
+              content: '最近工作区（去重后最多 5 个）：',
+            },
+            buildWorkspaceSelect(workspaces),
+            {
+              tag: 'column_set',
+              flex_mode: 'flow',
+              horizontal_spacing: '8px',
+              horizontal_align: 'left',
+              columns: buildClaudeModeButtons('new', undefined, undefined, { submit: true }),
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+function formatNativeSessionUpdatedAt(updatedAt: string): string {
+  const normalized = updatedAt.trim();
+  if (!normalized) return '未知时间';
+  return normalized.replace('T', ' ').replace(/:\d{2}(?:\.\d+)?Z$/, '');
+}
+
+function buildResumeSessionCard(
+  runtime: RuntimeName,
+  sessions: NativeSessionSummary[],
+): Record<string, unknown> {
+  return {
+    schema: '2.0',
+    config: {
+      wide_screen_mode: true,
+      update_multi: true,
+      width_mode: 'fill',
+    },
+    header: {
+      title: {
+        tag: 'plain_text',
+        content: runtime === 'codex' ? '恢复 Codex 会话' : '恢复 Claude 会话',
+      },
+      template: 'blue',
+    },
+    body: {
+      elements: [
+        {
+          tag: 'markdown',
+          content: '请选择要恢复的原始会话。会创建一个新群，并把历史内容回放成卡片。',
+        },
+        ...sessions.flatMap((session) => ([
+          {
+            tag: 'column_set',
+            horizontal_spacing: '8px',
+            columns: [
+              {
+                tag: 'column',
+                width: 'weighted',
+                weight: 4,
+                elements: [
+                  {
+                    tag: 'markdown',
+                    content: [
+                      `**${session.title}**`,
+                      `\`${session.cwd}\``,
+                      `更新时间：${formatNativeSessionUpdatedAt(session.updatedAt)}`,
+                    ].join('\n'),
+                  },
+                ],
+              },
+              {
+                tag: 'column',
+                width: 'auto',
+                elements: [
+                  {
+                    tag: 'button',
+                    text: {
+                      tag: 'plain_text',
+                      content: '恢复',
+                    },
+                    type: 'primary',
+                    behaviors: [
+                      {
+                        type: 'callback',
+                        value: {
+                          callback_data: `resume:pick:${runtime}:${session.nativeSessionId}`,
+                        },
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ])),
+      ],
+    },
+  };
+}
+
+function splitReplayText(text: string, limit = 2800): string[] {
+  const normalized = text.trim();
+  if (!normalized) return [];
+  if (normalized.length <= limit) return [normalized];
+  const segments: string[] = [];
+  let cursor = 0;
+  while (cursor < normalized.length) {
+    const chunk = normalized.slice(cursor, cursor + limit);
+    segments.push(chunk);
+    cursor += limit;
+  }
+  return segments;
+}
+
+function stripReplayToolNamePrefix(text: string, toolName: string | undefined): string {
+  const normalized = text.trim();
+  if (!toolName) return normalized;
+  const prefix = `${toolName}\n`;
+  return normalized.startsWith(prefix) ? normalized.slice(prefix.length).trim() : normalized;
+}
+
+function buildReplayMessageText(
+  runtime: RuntimeName,
+  item: NativeReplayItem,
+  partIndex = 0,
+  totalParts = 1,
+): string {
+  const baseTitle = item.kind === 'user_message'
+    ? '用户'
+    : item.kind === 'assistant_message'
+      ? (runtime === 'codex' ? 'Codex' : 'Claude')
+      : item.toolName
+        ? `工具结果 · ${item.toolName}`
+        : '工具结果';
+  const title = totalParts > 1 ? `${baseTitle} (${partIndex + 1}/${totalParts})` : baseTitle;
+  const body = item.kind === 'tool_result'
+    ? stripReplayToolNamePrefix(item.text, item.toolName)
+    : item.text.trim();
+  return `**${title}**\n\n${body}`;
 }
 
 function buildSimpleCard(text: string): Record<string, unknown> {
@@ -1958,8 +2261,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
       }
       return { toast: { type: 'warning', content: 'Permission already handled' } };
     }
+    if (callbackData.startsWith('new-session:')) {
+      return this.handleNewSessionCardAction(event, callbackData);
+    }
     if (callbackData.startsWith('claude-mode:')) {
       return this.handleClaudeModeCardAction(event, callbackData);
+    }
+    if (callbackData.startsWith('resume:')) {
+      return this.handleResumeCardAction(event, callbackData);
     }
     if (callbackData.startsWith('input:')) {
       return this.handleStructuredInputCardAction(event, callbackData);
@@ -2023,6 +2332,25 @@ export class FeishuAdapter extends BaseChannelAdapter {
     return null;
   }
 
+  private getRecentWorkspaceOptions(): RecentWorkspaceOption[] {
+    const store = this.getStore();
+    return listRecentWorkspaces(
+      store.listChannelBindings(this.channelType),
+      store.getSetting('bridge_default_work_dir') || process.cwd(),
+    );
+  }
+
+  private resolveSelectedWorkdir(formValue?: Record<string, unknown>): string {
+    const selected = collectTextFragments(formValue?.[NEW_SESSION_WORKDIR_FIELD]);
+    if (selected[0]) {
+      return normalizePath(selected[0]);
+    }
+    const fallback = this.getRecentWorkspaceOptions()[0]?.value
+      || this.getStore().getSetting('bridge_default_work_dir')
+      || process.cwd();
+    return normalizePath(fallback);
+  }
+
   private buildSessionReadyMessage(runtime: RuntimeName, binding: ChannelBinding): string {
     if (runtime === 'claude') {
       const modeTitle = getClaudeModeTitle(resolveClaudeBindingMode(binding));
@@ -2033,7 +2361,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       ].join('\n');
     }
     return [
-      '已创建 codex 会话。',
+      `已创建 codex 会话，当前模式：**${binding.mode === 'plan' ? 'Plan' : '默认'}**。`,
       '后续请直接在本群继续对话。',
       '可用命令：`/stop` 中断当前输出、`/mode` 切换 mode、`/reset` 重置会话。',
     ].join('\n');
@@ -2049,7 +2377,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private async createBoundSession(
     runtime: RuntimeName,
     sender: SenderIdentity,
-    options?: { claudePermissionMode?: ClaudePermissionMode },
+    options?: {
+      claudePermissionMode?: ClaudePermissionMode;
+      cwd?: string;
+      bindingMode?: 'code' | 'plan' | 'ask';
+      skipReadyMessage?: boolean;
+    },
   ): Promise<{ chatId: string; binding: ChannelBinding }> {
     await this.ensureRuntimeAvailable(runtime);
     const store = this.getStore();
@@ -2060,9 +2393,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const session = store.createRuntimeSession({
       runtime,
       model,
-      cwd: store.getSetting('bridge_default_work_dir') || process.cwd(),
+      cwd: options?.cwd || store.getSetting('bridge_default_work_dir') || process.cwd(),
     });
-    const binding = store.upsertChannelBinding({
+    const initialBinding = store.upsertChannelBinding({
       channelType: this.channelType,
       channelInstanceId: this.profileId,
       chatId,
@@ -2073,11 +2406,17 @@ export class FeishuAdapter extends BaseChannelAdapter {
         ? { claudePermissionMode: options?.claudePermissionMode || 'default' }
         : {}),
     });
+    if (options?.bindingMode && initialBinding.mode !== options.bindingMode) {
+      store.updateChannelBinding(initialBinding.id, { mode: options.bindingMode });
+    }
+    const binding = store.getChannelBinding(this.channelType, chatId, this.profileId) || initialBinding;
     await this.syncChatName(chatId);
-    await this.sendAsPost(
-      { channelType: this.channelType, channelInstanceId: this.profileId, chatId },
-      this.buildSessionReadyMessage(runtime, binding),
-    );
+    if (!options?.skipReadyMessage) {
+      await this.sendAsPost(
+        { channelType: this.channelType, channelInstanceId: this.profileId, chatId },
+        this.buildSessionReadyMessage(runtime, binding),
+      );
+    }
     return { chatId, binding };
   }
 
@@ -2103,6 +2442,23 @@ export class FeishuAdapter extends BaseChannelAdapter {
     };
   }
 
+  private async sendNewSessionCard(
+    address: ChannelAddress,
+    runtime: RuntimeName,
+    replyToMessageId?: string,
+  ): Promise<SendResult> {
+    const workspaces = this.getRecentWorkspaceOptions();
+    const card = runtime === 'codex'
+      ? buildNewCodexSessionCard(workspaces)
+      : buildNewClaudeSessionCard(workspaces);
+    const result = await this.sendInteractiveCard(address, card, replyToMessageId);
+    return {
+      ok: true,
+      messageId: result.messageId,
+      openMessageId: result.openMessageId,
+    };
+  }
+
   private async handleDirectMessage(sender: SenderIdentity, inbound: InboundMessage): Promise<void> {
     const command = inbound.text.trim().toLowerCase();
     if (command === '/new:claude') {
@@ -2113,9 +2469,17 @@ export class FeishuAdapter extends BaseChannelAdapter {
       await this.handleCreateSessionCommand(sender, inbound, 'codex');
       return;
     }
+    if (command === '/resume:claude') {
+      await this.handleResumeSessionCommand(sender, inbound, 'claude');
+      return;
+    }
+    if (command === '/resume:codex') {
+      await this.handleResumeSessionCommand(sender, inbound, 'codex');
+      return;
+    }
     await this.sendAsPost(
       inbound.address,
-      '私聊仅支持 `/new:claude` 和 `/new:codex`。发送命令后 Bot 会新建群聊并将该群绑定到一个新会话。',
+      '私聊仅支持 `/new:claude`、`/new:codex`、`/resume:claude` 和 `/resume:codex`。',
       inbound.messageId,
     );
   }
@@ -2187,36 +2551,184 @@ export class FeishuAdapter extends BaseChannelAdapter {
       await this.sendAsPost(inbound.address, this.buildWrongBotMessage(runtime), inbound.messageId);
       return;
     }
-    if (runtime === 'claude') {
-      try {
-        await this.ensureRuntimeAvailable(runtime);
-      } catch (error) {
+    try {
+      await this.ensureRuntimeAvailable(runtime);
+      await this.sendNewSessionCard(inbound.address, runtime, inbound.messageId);
+    } catch (error) {
+      console.error('[feishu-adapter] Failed to initialize new-session card:', error);
+      const message = `无法创建 ${runtime} 会话：${error instanceof Error ? error.message : String(error)}`;
+      await this.sendAsPost(inbound.address, message, inbound.messageId);
+    }
+  }
+
+  private async handleResumeSessionCommand(
+    _sender: SenderIdentity,
+    inbound: InboundMessage,
+    runtime: RuntimeName,
+  ): Promise<void> {
+    if (!this.isRuntimeOwnedByThisAdapter(runtime)) {
+      await this.sendAsPost(inbound.address, this.buildWrongBotMessage(runtime), inbound.messageId);
+      return;
+    }
+    try {
+      await this.ensureRuntimeAvailable(runtime);
+      const workdir = this.getStore().getSetting('bridge_default_work_dir') || process.cwd();
+      const sessions = listRecentNativeSessions(runtime, workdir, 5);
+      if (sessions.length === 0) {
         await this.sendAsPost(
           inbound.address,
-          `无法创建 ${runtime} 会话：${error instanceof Error ? error.message : String(error)}`,
+          `未找到当前工作区下可恢复的 ${runtime} 原始会话记录。`,
           inbound.messageId,
         );
         return;
       }
-      try {
-        await this.sendClaudeModeCard(inbound.address, 'new', inbound.messageId);
-      } catch (error) {
-        await this.sendAsPost(
-          inbound.address,
-          `发送 Claude mode 选择卡失败：${error instanceof Error ? error.message : String(error)}`,
-          inbound.messageId,
+      await this.sendInteractiveCard(
+        inbound.address,
+        buildResumeSessionCard(runtime, sessions),
+        inbound.messageId,
+      );
+    } catch (error) {
+      await this.sendAsPost(
+        inbound.address,
+        `读取 ${runtime} 原始会话失败：${error instanceof Error ? error.message : String(error)}`,
+        inbound.messageId,
+      );
+    }
+  }
+
+  private async handleNewSessionCardAction(
+    event: StructuredActionEvent,
+    callbackData: string,
+  ): Promise<{ toast: { type: string; content: string } }> {
+    const [, runtimeText, modeText] = callbackData.split(':');
+    const runtime = runtimeText === 'codex' ? 'codex' : runtimeText === 'claude' ? 'claude' : null;
+    const bindingMode = modeText === 'plan' ? 'plan' : modeText === 'code' ? 'code' : null;
+    if (!runtime || !bindingMode) {
+      return { toast: { type: 'warning', content: 'Unsupported action' } };
+    }
+    const sender = this.extractActionSenderIdentity(event);
+    if (!sender) {
+      return { toast: { type: 'warning', content: '无法识别当前操作人' } };
+    }
+    const actionMessageId = resolveActionOpenMessageId(event);
+    const cwd = this.resolveSelectedWorkdir(event.action?.form_value as Record<string, unknown> | undefined);
+    try {
+      await this.createBoundSession(runtime, sender, {
+        cwd,
+        bindingMode,
+      });
+      await this.patchActionCardSafely(
+        undefined,
+        buildStatusCard(
+          runtime === 'codex' ? 'Codex 会话已创建' : '会话已创建',
+          [
+            `工作区：\`${cwd}\``,
+            `模式：**${bindingMode === 'plan' ? 'Plan' : '默认'}**`,
+            '请直接进入新群继续对话。',
+          ].join('\n\n'),
+          'green',
+        ),
+        'new-session',
+        actionMessageId,
+      );
+      return {
+        toast: {
+          type: 'success',
+          content: `已创建 ${runtime} 会话`,
+        },
+      };
+    } catch (error) {
+      console.error('[feishu-adapter] Failed to create session from new-session card:', error);
+      return {
+        toast: {
+          type: 'warning',
+          content: `创建会话失败：${error instanceof Error ? error.message : String(error)}`,
+        },
+      };
+    }
+  }
+
+  private async handleResumeCardAction(
+    event: StructuredActionEvent,
+    callbackData: string,
+  ): Promise<{ toast: { type: string; content: string } }> {
+    const [, action, runtimeText, nativeSessionId] = callbackData.split(':');
+    const runtime = runtimeText === 'codex' ? 'codex' : runtimeText === 'claude' ? 'claude' : null;
+    if (action !== 'pick' || !runtime || !nativeSessionId) {
+      return { toast: { type: 'warning', content: 'Unsupported action' } };
+    }
+    const sender = this.extractActionSenderIdentity(event);
+    if (!sender) {
+      return { toast: { type: 'warning', content: '无法识别当前操作人' } };
+    }
+    const defaultWorkdir = this.getStore().getSetting('bridge_default_work_dir') || process.cwd();
+    const transcript = loadNativeSessionTranscript(runtime, nativeSessionId, defaultWorkdir);
+    if (!transcript) {
+      return { toast: { type: 'warning', content: '原始会话不存在或已失效' } };
+    }
+    const actionMessageId = resolveActionOpenMessageId(event);
+    try {
+      const { chatId, binding } = await this.createBoundSession(runtime, sender, {
+        cwd: transcript.session.cwd,
+        skipReadyMessage: true,
+      });
+      const store = this.getStore();
+      if (runtime === 'codex') {
+        store.updateSdkSessionId(binding.codepilotSessionId, transcript.session.nativeSessionId);
+        store.updateCodexThreadId(binding.codepilotSessionId, transcript.session.nativeSessionId);
+      } else {
+        store.updateSdkSessionId(binding.codepilotSessionId, transcript.session.nativeSessionId);
+      }
+      store.updateSessionExt(binding.codepilotSessionId, {
+        title: transcript.session.title,
+        titleStatus: 'done',
+        displayNameMode: 'native_locked',
+      });
+      await this.syncChatName(chatId);
+      await this.replayNativeSessionHistory(
+        { channelType: this.channelType, channelInstanceId: this.profileId, chatId },
+        runtime,
+        transcript.items,
+      );
+      await this.sendAsPost(
+        { channelType: this.channelType, channelInstanceId: this.profileId, chatId },
+        `已恢复 ${runtime} 原始会话，后续请直接在本群继续对话。`,
+      );
+      await this.patchActionCardSafely(
+        undefined,
+        buildStatusCard(
+          runtime === 'codex' ? 'Codex 会话已恢复' : 'Claude 会话已恢复',
+          `已恢复 **${transcript.session.title}**。\n\n请直接进入新群继续对话。`,
+          'green',
+        ),
+        'resume',
+        actionMessageId,
+      );
+      return { toast: { type: 'success', content: '会话恢复完成' } };
+    } catch (error) {
+      console.error('[feishu-adapter] Failed to resume native session:', error);
+      return {
+        toast: {
+          type: 'warning',
+          content: `恢复会话失败：${error instanceof Error ? error.message : String(error)}`,
+        },
+      };
+    }
+  }
+
+  private async replayNativeSessionHistory(
+    address: ChannelAddress,
+    runtime: RuntimeName,
+    items: NativeReplayItem[],
+  ): Promise<void> {
+    for (const item of items) {
+      const parts = splitReplayText(item.text);
+      for (const [index, part] of parts.entries()) {
+        await this.sendAsInteractiveCard(
+          address,
+          buildReplayMessageText(runtime, { ...item, text: part }, index, parts.length),
         );
       }
-      return;
-    }
-
-    try {
-      await this.createBoundSession(runtime, sender);
-      await this.sendAsPost(inbound.address, `已创建新群并绑定 ${runtime} 会话。`, inbound.messageId);
-    } catch (error) {
-      console.error('[feishu-adapter] Failed to initialize group session:', error);
-      const message = `创建会话失败：${error instanceof Error ? error.message : String(error)}`;
-      await this.sendAsPost(inbound.address, message, inbound.messageId);
     }
   }
 
@@ -2673,13 +3185,17 @@ export class FeishuAdapter extends BaseChannelAdapter {
       if (!sender) {
         return { toast: { type: 'warning', content: '无法识别当前操作人' } };
       }
+      const cwd = this.resolveSelectedWorkdir(event.action?.form_value as Record<string, unknown> | undefined);
       try {
-        await this.createBoundSession('claude', sender, { claudePermissionMode: mode });
+        await this.createBoundSession('claude', sender, {
+          claudePermissionMode: mode,
+          cwd,
+        });
         await this.patchActionCardSafely(
           undefined,
           buildStatusCard(
             'Claude 会话已创建',
-            `已创建 Claude 会话，当前 mode：**${getClaudeModeTitle(mode)}**。\n\n请直接进入新群继续对话。`,
+            `工作区：\`${cwd}\`\n\n当前 mode：**${getClaudeModeTitle(mode)}**。\n\n请直接进入新群继续对话。`,
             'green',
           ),
           'claude-mode',
@@ -3146,6 +3662,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const binding = store.getChannelBinding(this.channelType, chatId, this.profileId);
     if (!binding) return null;
     const ext = store.getSessionExt(binding.codepilotSessionId);
+    if (ext?.displayNameMode === 'native_locked' && ext.title) {
+      return ext.title;
+    }
     const runtime = ext?.runtime || 'claude';
     const baseName = stripClaudeModeSuffix(ext?.title || defaultChatName(runtime));
     if (runtime === 'claude') {

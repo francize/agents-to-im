@@ -294,6 +294,7 @@ export class JsonFileStore implements BridgeStore {
       ...(extPartial.title ? { title: extPartial.title } : {}),
       titleStatus: extPartial.titleStatus || 'pending',
       ...(extPartial.codexThreadId ? { codexThreadId: extPartial.codexThreadId } : {}),
+      ...(extPartial.displayNameMode ? { displayNameMode: extPartial.displayNameMode } : {}),
     };
     return {
       ...record,

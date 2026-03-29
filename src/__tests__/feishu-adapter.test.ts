@@ -1,6 +1,7 @@
 import { beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 
@@ -41,6 +42,11 @@ function installContext(store: JsonFileStore, llm: Record<string, unknown> = {})
   });
 }
 
+function writeJsonlFile(filePath: string, records: Array<Record<string, unknown>>): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, records.map((record) => JSON.stringify(record)).join('\n'));
+}
+
 describe('FeishuAdapter', () => {
   beforeEach(() => {
     fs.rmSync(DATA_DIR, { recursive: true, force: true });
@@ -66,7 +72,7 @@ describe('FeishuAdapter', () => {
     assert.equal(adapter.validateConfig(), null);
   });
 
-  it('sends a Claude mode selection card instead of creating a group immediately from /new:claude in DM', async () => {
+  it('sends a Claude new-session card with workspace select and existing mode buttons from /new:claude in DM', async () => {
     const store = new JsonFileStore(makeSettings());
     let ensuredRuntime = '';
     installContext(store, {
@@ -115,11 +121,14 @@ describe('FeishuAdapter', () => {
     assert.equal(replies.length, 1);
     assert.equal(replies[0].msgType, 'interactive');
     const card = JSON.parse(replies[0].content);
-    const titles = card.body.elements[1].columns.map((column: any) => column.elements[0].text.content);
+    assert.equal(card.body.elements[0].tag, 'form');
+    assert.equal(card.body.elements[0].elements[2].tag, 'select_static');
+    assert.equal(card.body.elements[0].elements[2].name, 'new_session_workdir');
+    const titles = card.body.elements[0].elements[3].columns.map((column: any) => column.elements[0].text.content);
     assert.deepEqual(titles, ['Default', 'Plan Mode', 'Accept edits', 'Bypass Permissions', "Don't Ask"]);
   });
 
-  it('creates a runtime-bound group session from /new:codex in DM', async () => {
+  it('sends a Codex new-session card with workspace select and mode buttons from /new:codex in DM', async () => {
     const store = new JsonFileStore(makeSettings());
     let ensuredRuntime = '';
     installContext(store, {
@@ -128,21 +137,21 @@ describe('FeishuAdapter', () => {
       },
     });
 
-    const sends: Array<{ kind: string; chatId?: string }> = [];
+    let chatCreateCalls = 0;
+    const replies: Array<{ msgType: string; content: string }> = [];
     const adapter = new FeishuAdapter() as any;
     adapter.restClient = {
       im: {
         chat: {
-          create: async () => ({ code: 0, data: { chat_id: 'chat-new' } }),
+          create: async () => {
+            chatCreateCalls += 1;
+            return { code: 0, data: { chat_id: 'chat-new' } };
+          },
         },
         message: {
-          create: async (payload: { data: { receive_id: string } }) => {
-            sends.push({ kind: 'create', chatId: payload.data.receive_id });
-            return { code: 0, data: { message_id: `msg-${sends.length}` } };
-          },
-          reply: async () => {
-            sends.push({ kind: 'reply', chatId: 'dm-chat' });
-            return { code: 0, data: { message_id: `reply-${sends.length}` } };
+          reply: async (payload: { data: { msg_type: string; content: string } }) => {
+            replies.push({ msgType: payload.data.msg_type, content: payload.data.content });
+            return { code: 0, data: { message_id: 'reply-1', open_message_id: 'open-reply-1' } };
           },
         },
       },
@@ -159,14 +168,310 @@ describe('FeishuAdapter', () => {
       'codex',
     );
 
-    const binding = store.getChannelBinding('feishu', 'chat-new');
-    assert.ok(binding);
     assert.equal(ensuredRuntime, 'codex');
-    assert.deepEqual(store.getSessionExt(binding!.codepilotSessionId), {
-      runtime: 'codex',
-      titleStatus: 'pending',
+    assert.equal(chatCreateCalls, 0);
+    assert.equal(store.listChannelBindings().length, 0);
+    assert.equal(replies.length, 1);
+    assert.equal(replies[0].msgType, 'interactive');
+    const card = JSON.parse(replies[0].content);
+    assert.equal(card.body.elements[0].tag, 'form');
+    assert.equal(card.body.elements[0].elements[2].tag, 'select_static');
+    assert.equal(card.body.elements[0].elements[2].name, 'new_session_workdir');
+    const titles = card.body.elements[0].elements[3].columns.map((column: any) => column.elements[0].text.content);
+    assert.deepEqual(titles, ['默认', 'Plan']);
+  });
+
+  it('creates a Codex plan session from the new-session card using the selected workspace', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {
+      ensureRuntimeAvailable: async () => {},
     });
-    assert.equal(sends.length, 2);
+
+    let patchCalls = 0;
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        chat: {
+          create: async () => ({ code: 0, data: { chat_id: 'chat-codex-plan' } }),
+        },
+        message: {
+          create: async () => ({ code: 0, data: { message_id: 'group-msg-1' } }),
+          patch: async () => {
+            patchCalls += 1;
+            return { code: 0, data: {} };
+          },
+        },
+      },
+    };
+
+    const result = await adapter.handleCardAction({
+      open_id: 'ou_123',
+      tenant_key: 'tenant',
+      token: 'token',
+      open_message_id: 'open-card-1',
+      operator: { open_id: 'ou_123' },
+      action: {
+        tag: 'button',
+        value: {
+          callback_data: 'new-session:codex:plan',
+        },
+        form_value: {
+          new_session_workdir: '/tmp/codex-plan',
+        },
+      },
+    });
+
+    const binding = store.getChannelBinding('feishu', 'chat-codex-plan');
+    assert.equal(result.toast.type, 'success');
+    assert.ok(binding);
+    assert.equal(binding!.workingDirectory, '/tmp/codex-plan');
+    assert.equal(binding!.mode, 'plan');
+    assert.equal(store.getSessionExt(binding!.codepilotSessionId)?.runtime, 'codex');
+    assert.equal(patchCalls, 1);
+  });
+
+  it('creates a Claude session from the mode card using the selected workspace', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {
+      ensureRuntimeAvailable: async () => {},
+    });
+
+    let patchCalls = 0;
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        chat: {
+          create: async () => ({ code: 0, data: { chat_id: 'chat-claude-default' } }),
+        },
+        message: {
+          create: async () => ({ code: 0, data: { message_id: 'group-msg-1' } }),
+          patch: async () => {
+            patchCalls += 1;
+            return { code: 0, data: {} };
+          },
+        },
+      },
+    };
+
+    const result = await adapter.handleCardAction({
+      open_id: 'ou_123',
+      tenant_key: 'tenant',
+      token: 'token',
+      open_message_id: 'open-card-2',
+      operator: { open_id: 'ou_123' },
+      action: {
+        tag: 'button',
+        value: {
+          callback_data: 'claude-mode:new:default',
+        },
+        form_value: {
+          new_session_workdir: '/tmp/claude-default',
+        },
+      },
+    });
+
+    const binding = store.getChannelBinding('feishu', 'chat-claude-default');
+    assert.equal(result.toast.type, 'success');
+    assert.ok(binding);
+    assert.equal(binding!.workingDirectory, '/tmp/claude-default');
+    assert.equal(binding!.mode, 'code');
+    assert.equal(binding!.claudePermissionMode, 'default');
+    assert.equal(store.getSessionExt(binding!.codepilotSessionId)?.runtime, 'claude');
+    assert.equal(patchCalls, 1);
+  });
+
+  it('lists recent codex native sessions from /resume:codex in DM', async () => {
+    const tempCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-resume-codex-'));
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = tempCodexHome;
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {
+      ensureRuntimeAvailable: async () => {},
+    });
+
+    try {
+      fs.mkdirSync(path.join(tempCodexHome, 'sessions', '2026', '03', '28'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tempCodexHome, 'session_index.jsonl'),
+        JSON.stringify({
+          id: 'resume-codex-1',
+          thread_name: '恢复测试会话',
+          updated_at: '2026-03-28T09:00:00.000Z',
+        }),
+      );
+      writeJsonlFile(
+        path.join(tempCodexHome, 'sessions', '2026', '03', '28', 'rollout-2026-03-28-resume-codex-1.jsonl'),
+        [
+          { type: 'session_meta', payload: { id: 'resume-codex-1', cwd: '/tmp/test-cwd' } },
+          {
+            type: 'response_item',
+            payload: {
+              type: 'message',
+              role: 'user',
+              content: [{ type: 'input_text', text: '请恢复这个会话' }],
+            },
+          },
+        ],
+      );
+
+      const replies: Array<{ msgType: string; content: string }> = [];
+      const adapter = new FeishuAdapter() as any;
+      adapter.restClient = {
+        im: {
+          message: {
+            reply: async (payload: { data: { msg_type: string; content: string } }) => {
+              replies.push({ msgType: payload.data.msg_type, content: payload.data.content });
+              return { code: 0, data: { message_id: 'reply-1', open_message_id: 'open-reply-1' } };
+            },
+          },
+        },
+      };
+
+      await adapter.handleDirectMessage(
+        { id: 'ou_123', type: 'open_id' },
+        {
+          messageId: 'dm-msg',
+          address: { channelType: 'feishu', chatId: 'dm-chat', userId: 'ou_123' },
+          text: '/resume:codex',
+          timestamp: Date.now(),
+        },
+      );
+
+      assert.equal(replies.length, 1);
+      assert.equal(replies[0].msgType, 'interactive');
+      const card = JSON.parse(replies[0].content);
+      assert.equal(card.header.title.content, '恢复 Codex 会话');
+      assert.match(card.body.elements[1].columns[0].elements[0].content, /恢复测试会话/);
+      assert.equal(
+        card.body.elements[1].columns[1].elements[0].behaviors[0].value.callback_data,
+        'resume:pick:codex:resume-codex-1',
+      );
+    } finally {
+      process.env.CODEX_HOME = previousCodexHome;
+      fs.rmSync(tempCodexHome, { recursive: true, force: true });
+    }
+  });
+
+  it('replays codex native history into a new group without storing imported transcript locally', async () => {
+    const tempCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-resume-action-'));
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = tempCodexHome;
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {
+      ensureRuntimeAvailable: async () => {},
+    });
+
+    try {
+      fs.mkdirSync(path.join(tempCodexHome, 'sessions', '2026', '03', '28'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tempCodexHome, 'session_index.jsonl'),
+        JSON.stringify({
+          id: 'resume-codex-2',
+          thread_name: '恢复并回放',
+          updated_at: '2026-03-28T10:00:00.000Z',
+        }),
+      );
+      writeJsonlFile(
+        path.join(tempCodexHome, 'sessions', '2026', '03', '28', 'rollout-2026-03-28-resume-codex-2.jsonl'),
+        [
+          { type: 'session_meta', payload: { id: 'resume-codex-2', cwd: '/tmp/test-cwd' } },
+          {
+            type: 'response_item',
+            payload: {
+              type: 'message',
+              role: 'user',
+              content: [{ type: 'input_text', text: '第一条用户消息' }],
+            },
+          },
+          {
+            type: 'response_item',
+            payload: {
+              type: 'message',
+              role: 'assistant',
+              content: [{ type: 'output_text', text: '第一条模型消息' }],
+            },
+          },
+          {
+            type: 'response_item',
+            payload: {
+              type: 'function_call',
+              call_id: 'call-1',
+              name: 'shell_command',
+            },
+          },
+          {
+            type: 'response_item',
+            payload: {
+              type: 'function_call_output',
+              call_id: 'call-1',
+              output: 'Output from tool',
+            },
+          },
+        ],
+      );
+
+      const creates: Array<{ msgType: string; content: string; receiveId: string }> = [];
+      let patchCalls = 0;
+      const adapter = new FeishuAdapter() as any;
+      adapter.restClient = {
+        im: {
+          chat: {
+            create: async () => ({ code: 0, data: { chat_id: 'chat-resume-codex' } }),
+          },
+          message: {
+            create: async (payload: { data: { msg_type: string; content: string; receive_id: string } }) => {
+              creates.push({
+                msgType: payload.data.msg_type,
+                content: payload.data.content,
+                receiveId: payload.data.receive_id,
+              });
+              return { code: 0, data: { message_id: `msg-${creates.length}` } };
+            },
+            patch: async () => {
+              patchCalls += 1;
+              return { code: 0, data: {} };
+            },
+          },
+        },
+      };
+
+      const result = await adapter.handleCardAction({
+        open_id: 'ou_123',
+        tenant_key: 'tenant',
+        token: 'token',
+        open_message_id: 'open-resume-1',
+        operator: { open_id: 'ou_123' },
+        action: {
+          tag: 'button',
+          value: {
+            callback_data: 'resume:pick:codex:resume-codex-2',
+          },
+        },
+      });
+
+      const binding = store.getChannelBinding('feishu', 'chat-resume-codex');
+      assert.equal(result.toast.type, 'success');
+      assert.ok(binding);
+      assert.equal(store.getSessionSdkSessionId(binding!.codepilotSessionId), 'resume-codex-2');
+      assert.equal(store.getSessionExt(binding!.codepilotSessionId)?.codexThreadId, 'resume-codex-2');
+      assert.equal(store.getSessionExt(binding!.codepilotSessionId)?.title, '恢复并回放');
+      assert.equal(store.getSessionExt(binding!.codepilotSessionId)?.displayNameMode, 'native_locked');
+      assert.deepEqual(store.getMessages(binding!.codepilotSessionId).messages, []);
+      assert.equal(creates.length, 4);
+      assert.deepEqual(
+        creates.map((item) => item.msgType),
+        ['interactive', 'interactive', 'interactive', 'post'],
+      );
+      const replayCards = creates.slice(0, 3).map((item) => JSON.parse(item.content));
+      assert.equal(replayCards[0].header, undefined);
+      assert.equal(replayCards[0].body.elements[0].content, '**用户**\n\n第一条用户消息');
+      assert.equal(replayCards[1].body.elements[0].content, '**Codex**\n\n第一条模型消息');
+      assert.equal(replayCards[2].body.elements[0].content, '**工具结果 · shell_command**\n\nOutput from tool');
+      assert.equal(patchCalls, 1);
+    } finally {
+      process.env.CODEX_HOME = previousCodexHome;
+      fs.rmSync(tempCodexHome, { recursive: true, force: true });
+    }
   });
 
   it('redirects /new:codex to the mapped bot when this adapter only owns Claude', async () => {

@@ -12,7 +12,7 @@ DM creates a dedicated group-bound session space for Claude Code and Codex, whil
 
 ```mermaid
 flowchart LR
-  A["DM Bot<br/>/new:claude or /new:codex"] --> B["Bot creates a fresh Feishu/Lark group"]
+  A["DM Bot<br/>/new:* or /resume:*"] --> B["Bot creates a fresh Feishu/Lark group"]
   B --> C["One group = one session = one runtime"]
   C --> D["Local JSON state keeps bindings, messages, runtime, resume IDs"]
   D --> E["Restart bridge and continue in the same group workspace"]
@@ -21,7 +21,7 @@ flowchart LR
 
 ## Why Feishu-first?
 
-- **Dedicated session space, not mixed chat noise.** DM is only the control plane. `/new:claude` first asks for a Claude permission mode via card, then creates a fresh group; `/new:codex` creates the group directly. In both cases, the group is bound to exactly one session, so the working thread is isolated by default.
+- **Dedicated session space, not mixed chat noise.** DM is only the control plane. `/new:claude` and `/new:codex` both open a single card first: choose a recent workspace, then create a fresh group. Claude keeps its existing mode buttons; Codex offers `默认` and `Plan`. The group is then bound to exactly one session, so the working thread stays isolated by default.
 - **Recoverable local workspace.** Sessions, chat bindings, messages, runtime state, and resume identifiers live under `~/.agents-to-im/`, so restarting the bridge does not mean rebuilding the workspace model from scratch.
 - **Feishu-native interaction, not plain text forwarding.** Streaming previews prefer CardKit, permission approvals prefer buttons, and activity/plan/structured-input flows are rendered as cards instead of reducing Feishu to a slash-command terminal.
 
@@ -33,7 +33,7 @@ flowchart LR
 | Codex runtime | Supported |
 | Feishu | Supported |
 | Lark | Supported |
-| DM control plane | `/new:claude`, `/new:codex` |
+| DM control plane | `/new:claude`, `/new:codex`, `/resume:claude`, `/resume:codex` |
 | Group-bound workspace | One group = one session = one runtime |
 | Local recovery | Bindings, messages, runtime, status, resume IDs kept locally |
 | Streaming preview | CardKit first, patch/text fallback |
@@ -219,8 +219,10 @@ What recovery means in practice:
 
 | Command | Description |
 | --- | --- |
-| `/new:claude` | Open a Claude mode card, then create a new Claude-backed group workspace in the selected mode |
-| `/new:codex` | Create a new Codex-backed group workspace |
+| `/new:claude` | Open one card with a recent-workspace dropdown plus the existing Claude mode buttons, then create a new Claude-backed group workspace |
+| `/new:codex` | Open one card with a recent-workspace dropdown plus `默认` / `Plan`, then create a new Codex-backed group workspace |
+| `/resume:claude` | Read the latest local Claude native sessions for the current workspace, choose one from a card, recreate the group, and replay its history as cards |
+| `/resume:codex` | Read the latest local Codex native sessions for the current workspace, choose one from a card, recreate the group, and replay its history as cards |
 
 Any other DM message returns help text instead of starting a session.
 
