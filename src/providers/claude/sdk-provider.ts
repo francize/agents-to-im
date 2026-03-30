@@ -20,11 +20,11 @@ import type {
   StreamChatParams,
   StructuredInputRequestInfo,
   StructuredInputResponse,
-} from './bridge/host.js';
-import { normalizeClaudePermissionMode } from './claude-mode.js';
+} from '../../bridge/host.js';
+import { normalizeClaudePermissionMode } from '../../runtime/claude-mode.js';
 import type { PendingPermissions, PendingStructuredInputs } from './permission-gateway.js';
 
-import { emitCanonicalTurnEvent } from './sse-utils.js';
+import { emitCanonicalTurnEvent } from '../../infra/sse-utils.js';
 
 // ── Environment isolation ──
 

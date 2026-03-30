@@ -6,14 +6,15 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 
 import { initBridgeContext } from '../bridge/context.js';
+import { forwardPermissionRequest } from '../bridge/permission-broker.js';
 import {
   CLAUDE_PLAN_FOLLOW_UP_REJECT_MESSAGE,
   buildClaudePlanModeUpdates,
-} from '../claude-plan-exit.js';
+} from '../runtime/claude-plan-exit.js';
 
-import { CTI_HOME } from '../config.js';
+import { CTI_HOME } from '../config/config.js';
 import { FeishuAdapter, findMissingAppScopes } from '../feishu/adapter.js';
-import { JsonFileStore } from '../store.js';
+import { JsonFileStore } from '../infra/store.js';
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
 
@@ -124,8 +125,10 @@ describe('FeishuAdapter', () => {
     assert.equal(card.body.elements[0].tag, 'form');
     assert.equal(card.body.elements[0].elements[2].tag, 'select_static');
     assert.equal(card.body.elements[0].elements[2].name, 'new_session_workdir');
-    const titles = card.body.elements[0].elements[3].columns.map((column: any) => column.elements[0].text.content);
+    const buttons = card.body.elements[0].elements[3].columns.map((column: any) => column.elements[0]);
+    const titles = buttons.map((button: any) => button.text.content);
     assert.deepEqual(titles, ['Default', 'Plan Mode', 'Accept edits', 'Bypass Permissions', "Don't Ask"]);
+    assert.ok(buttons.every((button: any) => typeof button.name === 'string' && button.name.length > 0));
   });
 
   it('sends a Codex new-session card with workspace select and mode buttons from /new:codex in DM', async () => {
@@ -177,8 +180,10 @@ describe('FeishuAdapter', () => {
     assert.equal(card.body.elements[0].tag, 'form');
     assert.equal(card.body.elements[0].elements[2].tag, 'select_static');
     assert.equal(card.body.elements[0].elements[2].name, 'new_session_workdir');
-    const titles = card.body.elements[0].elements[3].columns.map((column: any) => column.elements[0].text.content);
+    const buttons = card.body.elements[0].elements[3].columns.map((column: any) => column.elements[0]);
+    const titles = buttons.map((button: any) => button.text.content);
     assert.deepEqual(titles, ['默认', 'Plan']);
+    assert.deepEqual(buttons.map((button: any) => button.name), ['new_session_codex_code', 'new_session_codex_plan']);
   });
 
   it('creates a Codex plan session from the new-session card using the selected workspace', async () => {
@@ -1307,6 +1312,62 @@ describe('FeishuAdapter', () => {
     assert.equal(card.body.elements[1].columns[1].elements[0].behaviors[0].value.callback_data, 'perm:deny:req-1');
   });
 
+  it('shows runtime-specific timeout hints on forwarded permission cards', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const claudeSession = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    const codexSession = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+      cwd: '/tmp/test-cwd',
+    });
+
+    const payloads: string[] = [];
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        message: {
+          reply: async (payload: { data: { content: string } }) => {
+            payloads.push(payload.data.content);
+            return { code: 0, data: { message_id: `perm-msg-${payloads.length}` } };
+          },
+        },
+      },
+    };
+
+    await forwardPermissionRequest(
+      adapter,
+      { channelType: 'feishu', chatId: 'group-perm-timeout' },
+      'req-claude-timeout',
+      'Bash',
+      { command: 'npm test' },
+      claudeSession.id,
+      [],
+      'incoming-claude',
+    );
+    await forwardPermissionRequest(
+      adapter,
+      { channelType: 'feishu', chatId: 'group-perm-timeout' },
+      'req-codex-timeout',
+      'Plan Execution',
+      { reason: 'Confirm whether to implement the proposed plan.' },
+      codexSession.id,
+      [],
+      'incoming-codex',
+    );
+
+    const claudeCard = JSON.parse(payloads[0]);
+    const codexCard = JSON.parse(payloads[1]);
+    assert.match(claudeCard.body.elements[0].content, /15 分钟/);
+    assert.match(claudeCard.body.elements[0].content, /自动拒绝/);
+    assert.match(codexCard.body.elements[0].content, /10 分钟/);
+    assert.match(codexCard.body.elements[0].content, /自动拒绝/);
+  });
+
   it('patches a permission card into a handled state after a button action', async () => {
     const store = new JsonFileStore(makeSettings());
     initBridgeContext({
@@ -1926,6 +1987,9 @@ describe('FeishuAdapter', () => {
     assert.equal(card.body.elements[0].elements[3].name, 'structured-input_req_1_other_q1');
     assert.equal(card.body.elements[0].elements[4].tag, 'markdown');
     assert.match(card.body.elements[0].elements[4].content, /可填写上面的自定义输入框/);
+    assert.equal(card.body.elements[0].elements.at(-2).tag, 'markdown');
+    assert.match(card.body.elements[0].elements.at(-2).content, /10 分钟/);
+    assert.match(card.body.elements[0].elements.at(-2).content, /未补充处理/);
     assert.equal(card.body.elements[0].elements.at(-1).tag, 'column_set');
     assert.equal(card.body.elements[0].elements.at(-1).columns[0].elements[0].tag, 'button');
     assert.equal(card.body.elements[0].elements.at(-1).columns[0].elements[0].form_action_type, 'submit');

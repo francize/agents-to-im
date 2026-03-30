@@ -1,12 +1,12 @@
 import crypto from 'node:crypto';
 
-import type { LLMProvider, StreamChatParams } from './bridge/host.js';
-import type { Config } from './config.js';
-import { CodexProvider } from './codex-provider.js';
-import { SDKLLMProvider } from './llm-provider.js';
-import type { RuntimeName } from './runtime-types.js';
-import { RUNTIME_CAPABILITIES, type ProviderCapabilities } from './runtime-capabilities.js';
-import { JsonFileStore } from './store.js';
+import type { LLMProvider, StreamChatParams } from '../bridge/host.js';
+import type { Config } from '../config/config.js';
+import { CodexProvider } from '../providers/codex/codex-provider.js';
+import { SDKLLMProvider } from '../providers/claude/sdk-provider.js';
+import type { RuntimeName } from './types.js';
+import { RUNTIME_CAPABILITIES, type ProviderCapabilities } from './capabilities.js';
+import { JsonFileStore } from '../infra/store.js';
 
 interface ParsedEvent {
   type: string;

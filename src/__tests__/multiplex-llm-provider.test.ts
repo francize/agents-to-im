@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CTI_HOME } from '../config.js';
-import type { Config } from '../config.js';
-import { MultiplexLLMProvider } from '../multiplex-llm-provider.js';
-import { PendingPermissions } from '../permission-gateway.js';
-import { JsonFileStore } from '../store.js';
+import { CTI_HOME } from '../config/config.js';
+import type { Config } from '../config/config.js';
+import { MultiplexLLMProvider } from '../providers/multiplex.js';
+import { PendingPermissions } from '../providers/claude/permission-gateway.js';
+import { JsonFileStore } from '../infra/store.js';
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
 

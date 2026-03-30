@@ -8,7 +8,7 @@ import {
   extractClaudeModeOptionsFromCliSource,
   resolveClaudeModeMetadata,
   SNAPSHOT_CLAUDE_MODE_OPTIONS,
-} from '../claude-mode.js';
+} from '../runtime/claude-mode.js';
 
 describe('claude-mode metadata', () => {
   it('extracts permission mode titles from the installed Claude SDK CLI bundle', () => {

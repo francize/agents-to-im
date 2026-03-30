@@ -2,20 +2,20 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { CodexAppServerClient, type CodexServerMessage } from './codex-app-server-client.js';
+import { CodexAppServerClient, type CodexServerMessage } from './app-server-client.js';
 import type {
   ActivityEvent,
   ActivityFileChangeEntry,
   LLMProvider,
   StreamChatParams,
   StructuredInputRequestInfo,
-} from './bridge/host.js';
+} from '../../bridge/host.js';
 import {
   PendingApprovals,
   PendingStructuredInputs,
   type PermissionResolution,
-} from './permission-gateway.js';
-import { emitCanonicalTurnEvent } from './sse-utils.js';
+} from '../claude/permission-gateway.js';
+import { emitCanonicalTurnEvent } from '../../infra/sse-utils.js';
 
 const MIME_EXT: Record<string, string> = {
   'image/png': '.png',

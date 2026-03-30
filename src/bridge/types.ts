@@ -1,4 +1,4 @@
-import type { ClaudePermissionMode } from '../claude-mode.js';
+import type { ClaudePermissionMode } from '../runtime/claude-mode.js';
 
 /**
  * Bridge system types — shared across all bridge modules.

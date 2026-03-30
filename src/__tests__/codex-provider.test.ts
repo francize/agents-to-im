@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { PendingApprovals, PendingStructuredInputs } from '../permission-gateway.js';
-import { sseEvent } from '../sse-utils.js';
+import { PendingApprovals, PendingStructuredInputs } from '../providers/claude/permission-gateway.js';
+import { sseEvent } from '../infra/sse-utils.js';
 
 async function collectStream(stream: ReadableStream<string>): Promise<string[]> {
   const reader = stream.getReader();
@@ -102,7 +102,7 @@ describe('sseEvent', () => {
 
 describe('CodexProvider', () => {
   it('emits native plan events and forwards collaborationMode=plan', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
+    const { CodexProvider } = await import('../providers/codex/codex-provider.js');
     const fake = new FakeCodexClient({
       'thread/start': async () => ({ thread: { id: 'thread-1' }, model: 'gpt-5.4' }),
       'turn/start': async () => {
@@ -170,7 +170,7 @@ describe('CodexProvider', () => {
   });
 
   it('forwards collaborationMode=default when explicitly exiting plan mode', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
+    const { CodexProvider } = await import('../providers/codex/codex-provider.js');
     const fake = new FakeCodexClient({
       'thread/start': async () => ({ thread: { id: 'thread-default' }, model: 'gpt-5.4' }),
       'turn/start': async () => {
@@ -204,7 +204,7 @@ describe('CodexProvider', () => {
   });
 
   it('retries without collaborationMode when explicit default is rejected', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
+    const { CodexProvider } = await import('../providers/codex/codex-provider.js');
     let turnStartCalls = 0;
     const fake = new FakeCodexClient({
       'thread/start': async () => ({ thread: { id: 'thread-default-retry' }, model: 'gpt-5.4' }),
@@ -246,7 +246,7 @@ describe('CodexProvider', () => {
   });
 
   it('emits completed agent messages as text_segment instead of duplicating text deltas', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
+    const { CodexProvider } = await import('../providers/codex/codex-provider.js');
     const fake = new FakeCodexClient({
       'thread/start': async () => ({ thread: { id: 'thread-segment' }, model: 'gpt-5.4' }),
       'turn/start': async () => {
@@ -299,7 +299,7 @@ describe('CodexProvider', () => {
   });
 
   it('maps command/file/context and legacy runtime notifications into activity_event SSE payloads', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
+    const { CodexProvider } = await import('../providers/codex/codex-provider.js');
     const fake = new FakeCodexClient({
       'thread/start': async () => ({ thread: { id: 'thread-activity-map' }, model: 'gpt-5.4' }),
       'turn/start': async () => {
@@ -440,7 +440,7 @@ describe('CodexProvider', () => {
   });
 
   it('interrupts the active turn when the bridge aborts a codex stream', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
+    const { CodexProvider } = await import('../providers/codex/codex-provider.js');
     const fake = new FakeCodexClient({
       'thread/start': async () => ({ thread: { id: 'thread-stop' }, model: 'gpt-5.4' }),
       'turn/start': async () => {
@@ -505,7 +505,7 @@ describe('CodexProvider', () => {
   });
 
   it('emits tool_activity events for MCP tool calls so channel adapters can render streaming cards', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
+    const { CodexProvider } = await import('../providers/codex/codex-provider.js');
     const fake = new FakeCodexClient({
       'thread/start': async () => ({ thread: { id: 'thread-mcp-card' }, model: 'gpt-5.4' }),
       'turn/start': async () => {
@@ -611,8 +611,92 @@ describe('CodexProvider', () => {
     );
   });
 
+  it('preserves Codex desktop screenshot image payloads inside tool_result content for downstream auto-send', async () => {
+    const { CodexProvider } = await import('../providers/codex/codex-provider.js');
+    const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==';
+    const fake = new FakeCodexClient({
+      'thread/start': async () => ({ thread: { id: 'thread-mcp-image' }, model: 'gpt-5.4' }),
+      'turn/start': async () => {
+        queueMicrotask(() => {
+          fake.emit({
+            kind: 'notification',
+            method: 'turn/started',
+            params: {
+              threadId: 'thread-mcp-image',
+              turn: { id: 'turn-mcp-image' },
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'item/completed',
+            params: {
+              threadId: 'thread-mcp-image',
+              turnId: 'turn-mcp-image',
+              item: {
+                type: 'mcpToolCall',
+                id: 'tool-mcp-image-1',
+                server: 'chrome-devtools',
+                tool: 'take_screenshot',
+                arguments: { format: 'png' },
+                result: {
+                  content: [
+                    {
+                      type: 'text',
+                      text: "Took a screenshot of the current page's viewport.",
+                    },
+                    {
+                      type: 'image',
+                      mimeType: 'image/png',
+                      data: pngBase64,
+                    },
+                  ],
+                },
+              },
+            },
+          });
+          fake.emit({
+            kind: 'notification',
+            method: 'turn/completed',
+            params: {
+              threadId: 'thread-mcp-image',
+              turn: { id: 'turn-mcp-image', error: null },
+            },
+          });
+        });
+        return { turn: { id: 'turn-mcp-image' } };
+      },
+    });
+
+    const provider = new CodexProvider();
+    (provider as any).client = fake;
+
+    const chunks = await collectStream(provider.streamChat({
+      prompt: '继续',
+      sessionId: 'session-mcp-image',
+      model: 'gpt-5.4',
+    }));
+
+    const events = parseSSEChunks(chunks);
+    const toolResultEvent = events.find((event) => event.type === 'tool_result');
+    assert.ok(toolResultEvent);
+
+    const toolResult = JSON.parse(toolResultEvent!.data);
+    const content = JSON.parse(toolResult.content);
+    assert.deepEqual(content, [
+      {
+        type: 'text',
+        text: "Took a screenshot of the current page's viewport.",
+      },
+      {
+        type: 'image',
+        mimeType: 'image/png',
+        data: pngBase64,
+      },
+    ]);
+  });
+
   it('keeps started and completed command activities on the same fallback id when item ids are missing', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
+    const { CodexProvider } = await import('../providers/codex/codex-provider.js');
     const fake = new FakeCodexClient({
       'thread/start': async () => ({ thread: { id: 'thread-command-fallback' }, model: 'gpt-5.4' }),
       'turn/start': async () => {
@@ -690,7 +774,7 @@ describe('CodexProvider', () => {
   });
 
   it('bridges structured user input requests back into app-server responses', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
+    const { CodexProvider } = await import('../providers/codex/codex-provider.js');
     const pendingInputs = new PendingStructuredInputs();
     const fake = new FakeCodexClient({
       'thread/start': async () => ({ thread: { id: 'thread-2' }, model: 'gpt-5.4' }),
@@ -764,7 +848,7 @@ describe('CodexProvider', () => {
   });
 
   it('bridges approval requests and maps allow_session to acceptForSession', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
+    const { CodexProvider } = await import('../providers/codex/codex-provider.js');
     const pendingApprovals = new PendingApprovals();
     const fake = new FakeCodexClient({
       'thread/start': async () => ({ thread: { id: 'thread-3' }, model: 'gpt-5.4' }),
@@ -821,7 +905,7 @@ describe('CodexProvider', () => {
   });
 
   it('bridges generic requestApproval methods instead of rejecting them as unsupported', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
+    const { CodexProvider } = await import('../providers/codex/codex-provider.js');
     const pendingApprovals = new PendingApprovals();
     const fake = new FakeCodexClient({
       'thread/start': async () => ({ thread: { id: 'thread-approval-generic' }, model: 'gpt-5.4' }),
@@ -886,7 +970,7 @@ describe('CodexProvider', () => {
   });
 
   it('retries with a fresh thread when thread/resume fails before any turn starts', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
+    const { CodexProvider } = await import('../providers/codex/codex-provider.js');
     let resumeCalls = 0;
     let startCalls = 0;
     const fake = new FakeCodexClient({
@@ -926,7 +1010,7 @@ describe('CodexProvider', () => {
   });
 
   it('builds localImage inputs for image attachments', async () => {
-    const { CodexProvider } = await import('../codex-provider.js');
+    const { CodexProvider } = await import('../providers/codex/codex-provider.js');
     const fake = new FakeCodexClient({
       'thread/start': async () => ({ thread: { id: 'thread-5' }, model: 'gpt-5.4' }),
       'turn/start': async () => {
@@ -970,7 +1054,7 @@ describe('CodexProvider', () => {
 
 describe('Codex config helpers', () => {
   it('parses trusted project roots from ~/.codex/config.toml content', async () => {
-    const { parseTrustedProjectsFromCodexConfig, isTrustedCodexWorkingDirectory } = await import('../codex-provider.js');
+    const { parseTrustedProjectsFromCodexConfig, isTrustedCodexWorkingDirectory } = await import('../providers/codex/codex-provider.js');
     const trusted = parseTrustedProjectsFromCodexConfig(`
 model = "gpt-5.4"
 

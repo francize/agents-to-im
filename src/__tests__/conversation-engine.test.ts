@@ -5,9 +5,9 @@ import path from 'node:path';
 
 import { initBridgeContext } from '../bridge/context.js';
 import { processMessage } from '../bridge/conversation-engine.js';
-import { sseEvent } from '../sse-utils.js';
-import { JsonFileStore } from '../store.js';
-import { CTI_HOME } from '../config.js';
+import { sseEvent } from '../infra/sse-utils.js';
+import { JsonFileStore } from '../infra/store.js';
+import { CTI_HOME } from '../config/config.js';
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
 

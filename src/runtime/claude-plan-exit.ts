@@ -1,5 +1,8 @@
 import type { PermissionUpdate } from '@anthropic-ai/claude-agent-sdk';
 
+import { buildInteractionTimeoutMarkdown } from '../bridge/interaction-timeout.js';
+import { PENDING_PERMISSIONS_TIMEOUT_MS } from '../providers/claude/permission-gateway.js';
+
 export interface ClaudePlanAllowedPrompt {
   tool: string;
   prompt: string;
@@ -22,6 +25,9 @@ function buildClaudePlanExitElements(
   planText: string,
   allowedPrompts: ClaudePlanAllowedPrompt[],
   showClearContext: boolean,
+  options?: {
+    pending?: boolean;
+  },
 ): Array<Record<string, unknown>> {
   const elements: Array<Record<string, unknown>> = [
     {
@@ -50,6 +56,13 @@ function buildClaudePlanExitElements(
       ? '如需继续规划，请直接在本线程回复你希望 Claude 调整的地方。“清空上下文后执行”会结束当前 PLAN 会话，并用新会话按已确认计划开始实施。'
       : '如需继续规划，请直接在本线程回复你希望 Claude 调整的地方。',
   });
+
+  if (options?.pending !== false) {
+    elements.push({
+      tag: 'markdown',
+      content: buildInteractionTimeoutMarkdown(PENDING_PERMISSIONS_TIMEOUT_MS, '会自动拒绝'),
+    });
+  }
 
   return elements;
 }
@@ -181,7 +194,7 @@ export function buildClaudePlanExitCard(
   allowedPrompts: ClaudePlanAllowedPrompt[],
   showClearContext: boolean,
 ): Record<string, unknown> {
-  const elements = buildClaudePlanExitElements(planText, allowedPrompts, showClearContext);
+  const elements = buildClaudePlanExitElements(planText, allowedPrompts, showClearContext, { pending: true });
   elements.push({
     tag: 'column_set',
     flex_mode: 'flow',
@@ -199,7 +212,7 @@ export function buildHandledClaudePlanExitCard(
   action: string,
   variant: string,
 ): Record<string, unknown> {
-  const elements = buildClaudePlanExitElements(planText, allowedPrompts, showClearContext);
+  const elements = buildClaudePlanExitElements(planText, allowedPrompts, showClearContext, { pending: false });
   elements.push({
     tag: 'column_set',
     flex_mode: 'flow',

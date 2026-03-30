@@ -11,13 +11,13 @@ import crypto from 'node:crypto';
 import { initBridgeContext } from './bridge/context.js';
 import * as bridgeManager from './bridge/bridge-manager.js';
 
-import { loadConfig, configToSettings, CTI_HOME } from './config.js';
+import { loadConfig, configToSettings, CTI_HOME } from './config/config.js';
 import { FeishuAdapter } from './feishu/adapter.js';
-import { MultiplexLLMProvider } from './multiplex-llm-provider.js';
-import { JsonFileStore } from './store.js';
-import { PendingApprovals, PendingPermissions, PendingStructuredInputs } from './permission-gateway.js';
-import { setupLogger } from './logger.js';
-import { startDashboard, stopDashboard } from './dashboard.js';
+import { MultiplexLLMProvider } from './providers/multiplex.js';
+import { JsonFileStore } from './infra/store.js';
+import { PendingApprovals, PendingPermissions, PendingStructuredInputs } from './providers/claude/permission-gateway.js';
+import { setupLogger } from './config/logger.js';
+import { startDashboard, stopDashboard } from './infra/dashboard.js';
 
 const RUNTIME_DIR = path.join(CTI_HOME, 'runtime');
 const STATUS_FILE = path.join(RUNTIME_DIR, 'status.json');

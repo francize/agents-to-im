@@ -5,7 +5,7 @@
  * wire string themselves so the bridge consumes one stable SSE contract.
  */
 
-import type { SSEEventType } from './bridge/host.js';
+import type { SSEEventType } from '../bridge/host.js';
 
 export interface CanonicalTurnEvent<TType extends SSEEventType = SSEEventType> {
   type: TType;

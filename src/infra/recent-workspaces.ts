@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-import type { ChannelBinding } from './bridge/types.js';
+import type { ChannelBinding } from '../bridge/types.js';
 
 export interface RecentWorkspaceOption {
   shortLabel: string;

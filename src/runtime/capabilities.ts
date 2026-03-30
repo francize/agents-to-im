@@ -1,4 +1,4 @@
-import type { RuntimeName } from './runtime-types.js';
+import type { RuntimeName } from './types.js';
 
 export interface ProviderCapabilities {
   nativePlanProtocol: boolean;

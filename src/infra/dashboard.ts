@@ -10,7 +10,7 @@
  */
 
 import http from 'node:http';
-import { CTI_HOME } from './config.js';
+import { CTI_HOME } from '../config/config.js';
 import type { JsonFileStore } from './store.js';
 
 // ── Types ──

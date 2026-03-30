@@ -11,9 +11,9 @@ import {
   parseCliMajorVersion,
   parseAskUserQuestionRequest,
   handleMessage,
-} from '../llm-provider.js';
-import type { StreamState } from '../llm-provider.js';
-import { sseEvent } from '../sse-utils.js';
+} from '../providers/claude/sdk-provider.js';
+import type { StreamState } from '../providers/claude/sdk-provider.js';
+import { sseEvent } from '../infra/sse-utils.js';
 
 // ── Helpers ──
 

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatLogTimestamp, maskSecrets } from '../logger.js';
+import { formatLogTimestamp, maskSecrets } from '../config/logger.js';
 
 describe('maskSecrets', () => {
   it('masks token=value patterns', () => {

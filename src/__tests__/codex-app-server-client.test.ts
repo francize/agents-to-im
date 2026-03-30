@@ -5,7 +5,7 @@ import {
   buildInitializeParams,
   buildInitializedNotification,
   extractCollaborationModes,
-} from '../codex-app-server-client.js';
+} from '../providers/codex/app-server-client.js';
 
 describe('Codex app-server handshake helpers', () => {
   it('builds initialize params with required clientInfo', () => {

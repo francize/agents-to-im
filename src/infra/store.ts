@@ -22,16 +22,16 @@ import type {
   StructuredInputRequestRecord,
   OutboundRefInput,
   UpsertChannelBindingInput,
-} from './bridge/host.js';
+} from '../bridge/host.js';
 import {
   DEFAULT_CHANNEL_INSTANCE_ID,
   resolveChannelInstanceId,
   type ChannelBinding,
   type ChannelType,
-} from './bridge/types.js';
-import { normalizeClaudePermissionMode } from './claude-mode.js';
-import { CTI_HOME } from './config.js';
-import type { RuntimeName, SessionExt, SessionRecord, TitleStatus } from './runtime-types.js';
+} from '../bridge/types.js';
+import { normalizeClaudePermissionMode } from '../runtime/claude-mode.js';
+import { CTI_HOME } from '../config/config.js';
+import type { RuntimeName, SessionExt, SessionRecord, TitleStatus } from '../runtime/types.js';
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
 const MESSAGES_DIR = path.join(DATA_DIR, 'messages');

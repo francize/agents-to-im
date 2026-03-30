@@ -1,3 +1,7 @@
+export const PENDING_PERMISSIONS_TIMEOUT_MS = 15 * 60 * 1000;
+export const PENDING_APPROVALS_TIMEOUT_MS = 10 * 60 * 1000;
+export const PENDING_STRUCTURED_INPUTS_TIMEOUT_MS = 10 * 60 * 1000;
+
 export interface PermissionResult {
   behavior: 'allow' | 'deny';
   message?: string;
@@ -23,7 +27,7 @@ export class PendingPermissions {
     resolve: (r: PermissionResult) => void;
     timer: NodeJS.Timeout;
   }>();
-  private timeoutMs = 15 * 60 * 1000; // 15 minutes
+  private timeoutMs = PENDING_PERMISSIONS_TIMEOUT_MS;
 
   waitFor(toolUseID: string): Promise<PermissionResult> {
     return new Promise((resolve) => {
@@ -75,7 +79,7 @@ export class PendingApprovals {
     resolve: (r: PermissionResolution) => void;
     timer: NodeJS.Timeout;
   }>();
-  private timeoutMs = 10 * 60 * 1000;
+  private timeoutMs = PENDING_APPROVALS_TIMEOUT_MS;
 
   waitFor(requestId: string): Promise<PermissionResolution> {
     return new Promise((resolve) => {
@@ -118,7 +122,7 @@ export class PendingStructuredInputs {
     resolve: (r: StructuredInputResolution) => void;
     timer: NodeJS.Timeout;
   }>();
-  private timeoutMs = 10 * 60 * 1000;
+  private timeoutMs = PENDING_STRUCTURED_INPUTS_TIMEOUT_MS;
 
   waitFor(requestId: string): Promise<StructuredInputResolution> {
     return new Promise((resolve) => {

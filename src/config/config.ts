@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import type { RuntimeName } from './runtime-types.js';
+import type { RuntimeName } from '../runtime/types.js';
 
 export const DEFAULT_FEISHU_PROFILE_ID = 'default';
 const PROFILE_ID_RE = /^[a-z0-9_]+$/;

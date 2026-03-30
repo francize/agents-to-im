@@ -27,6 +27,7 @@ import * as router from './channel-router.js';
 import * as engine from './conversation-engine.js';
 import * as broker from './permission-broker.js';
 import { deliver, deliverRendered } from './delivery-layer.js';
+import { buildInteractionTimeoutText } from './interaction-timeout.js';
 import { markdownToTelegramChunks } from './markdown/telegram.js';
 import { markdownToDiscordChunks } from './markdown/discord.js';
 import { getBridgeContext } from './context.js';
@@ -41,8 +42,9 @@ import {
   parseClaudePlanFilePath,
   parseClaudePlanText,
   truncateClaudePlanCardText,
-} from '../claude-plan-exit.js';
-import type { ClaudePermissionMode } from '../claude-mode.js';
+} from '../runtime/claude-plan-exit.js';
+import type { ClaudePermissionMode } from '../runtime/claude-mode.js';
+import { PENDING_PERMISSIONS_TIMEOUT_MS } from '../providers/claude/permission-gateway.js';
 import { escapeHtml } from './adapters/telegram-utils.js';
 import {
   validateWorkingDirectory,
@@ -206,6 +208,7 @@ function buildClaudePlanExitFallbackText(
   if (showClearContext) {
     lines.push('也可以选择“清空上下文后执行”，桥会以新会话重新开始实施。');
   }
+  lines.push('', buildInteractionTimeoutText(PENDING_PERMISSIONS_TIMEOUT_MS, '会自动拒绝'));
   return lines.join('\n');
 }
 
@@ -283,6 +286,35 @@ function imageExtensionForMediaType(mediaType: string): string {
   }
 }
 
+function extractInlineToolResultImagePayload(item: Record<string, unknown>): {
+  mediaType: string;
+  data: string;
+} | null {
+  if (item.type !== 'image') return null;
+
+  const source = item.source;
+  if (source && typeof source === 'object') {
+    const imageSource = source as Record<string, unknown>;
+    const mediaType = typeof imageSource.media_type === 'string' ? imageSource.media_type.trim() : '';
+    const data = typeof imageSource.data === 'string' ? imageSource.data.trim() : '';
+    if (imageSource.type === 'base64' && mediaType.startsWith('image/') && data) {
+      return { mediaType, data };
+    }
+  }
+
+  const mediaType = typeof item.mimeType === 'string'
+    ? item.mimeType.trim()
+    : typeof item.mime_type === 'string'
+      ? item.mime_type.trim()
+      : '';
+  const data = typeof item.data === 'string' ? item.data.trim() : '';
+  if (mediaType.startsWith('image/') && data) {
+    return { mediaType, data };
+  }
+
+  return null;
+}
+
 function extractInlineToolResultImages(blocks: MessageContentBlock[]): Array<{
   digest: string;
   mediaType: string;
@@ -304,14 +336,9 @@ function extractInlineToolResultImages(blocks: MessageContentBlock[]): Array<{
 
     for (const item of parsed) {
       if (!item || typeof item !== 'object') continue;
-      const record = item as Record<string, unknown>;
-      if (record.type !== 'image') continue;
-      const source = record.source;
-      if (!source || typeof source !== 'object') continue;
-      const imageSource = source as Record<string, unknown>;
-      const mediaType = typeof imageSource.media_type === 'string' ? imageSource.media_type.trim() : '';
-      const data = typeof imageSource.data === 'string' ? imageSource.data.trim() : '';
-      if (imageSource.type !== 'base64' || !mediaType.startsWith('image/') || !data) continue;
+      const image = extractInlineToolResultImagePayload(item as Record<string, unknown>);
+      if (!image) continue;
+      const { mediaType, data } = image;
       const digest = createHash('sha1').update(data).digest('hex');
       if (seen.has(digest)) continue;
       seen.add(digest);
@@ -1039,9 +1066,35 @@ async function handleMessage(
   const binding = router.resolve(msg.address);
   const effectivePlanWorkflowMeta = (() => {
     if (planWorkflowMeta) return planWorkflowMeta;
-    if (isCodexRuntime(binding.codepilotSessionId)) return null;
-    if (resolveClaudePermissionMode(binding) !== 'plan') return null;
     const requestText = text || (hasAttachments ? 'Describe this image.' : '');
+    if (isCodexRuntime(binding.codepilotSessionId)) {
+      if (binding.mode !== 'plan') return null;
+      const workflow = store.upsertPlanWorkflow({
+        bindingId: binding.id,
+        channelType: adapter.channelType,
+        channelInstanceId: msg.address.channelInstanceId || adapter.profileId,
+        chatId: msg.address.chatId,
+        codepilotSessionId: binding.codepilotSessionId,
+        status: 'planning',
+        previousMode: binding.mode,
+        requestText,
+        address: msg.address,
+        routeKey: msg.address.threadId
+          ? `${msg.address.chatId}:thread:${msg.address.threadId}`
+          : `${msg.address.chatId}:main`,
+        requestMessageId: msg.messageId,
+        resolved: true,
+      });
+      return {
+        kind: 'native_plan_request' as const,
+        workflowId: workflow.workflowId,
+        promptText: requestText,
+        storedUserText: requestText,
+        permissionMode: 'plan' as const,
+        collaborationMode: 'plan' as const,
+      };
+    }
+    if (resolveClaudePermissionMode(binding) !== 'plan') return null;
     const workflow = store.upsertPlanWorkflow({
       bindingId: binding.id,
       channelType: adapter.channelType,

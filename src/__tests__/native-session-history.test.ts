@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { listRecentNativeSessions, loadNativeSessionTranscript } from '../native-session-history.js';
+import { listRecentNativeSessions, loadNativeSessionTranscript } from '../infra/native-session-history.js';
 
 function writeJsonl(filePath: string, records: Array<Record<string, unknown>>): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });

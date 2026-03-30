@@ -8,8 +8,8 @@
 
 import fs from 'fs';
 import path from 'path';
-import type { ClaudePermissionMode } from '../claude-mode.js';
-import { normalizeClaudePermissionMode } from '../claude-mode.js';
+import type { ClaudePermissionMode } from '../runtime/claude-mode.js';
+import { normalizeClaudePermissionMode } from '../runtime/claude-mode.js';
 import type { ChannelBinding } from './types.js';
 import type {
   ActivityEvent,

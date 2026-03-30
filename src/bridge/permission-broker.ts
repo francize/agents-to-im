@@ -15,6 +15,11 @@ import type { BaseChannelAdapter } from './channel-adapter.js';
 import { deliver } from './delivery-layer.js';
 import { getBridgeContext } from './context.js';
 import { escapeHtml } from './adapters/telegram-utils.js';
+import { buildInteractionTimeoutText } from './interaction-timeout.js';
+import {
+  PENDING_APPROVALS_TIMEOUT_MS,
+  PENDING_PERMISSIONS_TIMEOUT_MS,
+} from '../providers/claude/permission-gateway.js';
 
 function summarizeToolInput(toolName: string, toolInput: Record<string, unknown>): string[] {
   if (toolName === 'Bash') {
@@ -48,14 +53,26 @@ function summarizeToolInput(toolName: string, toolInput: Record<string, unknown>
   return keys;
 }
 
-function buildPermissionMarkdown(toolName: string, toolInput: Record<string, unknown>): string {
+function buildPermissionMarkdown(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  timeoutHint: string,
+): string {
   const lines = [
     '继续前需要你的授权。',
     '',
     `**工具**：\`${toolName}\``,
     ...summarizeToolInput(toolName, toolInput),
+    '',
+    timeoutHint,
   ];
   return lines.join('\n');
+}
+
+function resolvePermissionTimeoutMs(sessionId?: string): number {
+  if (!sessionId) return PENDING_PERMISSIONS_TIMEOUT_MS;
+  const runtime = getBridgeContext().store.getSessionExt(sessionId)?.runtime;
+  return runtime === 'codex' ? PENDING_APPROVALS_TIMEOUT_MS : PENDING_PERMISSIONS_TIMEOUT_MS;
 }
 
 /**
@@ -98,6 +115,10 @@ export async function forwardPermissionRequest(
   const truncatedInput = inputStr.length > 300
     ? inputStr.slice(0, 300) + '...'
     : inputStr;
+  const timeoutHint = buildInteractionTimeoutText(
+    resolvePermissionTimeoutMs(sessionId),
+    '会自动拒绝',
+  );
 
   let result: import('./types.js').SendResult;
 
@@ -108,6 +129,8 @@ export async function forwardPermissionRequest(
       ``,
       `Tool: ${toolName}`,
       truncatedInput,
+      ``,
+      timeoutHint,
       ``,
       `Reply:`,
       `1 - Allow once`,
@@ -129,7 +152,7 @@ export async function forwardPermissionRequest(
 
     result = await deliver(adapter, qqMessage, { sessionId });
   } else {
-    const text = buildPermissionMarkdown(toolName, toolInput);
+    const text = buildPermissionMarkdown(toolName, toolInput, timeoutHint);
 
     const message: OutboundMessage = {
       address,

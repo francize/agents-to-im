@@ -1,4 +1,4 @@
-import type { BridgeSession } from './bridge/host.js';
+import type { BridgeSession } from '../bridge/host.js';
 
 export type RuntimeName = 'claude' | 'codex';
 

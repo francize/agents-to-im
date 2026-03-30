@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { maskSecret, configToSettings, type Config } from '../config.js';
+import { maskSecret, configToSettings, type Config } from '../config/config.js';
 
 describe('maskSecret', () => {
   it('masks short values entirely', () => {

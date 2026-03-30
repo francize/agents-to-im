@@ -7,8 +7,8 @@ import { BaseChannelAdapter, registerAdapterFactory } from '../bridge/channel-ad
 import { initBridgeContext } from '../bridge/context.js';
 import { start, stop } from '../bridge/bridge-manager.js';
 import type { InboundMessage, OutboundImage, OutboundMessage, SendResult } from '../bridge/types.js';
-import { JsonFileStore } from '../store.js';
-import { CTI_HOME } from '../config.js';
+import { JsonFileStore } from '../infra/store.js';
+import { CTI_HOME } from '../config/config.js';
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
 const CHANNEL_TYPE = 'planstub';
@@ -518,6 +518,69 @@ describe('bridge-manager plan workflow', () => {
     );
     assert.equal(store.getPlanWorkflow('wf-native')?.status, 'awaiting_confirmation');
     assert.equal(store.getPlanWorkflow('wf-native')?.actionCardMessageId, 'sent-2');
+  });
+
+  it('treats the first normal message in a codex plan-mode chat as a native plan request', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const llmCalls: Array<Record<string, unknown>> = [];
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: (params: Record<string, unknown>) => {
+          llmCalls.push(params);
+          return new ReadableStream<string>({
+            start(controller) {
+              controller.enqueue(`data: ${JSON.stringify({ type: 'plan_result', data: '# 原生计划\\n\\n1. 先确认范围\\n2. 再开始实施' })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-native-chat-plan-1' }) })}\n`);
+              controller.close();
+            },
+          });
+        },
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-native-plan-mode',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+    store.updateChannelBinding(binding.id, { mode: 'plan' });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-native-plan-mode-1',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-native-plan-mode' },
+      text: '先给我方案再实施',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length === 2);
+
+    assert.equal(llmCalls[0].prompt, '先给我方案再实施');
+    assert.equal(llmCalls[0].permissionMode, 'plan');
+    assert.equal(llmCalls[0].collaborationMode, 'plan');
+    assert.match(adapter.sent[0].text || '', /原生计划/);
+    assert.equal(adapter.sent[1].cardHeader?.title, '原生计划已生成');
+    assert.deepEqual(
+      adapter.sent[1].inlineButtons?.[0].map((button) => button.text),
+      ['是，实施此计划'],
+    );
+    assert.match(adapter.sent[1].inlineButtons?.[0][0]?.callbackData || '', /^plan:execute:/);
+    const workflow = store.getActivePlanWorkflowByBinding(binding.id);
+    assert.ok(workflow);
+    assert.equal(workflow?.status, 'awaiting_confirmation');
+    assert.equal(workflow?.requestText, '先给我方案再实施');
   });
 
   it('falls back to a plain text hint when sending the native confirmation card throws', async () => {
@@ -1401,6 +1464,72 @@ describe('bridge-manager plan workflow', () => {
     assert.match(adapter.sentImages[0].filePath, /cti-inline-tool-result-.*\.png$/);
     assert.equal(adapter.sentImages[0].replyToMessageId, 'msg-inline-image');
     assert.equal(adapter.sent[0].text, '效果如上图所示。');
+  });
+
+  it('auto-sends inline images from Codex MCP tool_result payloads that use mimeType/data fields', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==';
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'tool_result',
+              data: JSON.stringify({
+                tool_use_id: 'tool-image-codex-1',
+                content: JSON.stringify([
+                  {
+                    type: 'text',
+                    text: "Took a screenshot of the current page's viewport.",
+                  },
+                  {
+                    type: 'image',
+                    mimeType: 'image/png',
+                    data: pngBase64,
+                  },
+                ]),
+                is_error: false,
+              }),
+            })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '截图已经生成。' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-inline-image-codex-1' }) })}\n`);
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-inline-image-codex',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-inline-image-codex',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-inline-image-codex', threadId: 'thread-1' },
+      text: '发我桌面截图',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sentImages.length === 1 && adapter.sent.length === 1);
+
+    assert.match(adapter.sentImages[0].filePath, /cti-inline-tool-result-.*\.png$/);
+    assert.equal(adapter.sentImages[0].replyToMessageId, 'msg-inline-image-codex');
+    assert.equal(adapter.sent[0].text, '截图已经生成。');
   });
 
   it('auto-sends a completed file_change image by resolving relative paths against the binding cwd', async () => {

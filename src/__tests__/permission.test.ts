@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { PendingPermissions } from '../permission-gateway.js';
+import { PendingPermissions } from '../providers/claude/permission-gateway.js';
 
 describe('PendingPermissions', () => {
   it('waitFor resolves on allow', async () => {

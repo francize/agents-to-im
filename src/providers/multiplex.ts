@@ -1,22 +1,22 @@
-import type { LLMProvider, StreamChatParams } from './bridge/host.js';
+import type { LLMProvider, StreamChatParams } from '../bridge/host.js';
 
-import type { Config } from './config.js';
-import { CodexProvider } from './codex-provider.js';
-import { SDKLLMProvider, preflightCheck, resolveClaudeCliPath } from './llm-provider.js';
-import { PendingApprovals, type PendingPermissions, PendingStructuredInputs } from './permission-gateway.js';
+import type { Config } from '../config/config.js';
+import { CodexProvider } from './codex/codex-provider.js';
+import { SDKLLMProvider, preflightCheck, resolveClaudeCliPath } from './claude/sdk-provider.js';
+import { PendingApprovals, type PendingPermissions, PendingStructuredInputs } from './claude/permission-gateway.js';
 import {
   ClaudeRuntimeDriver,
   CodexRuntimeDriver,
   type RuntimeDriver,
-} from './runtime-driver.js';
+} from '../runtime/driver.js';
 import {
   RUNTIME_CAPABILITIES,
   type ProviderCapabilities,
-} from './runtime-capabilities.js';
-import type { RuntimeName } from './runtime-types.js';
-import { JsonFileStore } from './store.js';
+} from '../runtime/capabilities.js';
+import type { RuntimeName } from '../runtime/types.js';
+import { JsonFileStore } from '../infra/store.js';
 
-export type { ProviderCapabilities } from './runtime-capabilities.js';
+export type { ProviderCapabilities } from '../runtime/capabilities.js';
 
 export class MultiplexLLMProvider implements LLMProvider {
   private claudeProvider: SDKLLMProvider | null = null;

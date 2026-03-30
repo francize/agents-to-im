@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 
-import { listRecentWorkspaces } from '../recent-workspaces.js';
+import { listRecentWorkspaces } from '../infra/recent-workspaces.js';
 
 describe('listRecentWorkspaces', () => {
   it('deduplicates by normalized path, prepends default workdir when missing, and limits to 5', () => {

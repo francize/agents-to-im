@@ -6,9 +6,9 @@
  * interfaces to use the bridge.
  */
 
-import type { SessionExt } from '../runtime-types.js';
-import type { ClaudePlanAllowedPrompt } from '../claude-plan-exit.js';
-import type { ClaudePermissionMode } from '../claude-mode.js';
+import type { SessionExt } from '../runtime/types.js';
+import type { ClaudePlanAllowedPrompt } from '../runtime/claude-plan-exit.js';
+import type { ClaudePermissionMode } from '../runtime/claude-mode.js';
 import type { ChannelAddress, ChannelBinding, ChannelType } from './types.js';
 
 // ── Bridge-local types (replacing @/types imports) ────────────

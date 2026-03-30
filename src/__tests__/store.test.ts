@@ -2,8 +2,8 @@ import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { JsonFileStore } from '../store.js';
-import { CTI_HOME } from '../config.js';
+import { JsonFileStore } from '../infra/store.js';
+import { CTI_HOME } from '../config/config.js';
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
 
