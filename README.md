@@ -1,85 +1,94 @@
+<div align="center">
+
 # agents-to-im
 
-Feishu-first isolated session workspace for local AI coding agents.
+### AI coding agents are trapped in your terminal. Your team collaborates in Feishu. This bridges them — one group per session, local state, streamed cards.
 
-DM creates a dedicated group-bound session space for Claude Code and Codex, while the real work stays in Feishu/Lark with recoverable local state and high-quality card streaming. Claude DM creation now starts with a mode-selection card before the group is created.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-green.svg)](https://nodejs.org/)
+[![Claude Code](https://img.shields.io/badge/Claude_Code-Supported-purple.svg)](https://docs.anthropic.com/en/docs/claude-code)
+[![Codex](https://img.shields.io/badge/Codex-Supported-orange.svg)](https://github.com/openai/codex)
 
-[中文](README.zh-CN.md)
+[中文文档](README.zh-CN.md) · [Setup Guide](references/setup-guides.md) · [Troubleshooting](references/troubleshooting.md)
+
+</div>
 
 ---
 
-`agents-to-im` is not just "Claude/Codex in chat". It turns Feishu/Lark into a control plane: DM is used to create a fresh workspace, the bot opens a new group, that group is bound to exactly one session and one runtime, and the bridge keeps the state locally so the workspace can survive bridge restarts.
+> [!IMPORTANT]
+> **What it touches:** Creates config and state under `~/.agents-to-im/` (sessions, bindings, message history). Runs as a local daemon under your user account.
+>
+> **Network:** Connects outbound to Feishu/Lark APIs only. No inbound listeners are opened.
+>
+> **Credentials:** Stored in `~/.agents-to-im/config.env` with `600` permissions. Secrets are masked in all log output.
+>
+> **Disable:** `agents-to-im stop`
+>
+> **Uninstall:** `npm uninstall -g agents-to-im && rm -rf ~/.agents-to-im`
 
-```mermaid
-flowchart LR
-  A["DM Bot<br/>/new:* or /resume:*"] --> B["Bot creates a fresh Feishu/Lark group"]
-  B --> C["One group = one session = one runtime"]
-  C --> D["Local JSON state keeps bindings, messages, runtime, resume IDs"]
-  D --> E["Restart bridge and continue in the same group workspace"]
-  C --> F["CardKit streaming, activity cards, permission buttons, structured input cards"]
+```bash
+npm install -g github:francize/agents-to-im
 ```
 
-## Why Feishu-first?
+---
 
-- **Dedicated session space, not mixed chat noise.** DM is only the control plane. `/new:claude` and `/new:codex` both open a single card first: choose a recent workspace, then create a fresh group. Claude keeps its existing mode buttons; Codex offers `默认` and `Plan`. The group is then bound to exactly one session, so the working thread stays isolated by default.
-- **Recoverable local workspace.** Sessions, chat bindings, messages, runtime state, and resume identifiers live under `~/.agents-to-im/`, so restarting the bridge does not mean rebuilding the workspace model from scratch.
-- **Feishu-native interaction, not plain text forwarding.** Streaming previews prefer CardKit, permission approvals prefer buttons, and activity/plan/structured-input flows are rendered as cards instead of reducing Feishu to a slash-command terminal.
+## The Problem
 
-## Support Snapshot
+Claude Code and Codex are excellent coding agents — but they only talk to you in the terminal. If your team lives in Feishu/Lark, there's no clean way to bring that capability into your IM workspace without mixing sessions into a noisy shared thread.
 
-| Capability | Status |
-| --- | --- |
-| Claude Code runtime | Supported |
-| Codex runtime | Supported |
-| Feishu | Supported |
-| Lark | Supported |
-| DM control plane | `/new:claude`, `/new:codex`, `/resume:claude`, `/resume:codex` |
-| Group-bound workspace | One group = one session = one runtime |
-| Local recovery | Bindings, messages, runtime, status, resume IDs kept locally |
-| Streaming preview | CardKit first, patch/text fallback |
-| Permission approvals | Buttons first, `/perm` fallback |
-| Activity and plan cards | Supported |
-| Structured input cards | Supported when safe for chat input |
-| Multiple bot profiles | Supported, with runtime-to-Feishu-profile mapping |
-| Local dashboard | `http://127.0.0.1:3456` by default |
+Generic IM bridges treat the chat window as the session container. That means no isolation, no recovery after restarts, and Feishu gets reduced to a plain-text command relay.
 
-## Quick Start
+`agents-to-im` takes a different approach: DM is the control plane, each `/new:claude` or `/new:codex` creates a dedicated Feishu group bound to exactly one session and one runtime. State lives locally, so the workspace survives bridge restarts.
 
-### Prerequisites
+---
 
-- Node.js 20 or newer
-- A Feishu/Lark custom app with Bot enabled
-- Claude Code CLI installed and authenticated if you want Claude sessions
-- `codex` CLI installed, authenticated, and supporting `codex app-server` if you want Codex sessions
+## See It Work
 
-### 1. Configure the Feishu/Lark app
+```
+You → DM bot: /new:claude
 
-1. Create a custom app on Feishu or Lark.
-2. Enable the Bot capability.
-3. Switch event delivery to `Long Connection`.
-4. Add:
-   - `im.message.receive_v1`
-   - `card.action.trigger`
-5. Prefer using Feishu's permission import to import the full scopes JSON from [references/setup-guides.md](references/setup-guides.md) in one shot.
-6. After changing permissions or events, publish the app again and run `agents-to-im restart`.
+Bot → Creates a new Feishu group "Claude Workspace"
+Bot → Shows mode selection card (Code / Plan / Ask)
+You → Pick "Code", choose workspace ~/my-project
 
-For the full checklist, see [references/setup-guides.md](references/setup-guides.md).
+Bot → Group created, session bound
+Bot → "How can I help with ~/my-project?"
 
-### 2. Install and configure the bridge
+You → (in group) Fix the login redirect bug in auth.ts
 
-If you want an AI coding agent to guide the setup, give it this prompt:
+Bot → [Streaming card with live progress]
+Bot → [Activity card: editing src/auth.ts]
+Bot → [Permission card: Allow file write?] [Allow] [Deny]
+Bot → Done. Fixed the redirect loop in handleCallback().
 
-```text
-Set up agents-to-im for this machine.
-Read README.md and references/setup-guides.md, then guide me through:
-1. Installing the persistent agents-to-im CLI command
-2. Creating or checking the Feishu/Lark app
-3. Filling ~/.agents-to-im/config.env
-4. Verifying Claude Code and/or Codex local runtime availability
-5. Starting the bridge and checking diagnostics
+You → /stop                    # interrupt current output
+You → /reset                   # fresh session, same group
+You → /mode                    # switch Claude mode
 ```
 
-Source checkout is only recommended when you want to develop or debug the project locally:
+---
+
+## Install
+
+### Recommended: Global CLI
+
+```bash
+npm install -g github:francize/agents-to-im
+```
+
+After installation, use the `agents-to-im` command for daily operation:
+
+```bash
+agents-to-im start        # start the daemon
+agents-to-im stop         # stop the daemon
+agents-to-im restart      # restart after config changes
+agents-to-im status       # check if running
+agents-to-im doctor       # diagnose common issues
+agents-to-im logs 200     # view recent logs
+```
+
+<details>
+<summary><b>Alternative: Source checkout</b> (for development/debugging)</summary>
 
 ```bash
 git clone https://github.com/francize/agents-to-im.git
@@ -91,55 +100,50 @@ mkdir -p ~/.agents-to-im
 cp config.env.example ~/.agents-to-im/config.env
 $EDITOR ~/.agents-to-im/config.env
 
-# Quick local restart after config/code changes
 bash scripts/daemon.sh restart
 ```
 
-Recommended install flow:
+</details>
+
+<details>
+<summary><b>Alternative: One-shot via npx</b></summary>
 
 ```bash
-npm install -g github:francize/agents-to-im
-agents-to-im
+npx github:francize/agents-to-im
 ```
 
-Daily maintenance should use the installed `agents-to-im` command:
+Not recommended for daily use — prefer the global install.
+
+</details>
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- Node.js 20+
+- A Feishu/Lark custom app with Bot enabled ([setup guide](references/setup-guides.md))
+- Claude Code CLI and/or Codex CLI installed and authenticated locally
+
+### 1. Create and configure your Feishu/Lark app
+
+1. Create a custom app at [Feishu](https://open.feishu.cn/app) or [Lark](https://open.larksuite.com/app)
+2. Enable the **Bot** capability
+3. Switch event delivery to **Long Connection**
+4. Subscribe to `im.message.receive_v1` and `card.action.trigger`
+5. Import the full scopes JSON from [references/setup-guides.md](references/setup-guides.md) in one shot
+6. Publish the app
+
+### 2. Configure the bridge
 
 ```bash
-agents-to-im start
-agents-to-im restart
-agents-to-im status
-agents-to-im doctor
-agents-to-im logs 200
-agents-to-im stop
+mkdir -p ~/.agents-to-im
+cp config.env.example ~/.agents-to-im/config.env
+$EDITOR ~/.agents-to-im/config.env
 ```
 
-If you only want a temporary one-shot run, `npx github:francize/agents-to-im` still works, but it is no longer the recommended daily maintenance path.
-
-Required config:
-
-- `CTI_DEFAULT_WORKDIR`
-- `CTI_FEISHU_PROFILE_IDS`
-- `CTI_FEISHU_PROFILE_<ID>_APP_ID`
-- `CTI_FEISHU_PROFILE_<ID>_APP_SECRET`
-- `CTI_RUNTIME_CLAUDE_FEISHU_PROFILE`
-- `CTI_RUNTIME_CODEX_FEISHU_PROFILE`
-
-Common optional config:
-
-- `CTI_DEFAULT_MODE`
-- `CTI_FEISHU_PROFILE_<ID>_DOMAIN`
-- `CTI_FEISHU_PROFILE_<ID>_ALLOWED_USERS`
-- `CTI_FEISHU_PROFILE_<ID>_TOOL_OUTPUT_CARDS`
-- `CTI_FEISHU_PROFILE_<ID>_AUTO_IMAGE_SEND`
-- `CTI_FEISHU_PROFILE_<ID>_LABEL`
-- `CTI_CLAUDE_DEFAULT_MODEL`
-- `CTI_CODEX_DEFAULT_MODEL`
-- `CTI_CLAUDE_CODE_EXECUTABLE`
-- `CTI_AUTO_APPROVE`
-
-Codex sessions reuse your local `~/.codex/config.toml` or `$CODEX_HOME/config.toml` for auth, trusted directories, sandbox, approval policy, and default model behavior.
-
-Single-bot minimal example:
+Minimal config (single bot):
 
 ```env
 CTI_FEISHU_PROFILE_IDS=default
@@ -147,126 +151,169 @@ CTI_FEISHU_PROFILE_DEFAULT_APP_ID=cli_xxx
 CTI_FEISHU_PROFILE_DEFAULT_APP_SECRET=xxx
 CTI_RUNTIME_CLAUDE_FEISHU_PROFILE=default
 CTI_RUNTIME_CODEX_FEISHU_PROFILE=default
-CTI_DEFAULT_WORKDIR=/path/to/workdir
+CTI_DEFAULT_WORKDIR=/path/to/your/project
 ```
 
-If Claude and Codex should use different bots, add another profile and change the runtime mapping. A fuller example is in [references/setup-guides.md](references/setup-guides.md).
+<details>
+<summary><b>Multi-bot config</b> (separate bots for Claude and Codex)</summary>
 
-### 3. Start the bridge
+```env
+CTI_FEISHU_PROFILE_IDS=claude,codex
+CTI_FEISHU_PROFILE_CLAUDE_APP_ID=cli_claude_xxx
+CTI_FEISHU_PROFILE_CLAUDE_APP_SECRET=secret_claude
+CTI_FEISHU_PROFILE_CODEX_APP_ID=cli_codex_xxx
+CTI_FEISHU_PROFILE_CODEX_APP_SECRET=secret_codex
+CTI_RUNTIME_CLAUDE_FEISHU_PROFILE=claude
+CTI_RUNTIME_CODEX_FEISHU_PROFILE=codex
+CTI_DEFAULT_WORKDIR=/path/to/your/project
+```
+
+</details>
+
+<details>
+<summary><b>All configuration options</b></summary>
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `CTI_DEFAULT_WORKDIR` | Yes | Default working directory for new sessions |
+| `CTI_FEISHU_PROFILE_IDS` | Yes | Comma-separated profile IDs |
+| `CTI_FEISHU_PROFILE_<ID>_APP_ID` | Yes | Feishu app ID per profile |
+| `CTI_FEISHU_PROFILE_<ID>_APP_SECRET` | Yes | Feishu app secret per profile |
+| `CTI_RUNTIME_CLAUDE_FEISHU_PROFILE` | Yes | Profile ID for Claude sessions |
+| `CTI_RUNTIME_CODEX_FEISHU_PROFILE` | Yes | Profile ID for Codex sessions |
+| `CTI_DEFAULT_MODE` | No | Default mode: `code` / `plan` / `ask` |
+| `CTI_FEISHU_PROFILE_<ID>_DOMAIN` | No | `lark` for Lark international |
+| `CTI_FEISHU_PROFILE_<ID>_ALLOWED_USERS` | No | Comma-separated allowed user IDs |
+| `CTI_FEISHU_PROFILE_<ID>_TOOL_OUTPUT_CARDS` | No | Show tool output as cards |
+| `CTI_FEISHU_PROFILE_<ID>_AUTO_IMAGE_SEND` | No | Auto-send generated images |
+| `CTI_FEISHU_PROFILE_<ID>_LABEL` | No | Display label for the bot |
+| `CTI_CLAUDE_DEFAULT_MODEL` | No | Default model for Claude sessions |
+| `CTI_CODEX_DEFAULT_MODEL` | No | Default model for Codex sessions |
+| `CTI_CLAUDE_CODE_EXECUTABLE` | No | Custom path to Claude CLI |
+| `CTI_AUTO_APPROVE` | No | Auto-approve tool permissions (use with caution) |
+
+Codex sessions reuse your local `~/.codex/config.toml` for auth, trusted directories, sandbox, and approval policy.
+
+</details>
+
+### 3. Start and verify
 
 ```bash
 agents-to-im start
+agents-to-im doctor        # check for common issues
+agents-to-im status        # confirm the bridge is running
 ```
 
-Useful local commands:
+Open `http://127.0.0.1:3456` to access the local dashboard, then DM the bot with `/new:claude` or `/new:codex`.
 
-```bash
-agents-to-im restart
-agents-to-im status
-agents-to-im doctor
-agents-to-im logs 200
-agents-to-im stop
-bash scripts/daemon.sh restart
+---
+
+## How It Works
+
+DM is the control plane. Each `/new:*` command creates a fresh Feishu group bound to one session and one runtime. Local JSON state keeps the workspace recoverable across bridge restarts.
+
+```mermaid
+flowchart LR
+  A["DM: /new:claude"] --> B["Bot creates Feishu group"]
+  B --> C["1 group = 1 session = 1 runtime"]
+  C --> D["Local state: bindings, messages, resume IDs"]
+  D --> E["Bridge restart → same workspace"]
+  C --> F["CardKit streaming, activity cards, permission buttons"]
 ```
 
-After changing `config.env`, pulling new code, or republishing Feishu events/scopes, prefer `restart` instead of manually doing `stop && start`.
+<details>
+<summary><b>Feishu-native interactions</b></summary>
 
-### 4. 5-minute validation
+| Interaction | Behavior |
+|-------------|----------|
+| Streaming preview | CardKit first, falls back to interactive-card patching, then plain text |
+| Permission handling | Inline buttons primary; `/perm allow\|deny <id>` as fallback |
+| Activity visibility | Command/file/plan progress rendered as cards |
+| Structured input | Runtime follow-ups rendered as Feishu cards; sensitive prompts redirected to local CLI |
+| Group naming | Auto-renamed after first successful turn; Claude mode appended as suffix |
 
-1. Run `agents-to-im doctor`.
-2. Run `agents-to-im status` and confirm the bridge is running.
-3. Open `http://127.0.0.1:3456` and confirm the local dashboard is reachable.
-4. DM the bot with `/new:claude` or `/new:codex`.
-5. For Claude, pick a mode from the card, then confirm the bot creates a fresh group, binds it to a new session, and replies inside that group.
+</details>
 
-## Feishu Experience
+<details>
+<summary><b>State and recovery</b></summary>
 
-`agents-to-im` is designed to feel native in Feishu/Lark instead of behaving like a generic text relay.
+All state lives under `~/.agents-to-im/`:
 
-| Experience | What happens |
-| --- | --- |
-| Streaming preview | The bridge primes a preview artifact, streams partial text through CardKit when available, then degrades to interactive-card patching and finally plain text only when needed |
-| Permission handling | Inline buttons are the primary approval path; `/perm allow\|allow_session\|deny <id>` is only the fallback |
-| Activity visibility | Command/file/plan activity is rendered as cards so the group sees progress without reading raw logs |
-| Structured input | Runtime follow-up questions can be rendered as Feishu cards; sensitive prompts are kicked back to local CLI instead of leaking secrets to chat |
-| Group naming | After the first successful turn, the bridge generates a short title and renames the group to match the session; Claude non-default permission modes are appended as a suffix like `[Plan Mode]` |
-
-This gives Feishu a real workspace model: readable progress, fewer mobile-hostile commands, and better context continuity inside the group thread.
-
-## State and Recovery
-
-The bridge keeps state under `~/.agents-to-im/` so a group remains a recoverable workspace, not a disposable chat hook.
-
-| Path | What it stores |
-| --- | --- |
-| `data/sessions.json` | Session metadata, runtime, model, title state, and resume-related metadata |
-| `data/bindings.json` | Chat-to-session bindings, workdir, bridge mode, Claude permission mode, and model routing |
+| Path | Contents |
+|------|----------|
+| `data/sessions.json` | Session metadata, runtime, model, title, resume IDs |
+| `data/bindings.json` | Group-to-session bindings, workdir, mode, model routing |
 | `data/messages/` | Persisted message history per session |
 | `runtime/status.json` | Bridge run status and last exit reason |
-| `runtime/bridge.pid` | Active daemon PID for local process management |
+| `runtime/bridge.pid` | Active daemon PID |
 
-What recovery means in practice:
+What survives a bridge restart:
+- Group-to-session binding
+- Runtime choice (Claude or Codex)
+- Message history
+- Resume identifiers for continuing the underlying session
+- `/reset` creates a fresh session in the same group
 
-- The group-to-session binding survives bridge restarts.
-- Runtime choice survives, so the group remains Claude-backed or Codex-backed until you explicitly change it.
-- Message history stays local to the workspace and can be reused by the bridge.
-- Resume identifiers for SDK/runtime sessions are cached so future turns can continue the same underlying session when supported.
-- `/reset` gives you a fresh session inside the same group while preserving the group's runtime model.
+</details>
+
+---
 
 ## Commands
 
-### DM with the bot
+### DM (control plane)
 
 | Command | Description |
-| --- | --- |
-| `/new:claude` | Open one card with a recent-workspace dropdown plus the existing Claude mode buttons, then create a new Claude-backed group workspace |
-| `/new:codex` | Open one card with a recent-workspace dropdown plus `默认` / `Plan`, then create a new Codex-backed group workspace |
-| `/resume:claude` | Read the latest local Claude native sessions for the current workspace, choose one from a card, recreate the group, and replay its history as cards |
-| `/resume:codex` | Read the latest local Codex native sessions for the current workspace, choose one from a card, recreate the group, and replay its history as cards |
+|---------|-------------|
+| `/new:claude` | Select a workspace and Claude mode, then create a dedicated group |
+| `/new:codex` | Select a workspace, then create a dedicated Codex group |
+| `/resume:claude` | Resume a recent Claude session in a new group |
+| `/resume:codex` | Resume a recent Codex session in a new group |
 
-Any other DM message returns help text instead of starting a session.
+Any other DM message returns help text.
 
 ### In a bound group
 
 | Command | Description |
-| --- | --- |
-| Normal message | Continue the current session |
-| `/mode` | In Claude groups: open the Claude mode card. In Codex groups: use `/mode plan\|code\|ask` to switch bridge mode |
-| `/plan` | Start an interactive planning flow |
-| `/plan <request>` | Start planning immediately |
-| `/stop` | Interrupt the current model output, similar to pressing `Esc` / `Command+C` in the local CLI |
-| `/reset` | Replace the current session and keep the group's runtime |
-| `/perm allow\|allow_session\|deny <id>` | Fallback for permission approval |
+|---------|-------------|
+| *(message)* | Continue the current session |
+| `/mode` | Switch Claude mode (card) or Codex bridge mode (`/mode plan\|code\|ask`) |
+| `/plan` | Start interactive planning; `/plan <request>` to plan immediately |
+| `/stop` | Interrupt current output (equivalent to `Esc` in terminal) |
+| `/reset` | Fresh session, same group and runtime |
+| `/perm allow\|allow_session\|deny <id>` | Permission fallback |
 
-## Compared with generic IM bridges
+---
 
-This project is intentionally opinionated about Feishu. Compared with generic IM bridges or broader multi-platform bridge designs:
+## FAQ
 
-| Dimension | Generic bridge pattern | agents-to-im |
-| --- | --- | --- |
-| Session model | The chat window itself often doubles as the session container | DM is only the control plane; the bot creates a fresh group as a dedicated workspace |
-| Recovery model | Reconnect and continue if possible, but workspace state is often secondary | Bindings, messages, runtime state, and resume IDs are kept locally so the workspace can be recovered |
-| Feishu interaction | Feishu is often treated as a text and command transport | CardKit streaming, activity cards, structured input cards, permission buttons, and group renaming are first-class behaviors |
+**Can I use both Claude and Codex with the same bot?**
+Yes. A single Feishu app can serve both runtimes. Set both `CTI_RUNTIME_CLAUDE_FEISHU_PROFILE` and `CTI_RUNTIME_CODEX_FEISHU_PROFILE` to the same profile.
 
-The result is a better fit for teams that primarily work in Feishu/Lark and want a clean session boundary per task instead of a long-lived mixed command thread.
+**What happens if the bridge restarts?**
+Your groups, session bindings, and message history are preserved locally. Send a message in the group to continue where you left off.
 
-## Troubleshooting and References
+**Is my code sent to Feishu servers?**
+The bridge streams AI-generated text and activity summaries to Feishu. Your source code stays local — only the agent's output and your messages transit through the Feishu API.
 
-- Bridge fails to start: run `agents-to-im doctor`.
-- Bot does not answer in DM: confirm the app is published, Bot is enabled, and Long Connection is configured.
-- `/new:*` creates a group but fails to bind: check app scopes and local runtime availability.
-- Streaming cards fall back to plain messages: verify CardKit and message update permissions.
-- Permission buttons do nothing: verify `card.action.trigger` is configured and the updated app version has been published.
+---
 
-Reference docs:
+## Troubleshooting
 
-- [references/setup-guides.md](references/setup-guides.md)
-- [references/usage.md](references/usage.md)
-- [references/token-validation.md](references/token-validation.md)
-- [references/troubleshooting.md](references/troubleshooting.md)
-- [SECURITY.md](SECURITY.md)
+| Symptom | First step |
+|---------|------------|
+| Bridge won't start | `agents-to-im doctor` |
+| Bot doesn't reply to DM | Check app is published, Bot enabled, Long Connection configured |
+| `/new:*` creates group but fails to bind | Check app scopes and local runtime availability |
+| Cards fall back to plain text | Verify CardKit and message update permissions |
+| Permission buttons don't respond | Verify `card.action.trigger` is configured and app version published |
 
-## Development
+Full troubleshooting guide: [references/troubleshooting.md](references/troubleshooting.md)
+
+---
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ```bash
 npm install

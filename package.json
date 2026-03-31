@@ -1,7 +1,26 @@
 {
   "name": "agents-to-im",
   "version": "0.1.0",
-  "description": "agents-to-im: Feishu/Lark bridge for Claude Code and Codex sessions",
+  "description": "Bridge Claude Code and Codex into Feishu/Lark with isolated group sessions, local state recovery, and streamed CardKit interactions",
+  "keywords": [
+    "feishu",
+    "lark",
+    "claude-code",
+    "codex",
+    "ai-coding",
+    "im-bridge",
+    "chatbot",
+    "automation",
+    "developer-tools"
+  ],
+  "homepage": "https://github.com/francize/agents-to-im",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/francize/agents-to-im.git"
+  },
+  "bugs": {
+    "url": "https://github.com/francize/agents-to-im/issues"
+  },
   "type": "module",
   "bin": {
     "agents-to-im": "dist/cli-bin.mjs"
