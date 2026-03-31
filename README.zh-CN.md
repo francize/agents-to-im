@@ -146,29 +146,10 @@ $EDITOR ~/.agents-to-im/config.env
 单 Bot 最小配置：
 
 ```env
-CTI_FEISHU_PROFILE_IDS=default
-CTI_FEISHU_PROFILE_DEFAULT_APP_ID=cli_xxx
-CTI_FEISHU_PROFILE_DEFAULT_APP_SECRET=xxx
-CTI_RUNTIME_CLAUDE_FEISHU_PROFILE=default
-CTI_RUNTIME_CODEX_FEISHU_PROFILE=default
+CTI_FEISHU_APP_ID=cli_xxx
+CTI_FEISHU_APP_SECRET=xxx
 CTI_DEFAULT_WORKDIR=/path/to/your/project
 ```
-
-<details>
-<summary><b>多 Bot 配置</b>（Claude 和 Codex 使用不同 Bot）</summary>
-
-```env
-CTI_FEISHU_PROFILE_IDS=claude,codex
-CTI_FEISHU_PROFILE_CLAUDE_APP_ID=cli_claude_xxx
-CTI_FEISHU_PROFILE_CLAUDE_APP_SECRET=secret_claude
-CTI_FEISHU_PROFILE_CODEX_APP_ID=cli_codex_xxx
-CTI_FEISHU_PROFILE_CODEX_APP_SECRET=secret_codex
-CTI_RUNTIME_CLAUDE_FEISHU_PROFILE=claude
-CTI_RUNTIME_CODEX_FEISHU_PROFILE=codex
-CTI_DEFAULT_WORKDIR=/path/to/your/project
-```
-
-</details>
 
 <details>
 <summary><b>所有配置项</b></summary>
@@ -176,17 +157,14 @@ CTI_DEFAULT_WORKDIR=/path/to/your/project
 | 变量 | 必填 | 说明 |
 |------|------|------|
 | `CTI_DEFAULT_WORKDIR` | 是 | 新会话的默认工作目录 |
-| `CTI_FEISHU_PROFILE_IDS` | 是 | 逗号分隔的 profile ID |
-| `CTI_FEISHU_PROFILE_<ID>_APP_ID` | 是 | 每个 profile 的飞书 App ID |
-| `CTI_FEISHU_PROFILE_<ID>_APP_SECRET` | 是 | 每个 profile 的飞书 App Secret |
-| `CTI_RUNTIME_CLAUDE_FEISHU_PROFILE` | 是 | Claude 会话使用的 profile ID |
-| `CTI_RUNTIME_CODEX_FEISHU_PROFILE` | 是 | Codex 会话使用的 profile ID |
+| `CTI_FEISHU_APP_ID` | 是 | 飞书 App ID |
+| `CTI_FEISHU_APP_SECRET` | 是 | 飞书 App Secret |
 | `CTI_DEFAULT_MODE` | 否 | 默认模式：`code` / `plan` / `ask` |
-| `CTI_FEISHU_PROFILE_<ID>_DOMAIN` | 否 | 国际版填 `lark` |
-| `CTI_FEISHU_PROFILE_<ID>_ALLOWED_USERS` | 否 | 逗号分隔的允许用户 ID |
-| `CTI_FEISHU_PROFILE_<ID>_TOOL_OUTPUT_CARDS` | 否 | 以卡片展示工具输出 |
-| `CTI_FEISHU_PROFILE_<ID>_AUTO_IMAGE_SEND` | 否 | 自动发送生成的图片 |
-| `CTI_FEISHU_PROFILE_<ID>_LABEL` | 否 | Bot 显示标签 |
+| `CTI_FEISHU_DOMAIN` | 否 | 国际版填 `lark` |
+| `CTI_FEISHU_ALLOWED_USERS` | 否 | 逗号分隔的允许用户 ID |
+| `CTI_FEISHU_TOOL_OUTPUT_CARDS` | 否 | 以卡片展示工具输出 |
+| `CTI_FEISHU_AUTO_IMAGE_SEND` | 否 | 自动发送生成的图片 |
+| `CTI_FEISHU_LABEL` | 否 | Bot 显示标签 |
 | `CTI_CLAUDE_DEFAULT_MODEL` | 否 | Claude 会话默认模型 |
 | `CTI_CODEX_DEFAULT_MODEL` | 否 | Codex 会话默认模型 |
 | `CTI_CLAUDE_CODE_EXECUTABLE` | 否 | 自定义 Claude CLI 路径 |
@@ -227,7 +205,7 @@ flowchart LR
 | 交互方式 | 行为 |
 |----------|------|
 | 流式预览 | 优先 CardKit，降级为 interactive-card patch，最后退到普通文本 |
-| 权限处理 | 按钮为主，`/perm allow\|deny <id>` 为兜底 |
+| 权限处理 | 以审批卡片按钮为主；仅当群里恰好只有一个待处理请求时，`1/2/3` 可作为快捷回复 |
 | 活动可见性 | 命令/文件/计划进度以卡片呈现 |
 | 结构化提问 | Runtime 后续问题渲染为飞书卡片；敏感输入退回本地 CLI |
 | 群命名 | 首轮成功后自动重命名；Claude 非默认模式追加后缀如 `[Plan Mode]` |
@@ -280,14 +258,13 @@ bridge 重启后保留的内容：
 | `/plan` | 进入交互式计划；`/plan <需求>` 直接开始 |
 | `/stop` | 中断当前输出（等价于终端中按 `Esc`） |
 | `/reset` | 新会话，保留当前群和 runtime |
-| `/perm allow\|allow_session\|deny <id>` | 权限确认兜底 |
 
 ---
 
 ## 常见问题
 
 **同一个 Bot 能同时用 Claude 和 Codex 吗？**
-可以。一个飞书应用可以同时服务两种 runtime。把 `CTI_RUNTIME_CLAUDE_FEISHU_PROFILE` 和 `CTI_RUNTIME_CODEX_FEISHU_PROFILE` 设为同一个 profile 即可。
+可以。当前 bridge 默认就是单 Bot 形态，在同一个飞书/Lark Bot 后面按会话选择 Claude 或 Codex。
 
 **bridge 重启后会怎样？**
 群、会话绑定和消息历史都保存在本地。在群里发消息即可继续上次的工作。

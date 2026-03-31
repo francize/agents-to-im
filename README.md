@@ -146,29 +146,10 @@ $EDITOR ~/.agents-to-im/config.env
 Minimal config (single bot):
 
 ```env
-CTI_FEISHU_PROFILE_IDS=default
-CTI_FEISHU_PROFILE_DEFAULT_APP_ID=cli_xxx
-CTI_FEISHU_PROFILE_DEFAULT_APP_SECRET=xxx
-CTI_RUNTIME_CLAUDE_FEISHU_PROFILE=default
-CTI_RUNTIME_CODEX_FEISHU_PROFILE=default
+CTI_FEISHU_APP_ID=cli_xxx
+CTI_FEISHU_APP_SECRET=xxx
 CTI_DEFAULT_WORKDIR=/path/to/your/project
 ```
-
-<details>
-<summary><b>Multi-bot config</b> (separate bots for Claude and Codex)</summary>
-
-```env
-CTI_FEISHU_PROFILE_IDS=claude,codex
-CTI_FEISHU_PROFILE_CLAUDE_APP_ID=cli_claude_xxx
-CTI_FEISHU_PROFILE_CLAUDE_APP_SECRET=secret_claude
-CTI_FEISHU_PROFILE_CODEX_APP_ID=cli_codex_xxx
-CTI_FEISHU_PROFILE_CODEX_APP_SECRET=secret_codex
-CTI_RUNTIME_CLAUDE_FEISHU_PROFILE=claude
-CTI_RUNTIME_CODEX_FEISHU_PROFILE=codex
-CTI_DEFAULT_WORKDIR=/path/to/your/project
-```
-
-</details>
 
 <details>
 <summary><b>All configuration options</b></summary>
@@ -176,17 +157,14 @@ CTI_DEFAULT_WORKDIR=/path/to/your/project
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `CTI_DEFAULT_WORKDIR` | Yes | Default working directory for new sessions |
-| `CTI_FEISHU_PROFILE_IDS` | Yes | Comma-separated profile IDs |
-| `CTI_FEISHU_PROFILE_<ID>_APP_ID` | Yes | Feishu app ID per profile |
-| `CTI_FEISHU_PROFILE_<ID>_APP_SECRET` | Yes | Feishu app secret per profile |
-| `CTI_RUNTIME_CLAUDE_FEISHU_PROFILE` | Yes | Profile ID for Claude sessions |
-| `CTI_RUNTIME_CODEX_FEISHU_PROFILE` | Yes | Profile ID for Codex sessions |
+| `CTI_FEISHU_APP_ID` | Yes | Feishu app ID |
+| `CTI_FEISHU_APP_SECRET` | Yes | Feishu app secret |
 | `CTI_DEFAULT_MODE` | No | Default mode: `code` / `plan` / `ask` |
-| `CTI_FEISHU_PROFILE_<ID>_DOMAIN` | No | `lark` for Lark international |
-| `CTI_FEISHU_PROFILE_<ID>_ALLOWED_USERS` | No | Comma-separated allowed user IDs |
-| `CTI_FEISHU_PROFILE_<ID>_TOOL_OUTPUT_CARDS` | No | Show tool output as cards |
-| `CTI_FEISHU_PROFILE_<ID>_AUTO_IMAGE_SEND` | No | Auto-send generated images |
-| `CTI_FEISHU_PROFILE_<ID>_LABEL` | No | Display label for the bot |
+| `CTI_FEISHU_DOMAIN` | No | `lark` for Lark international |
+| `CTI_FEISHU_ALLOWED_USERS` | No | Comma-separated allowed user IDs |
+| `CTI_FEISHU_TOOL_OUTPUT_CARDS` | No | Show tool output as cards |
+| `CTI_FEISHU_AUTO_IMAGE_SEND` | No | Auto-send generated images |
+| `CTI_FEISHU_LABEL` | No | Display label for the bot |
 | `CTI_CLAUDE_DEFAULT_MODEL` | No | Default model for Claude sessions |
 | `CTI_CODEX_DEFAULT_MODEL` | No | Default model for Codex sessions |
 | `CTI_CLAUDE_CODE_EXECUTABLE` | No | Custom path to Claude CLI |
@@ -227,7 +205,7 @@ flowchart LR
 | Interaction | Behavior |
 |-------------|----------|
 | Streaming preview | CardKit first, falls back to interactive-card patching, then plain text |
-| Permission handling | Inline buttons primary; `/perm allow\|deny <id>` as fallback |
+| Permission handling | Inline buttons on approval cards; `1/2/3` quick reply only works when exactly one request is pending |
 | Activity visibility | Command/file/plan progress rendered as cards |
 | Structured input | Runtime follow-ups rendered as Feishu cards; sensitive prompts redirected to local CLI |
 | Group naming | Auto-renamed after first successful turn; Claude mode appended as suffix |
@@ -280,14 +258,13 @@ Any other DM message returns help text.
 | `/plan` | Start interactive planning; `/plan <request>` to plan immediately |
 | `/stop` | Interrupt current output (equivalent to `Esc` in terminal) |
 | `/reset` | Fresh session, same group and runtime |
-| `/perm allow\|allow_session\|deny <id>` | Permission fallback |
 
 ---
 
 ## FAQ
 
 **Can I use both Claude and Codex with the same bot?**
-Yes. A single Feishu app can serve both runtimes. Set both `CTI_RUNTIME_CLAUDE_FEISHU_PROFILE` and `CTI_RUNTIME_CODEX_FEISHU_PROFILE` to the same profile.
+Yes. The bridge now assumes a single Feishu/Lark bot and routes Claude/Codex per session behind that bot.
 
 **What happens if the bridge restarts?**
 Your groups, session bindings, and message history are preserved locally. Send a message in the group to continue where you left off.

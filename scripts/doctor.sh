@@ -50,23 +50,14 @@ fi
 
 APP_ID=$(get_config CTI_FEISHU_APP_ID || true)
 APP_SECRET=$(get_config CTI_FEISHU_APP_SECRET || true)
-PROFILE_IDS=$(get_config CTI_FEISHU_PROFILE_IDS || true)
-DEFAULT_PROFILE_ID="default"
-if [ -n "$PROFILE_IDS" ]; then
-  DEFAULT_PROFILE_ID=$(printf '%s' "$PROFILE_IDS" | cut -d, -f1 | tr '[:upper:]' '[:lower:]')
-fi
-PROFILE_VAR_PREFIX="CTI_FEISHU_PROFILE_$(printf '%s' "$DEFAULT_PROFILE_ID" | tr '[:lower:]' '[:upper:]')"
-PROFILE_APP_ID=$(get_config "${PROFILE_VAR_PREFIX}_APP_ID" || true)
-PROFILE_APP_SECRET=$(get_config "${PROFILE_VAR_PREFIX}_APP_SECRET" || true)
+LEGACY_APP_ID=$(get_config CTI_FEISHU_PROFILE_DEFAULT_APP_ID || true)
+LEGACY_APP_SECRET=$(get_config CTI_FEISHU_PROFILE_DEFAULT_APP_SECRET || true)
 WORKDIR=$(get_config CTI_DEFAULT_WORKDIR || true)
 
-[ -n "$PROFILE_IDS" ] || [ -n "$APP_ID" ] || [ -n "$APP_SECRET" ] \
-  && check "Feishu profile list configured" 0 \
-  || check "Feishu profile list configured" 1
-[ -n "$PROFILE_APP_ID" ] || PROFILE_APP_ID="$APP_ID"
-[ -n "$PROFILE_APP_SECRET" ] || PROFILE_APP_SECRET="$APP_SECRET"
-[ -n "$PROFILE_APP_ID" ] && check "Feishu profile App ID configured" 0 || check "Feishu profile App ID configured" 1
-[ -n "$PROFILE_APP_SECRET" ] && check "Feishu profile App Secret configured" 0 || check "Feishu profile App Secret configured" 1
+[ -n "$APP_ID" ] || APP_ID="$LEGACY_APP_ID"
+[ -n "$APP_SECRET" ] || APP_SECRET="$LEGACY_APP_SECRET"
+[ -n "$APP_ID" ] && check "Feishu App ID configured" 0 || check "Feishu App ID configured" 1
+[ -n "$APP_SECRET" ] && check "Feishu App Secret configured" 0 || check "Feishu App Secret configured" 1
 [ -n "$WORKDIR" ] && check "CTI_DEFAULT_WORKDIR configured" 0 || check "CTI_DEFAULT_WORKDIR configured" 1
 
 CLAUDE_EXE=$(get_config CTI_CLAUDE_CODE_EXECUTABLE || true)

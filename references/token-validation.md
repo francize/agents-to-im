@@ -1,19 +1,15 @@
 # Feishu / Lark Credential Validation
 
-写完 `config.env` 后，先验证 Feishu/Lark 凭据，再启动 bridge。这样能尽早发现 profile 配置、App ID、App Secret 或域名填错的问题。
-
-下面示例默认验证 `default` profile。多 Bot 场景下，把 `PROFILE_ID` 改成你实际想检查的 profile 即可。
+写完 `config.env` 后，先验证 Feishu/Lark 凭据，再启动 bridge。这样能尽早发现 App ID、App Secret 或域名填错的问题。
 
 ```bash
-PROFILE_ID=default
-PROFILE_KEY=$(printf '%s' "$PROFILE_ID" | tr '[:lower:]' '[:upper:]')
-APP_ID_VAR="CTI_FEISHU_PROFILE_${PROFILE_KEY}_APP_ID"
-APP_SECRET_VAR="CTI_FEISHU_PROFILE_${PROFILE_KEY}_APP_SECRET"
-DOMAIN_VAR="CTI_FEISHU_PROFILE_${PROFILE_KEY}_DOMAIN"
-
-APP_ID="${!APP_ID_VAR}"
-APP_SECRET="${!APP_SECRET_VAR}"
-DOMAIN="${!DOMAIN_VAR:-https://open.feishu.cn}"
+APP_ID="${CTI_FEISHU_APP_ID}"
+APP_SECRET="${CTI_FEISHU_APP_SECRET}"
+if [ "${CTI_FEISHU_DOMAIN:-}" = "lark" ]; then
+  DOMAIN="https://open.larksuite.com"
+else
+  DOMAIN="https://open.feishu.cn"
+fi
 ```
 
 ## 1. 校验租户访问令牌
@@ -29,9 +25,9 @@ curl -s -X POST "${DOMAIN}/open-apis/auth/v3/tenant_access_token/internal" \
 - 返回体中包含 `tenant_access_token`
 
 如果失败，优先检查：
-- `CTI_FEISHU_PROFILE_<ID>_APP_ID`
-- `CTI_FEISHU_PROFILE_<ID>_APP_SECRET`
-- `CTI_FEISHU_PROFILE_<ID>_DOMAIN` 是否与应用所在区域匹配
+- `CTI_FEISHU_APP_ID`
+- `CTI_FEISHU_APP_SECRET`
+- `CTI_FEISHU_DOMAIN` 是否与应用所在区域匹配
 
 如果你还要执行第 2 步，把上一步返回 JSON 里的 `tenant_access_token` 复制到 `TENANT_ACCESS_TOKEN` 环境变量里即可。
 

@@ -20,7 +20,6 @@ import type { StructuredInputRequestInfo, StructuredInputResponse } from '../bri
 import { BaseChannelAdapter } from '../bridge/channel-adapter.js';
 import { getBridgeContext } from '../bridge/context.js';
 import { appendLocalCommandExchange } from '../bridge/local-command-history.js';
-import { handlePermissionCallback } from '../bridge/permission-broker.js';
 import { validateMode } from '../bridge/security/validators.js';
 import {
   buildCardContent,
@@ -180,11 +179,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
         toolOutputCards: true,
         autoImageSend: true,
       },
-      runtimeProfileMap: {
-        claude: DEFAULT_CHANNEL_INSTANCE_ID,
-        codex: DEFAULT_CHANNEL_INSTANCE_ID,
-      },
-      profileLabels: {},
     },
   ) {
     super();
@@ -283,8 +277,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
       getInboundImageService: this.getInboundImageService.bind(this),
       withInstance: this.withInstance.bind(this),
       isAuthorized: this.isAuthorized.bind(this),
-      isRuntimeOwnedByThisAdapter: this.isRuntimeOwnedByThisAdapter.bind(this),
-      buildWrongBotMessage: this.buildWrongBotMessage.bind(this),
       setLastIncomingMessageId: this.setLastIncomingMessageId.bind(this),
       markSeenMessage: this.markSeenMessage.bind(this),
       enqueue: this.enqueue.bind(this),
@@ -294,7 +286,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
       sendInteractiveCard: this.sendInteractiveCard.bind(this),
       patchInteractiveCard: this.patchInteractiveCard.bind(this),
       patchActionCardSafely: this.patchActionCardSafely.bind(this),
-      handlePermissionCommand: this.handlePermissionCommand.bind(this),
       handleCreateSessionCommand: this.handleCreateSessionCommand.bind(this),
       handleNewSessionCardAction: this.handleNewSessionCardAction.bind(this),
       handleClaudeModeCardAction: this.handleClaudeModeCardAction.bind(this),
@@ -343,23 +334,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
         ? this.profileId
         : resolveChannelInstanceId(address),
     };
-  }
-
-  private getRuntimeProfileId(runtime: RuntimeName): string {
-    return this.options.runtimeProfileMap[runtime] || DEFAULT_CHANNEL_INSTANCE_ID;
-  }
-
-  private getRuntimeProfileLabel(runtime: RuntimeName): string {
-    const profileId = this.getRuntimeProfileId(runtime);
-    return this.options.profileLabels?.[profileId] || profileId;
-  }
-
-  private isRuntimeOwnedByThisAdapter(runtime: RuntimeName): boolean {
-    return this.getRuntimeProfileId(runtime) === this.profileId;
-  }
-
-  private buildWrongBotMessage(runtime: RuntimeName): string {
-    return `请到 ${this.getRuntimeProfileLabel(runtime)} Bot 上执行 \`/new:${runtime}\`。当前 Bot 仅处理映射到自己的 runtime。`;
   }
 
   private usesLegacyStoreSettings(): boolean {
@@ -466,8 +440,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const store = this.tryGetStore();
     const appId = this.options.profile.appId || store?.getSetting('bridge_feishu_app_id') || '';
     const appSecret = this.options.profile.appSecret || store?.getSetting('bridge_feishu_app_secret') || '';
-    if (!appId) return `${this.label}: CTI_FEISHU_PROFILE_${this.profileId.toUpperCase()}_APP_ID is required`;
-    if (!appSecret) return `${this.label}: CTI_FEISHU_PROFILE_${this.profileId.toUpperCase()}_APP_SECRET is required`;
+    if (!appId) return `${this.label}: CTI_FEISHU_APP_ID is required`;
+    if (!appSecret) return `${this.label}: CTI_FEISHU_APP_SECRET is required`;
     return null;
   }
 
@@ -919,18 +893,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   private async handleResetCommand(address: ChannelAddress, replyToMessageId?: string): Promise<void> {
     return handleResetCommandWithContext(this.getHandlerContext(), address, replyToMessageId);
-  }
-
-  private handlePermissionCommand(chatId: string, text: string, messageId?: string): boolean {
-    const parts = text.trim().split(/\s+/);
-    if (parts.length < 3) return false;
-    const action = parts[1].toLowerCase();
-    if (action !== 'allow' && action !== 'allow_session' && action !== 'deny') return false;
-    const permissionRequestId = parts.slice(2).join(' ');
-    return handlePermissionCallback(`perm:${action}:${permissionRequestId}`, chatId, messageId, {
-      channelType: this.channelType,
-      channelInstanceId: this.profileId,
-    });
   }
 
   private async handleModeCommand(bindingId: string, text: string, address: ChannelAddress, replyToMessageId?: string): Promise<void> {

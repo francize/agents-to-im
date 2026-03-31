@@ -63,11 +63,6 @@ describe('FeishuAdapter', () => {
         toolOutputCards: true,
         autoImageSend: true,
       },
-      runtimeProfileMap: {
-        claude: 'profile-codex',
-        codex: 'profile-codex',
-      },
-      profileLabels: {},
     });
 
     assert.equal(adapter.validateConfig(), null);
@@ -477,58 +472,6 @@ describe('FeishuAdapter', () => {
       process.env.CODEX_HOME = previousCodexHome;
       fs.rmSync(tempCodexHome, { recursive: true, force: true });
     }
-  });
-
-  it('redirects /new:codex to the mapped bot when this adapter only owns Claude', async () => {
-    const store = new JsonFileStore(makeSettings());
-    installContext(store, {});
-
-    const replies: Array<{ msgType: string; content: string }> = [];
-    const adapter = new FeishuAdapter({
-      profile: {
-        id: 'claude',
-        label: 'Claude Bot',
-        appId: 'claude-app',
-        appSecret: 'claude-secret',
-        toolOutputCards: true,
-        autoImageSend: true,
-      },
-      runtimeProfileMap: {
-        claude: 'claude',
-        codex: 'codex',
-      },
-      profileLabels: {
-        claude: 'Claude Bot',
-        codex: 'Codex Bot',
-      },
-    }) as any;
-    adapter.restClient = {
-      im: {
-        message: {
-          reply: async (payload: { data: { msg_type: string; content: string } }) => {
-            replies.push({ msgType: payload.data.msg_type, content: payload.data.content });
-            return { code: 0, data: { message_id: 'reply-1', open_message_id: 'open-reply-1' } };
-          },
-        },
-      },
-    };
-
-    await adapter.handleCreateSessionCommand(
-      { id: 'ou_123', type: 'open_id' },
-      {
-        messageId: 'dm-msg',
-        address: { channelType: 'feishu', channelInstanceId: 'claude', chatId: 'dm-chat', userId: 'ou_123' },
-        text: '/new:codex',
-        timestamp: Date.now(),
-      },
-      'codex',
-    );
-
-    assert.equal(replies.length, 1);
-    assert.equal(replies[0].msgType, 'post');
-    assert.match(replies[0].content, /Codex Bot/);
-    assert.match(replies[0].content, /\/new:codex/);
-    assert.equal(store.listChannelBindings().length, 0);
   });
 
   it('does not advertise /perm in group-ready messages', () => {

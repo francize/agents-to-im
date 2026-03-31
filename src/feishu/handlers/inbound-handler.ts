@@ -192,13 +192,6 @@ export async function handleGroupMessage(
   const binding = store.getChannelBinding(ctx.channelType, inbound.address.chatId, ctx.profileId);
   const workflow = binding ? store.getActivePlanWorkflowByBinding(binding.id) : null;
 
-  if (lower.startsWith('/perm ')) {
-    const handled = ctx.handlePermissionCommand(inbound.address.chatId, text, inbound.messageId);
-    if (!handled) {
-      await ctx.sendAsPost(inbound.address, '无效的权限命令，格式为 `/perm allow|allow_session|deny <id>`。', inbound.messageId);
-    }
-    return;
-  }
   if (lower === '/reset') {
     await ctx.handleResetCommand(inbound.address, inbound.messageId);
     return;

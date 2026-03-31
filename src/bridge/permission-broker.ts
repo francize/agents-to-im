@@ -123,7 +123,7 @@ export async function forwardPermissionRequest(
   let result: import('./types.js').SendResult;
 
   if (adapter.channelType === 'qq') {
-    // QQ: plain text permission prompt with copyable /perm commands (no inline buttons)
+    // QQ: plain text permission prompt with numeric replies only.
     const qqText = [
       `Permission Required`,
       ``,
@@ -136,11 +136,6 @@ export async function forwardPermissionRequest(
       `1 - Allow once`,
       `2 - Allow session`,
       `3 - Deny`,
-      ``,
-      `Or use full command:`,
-      `/perm allow ${permissionRequestId}`,
-      `/perm allow_session ${permissionRequestId}`,
-      `/perm deny ${permissionRequestId}`,
     ].join('\n');
 
     const qqMessage: OutboundMessage = {

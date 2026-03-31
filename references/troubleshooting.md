@@ -9,7 +9,7 @@
 排查顺序：
 1. 运行 `agents-to-im doctor`
 2. 确认 Node.js >= 20：`node --version`
-3. 确认 `~/.agents-to-im/config.env` 存在且包含 `CTI_FEISHU_PROFILE_<ID>_APP_ID`、`CTI_FEISHU_PROFILE_<ID>_APP_SECRET`
+3. 确认 `~/.agents-to-im/config.env` 存在且包含 `CTI_FEISHU_APP_ID`、`CTI_FEISHU_APP_SECRET`
 4. 确认至少一个 runtime 可用：
    - Claude：`claude --version`
    - Codex：检查 `codex --version`、`codex app-server --help` 与 `~/.codex/config.toml`
@@ -29,7 +29,7 @@
 1. 确认应用已发布并已启用 Bot 能力
 2. 确认事件订阅方式为长连接
 3. 确认已订阅 `im.message.receive_v1`
-4. 确认 `CTI_FEISHU_PROFILE_<ID>_ALLOWED_USERS` 没有把自己挡掉
+4. 确认 `CTI_FEISHU_ALLOWED_USERS` 没有把自己挡掉
 5. 查看 bridge 日志里是否有入站事件
 
 注意：
@@ -95,7 +95,7 @@
 1. 确认事件回调里已经添加 `card.action.trigger`
 2. 确认该事件所在版本已经发布并通过审批
 3. 查看日志里是否收到 card action 事件
-4. 临时改用群内 `/perm allow|allow_session|deny <id>`
+4. 修复后重新触发一次权限请求，确认新的审批卡片可以正常点击
 
 ## PID 状态异常
 

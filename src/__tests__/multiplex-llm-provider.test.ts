@@ -25,17 +25,11 @@ function makeConfig(): Config {
   return {
     defaultWorkDir: '/tmp',
     defaultMode: 'code',
-    feishuProfiles: [
-      {
-        id: 'default',
-        label: '默认 Bot',
-        toolOutputCards: true,
-        autoImageSend: true,
-      },
-    ],
-    runtimeFeishuProfiles: {
-      claude: 'default',
-      codex: 'default',
+    feishu: {
+      id: 'default',
+      label: '默认 Bot',
+      toolOutputCards: true,
+      autoImageSend: true,
     },
   };
 }

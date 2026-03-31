@@ -29,10 +29,6 @@ export async function handleCreateSessionCommand(
   inbound: InboundMessage,
   runtime: RuntimeName,
 ): Promise<void> {
-  if (!ctx.isRuntimeOwnedByThisAdapter(runtime)) {
-    await ctx.sendAsPost(inbound.address, ctx.buildWrongBotMessage(runtime), inbound.messageId);
-    return;
-  }
   try {
     await ctx.ensureRuntimeAvailable(runtime);
     await ctx.sendNewSessionCard(inbound.address, runtime, inbound.messageId);
@@ -49,10 +45,6 @@ export async function handleResumeSessionCommand(
   inbound: InboundMessage,
   runtime: RuntimeName,
 ): Promise<void> {
-  if (!ctx.isRuntimeOwnedByThisAdapter(runtime)) {
-    await ctx.sendAsPost(inbound.address, ctx.buildWrongBotMessage(runtime), inbound.messageId);
-    return;
-  }
   try {
     await ctx.ensureRuntimeAvailable(runtime);
     const workdir = ctx.getStore().getSetting('bridge_default_work_dir') || process.cwd();

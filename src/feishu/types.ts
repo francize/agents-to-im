@@ -90,8 +90,6 @@ export interface PendingInboundImage {
 
 export interface FeishuAdapterOptions {
   profile: FeishuProfileConfig;
-  runtimeProfileMap: Record<RuntimeName, string>;
-  profileLabels?: Record<string, string>;
 }
 
 export type StructuredActionEvent = lark.InteractiveCardActionEvent & {
@@ -154,8 +152,6 @@ export interface AdapterContext {
   getInboundImageService(): InboundImageService;
   withInstance(address: ChannelAddress): ChannelAddress;
   isAuthorized(userId: string, chatId: string): boolean;
-  isRuntimeOwnedByThisAdapter(runtime: RuntimeName): boolean;
-  buildWrongBotMessage(runtime: RuntimeName): string;
   setLastIncomingMessageId(routeKey: string, messageId: string): void;
   markSeenMessage(messageId: string): boolean;
   enqueue(msg: InboundMessage): void;
@@ -179,7 +175,6 @@ export interface AdapterContext {
     kind: string,
     openMessageId?: string,
   ): Promise<void>;
-  handlePermissionCommand(chatId: string, text: string, messageId?: string): boolean;
   handleCreateSessionCommand(
     sender: SenderIdentity,
     inbound: InboundMessage,

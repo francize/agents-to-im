@@ -33,19 +33,16 @@ agents-to-im
 ```
 
 你需要准备：
-- `CTI_FEISHU_PROFILE_IDS`
-- `CTI_FEISHU_PROFILE_<ID>_APP_ID`
-- `CTI_FEISHU_PROFILE_<ID>_APP_SECRET`
-- `CTI_RUNTIME_CLAUDE_FEISHU_PROFILE`
-- `CTI_RUNTIME_CODEX_FEISHU_PROFILE`
+- `CTI_FEISHU_APP_ID`
+- `CTI_FEISHU_APP_SECRET`
 - `CTI_DEFAULT_WORKDIR`
 
 可选项：
-- `CTI_FEISHU_PROFILE_<ID>_DOMAIN`
-- `CTI_FEISHU_PROFILE_<ID>_ALLOWED_USERS`
-- `CTI_FEISHU_PROFILE_<ID>_TOOL_OUTPUT_CARDS`
-- `CTI_FEISHU_PROFILE_<ID>_AUTO_IMAGE_SEND`
-- `CTI_FEISHU_PROFILE_<ID>_LABEL`
+- `CTI_FEISHU_DOMAIN`
+- `CTI_FEISHU_ALLOWED_USERS`
+- `CTI_FEISHU_TOOL_OUTPUT_CARDS`
+- `CTI_FEISHU_AUTO_IMAGE_SEND`
+- `CTI_FEISHU_LABEL`
 - `CTI_CLAUDE_DEFAULT_MODEL`
 - `CTI_CODEX_DEFAULT_MODEL`
 - `CTI_CLAUDE_CODE_EXECUTABLE`
@@ -138,4 +135,4 @@ agents-to-im doctor
 - 群内默认启用流式卡片输出
 - 群内 `/stop` 可以中断当前大模型输出，等价于本地 CLI 里的 `Esc` / `Command+C`
 - 群内 `/reset` 会创建新 session，但保持当前群的 runtime
-- 权限交互优先走卡片按钮，必要时可在群内使用 `/perm allow|allow_session|deny <id>`
+- 权限交互优先走卡片按钮；当群里恰好只有一个待处理请求时，也可以直接回复 `1` / `2` / `3`

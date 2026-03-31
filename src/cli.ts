@@ -66,12 +66,17 @@ async function confirm(rl: readline.Interface, question: string, defaultYes = tr
   return answer.toLowerCase().startsWith('y');
 }
 
-async function select(rl: readline.Interface, question: string, options: string[]): Promise<number> {
+async function select(
+  rl: readline.Interface,
+  question: string,
+  options: string[],
+  defaultIndex = 0,
+): Promise<number> {
   console.log(`  ${c.white}${question}${c.reset}`);
   options.forEach((opt, i) => console.log(`    ${c.cyan}${i + 1}.${c.reset} ${opt}`));
   const answer = await ask(rl, 'Choose');
   const idx = parseInt(answer, 10) - 1;
-  return (idx >= 0 && idx < options.length) ? idx : 0;
+  return (idx >= 0 && idx < options.length) ? idx : defaultIndex;
 }
 
 // ── Agent detection ──
@@ -163,11 +168,16 @@ async function setupWizard() {
   info(`Create one at: ${c.cyan}https://open.feishu.cn/app${c.reset}`);
   console.log('');
 
-  const appId = await ask(rl, 'Feishu App ID', existing.CTI_FEISHU_APP_ID);
-  const appSecret = await ask(rl, 'Feishu App Secret', existing.CTI_FEISHU_APP_SECRET ? '****' + existing.CTI_FEISHU_APP_SECRET.slice(-4) : undefined);
-  const actualSecret = appSecret.startsWith('****') ? existing.CTI_FEISHU_APP_SECRET : appSecret;
+  const existingAppId = existing.CTI_FEISHU_APP_ID || existing.CTI_FEISHU_PROFILE_DEFAULT_APP_ID;
+  const existingAppSecret = existing.CTI_FEISHU_APP_SECRET || existing.CTI_FEISHU_PROFILE_DEFAULT_APP_SECRET;
+  const existingDomain = existing.CTI_FEISHU_DOMAIN || existing.CTI_FEISHU_PROFILE_DEFAULT_DOMAIN || '';
+  const existingAllowedUsers = existing.CTI_FEISHU_ALLOWED_USERS || existing.CTI_FEISHU_PROFILE_DEFAULT_ALLOWED_USERS;
 
-  const domainIdx = await select(rl, 'Platform:', ['Feishu (飞书)', 'Lark (international)']);
+  const appId = await ask(rl, 'Feishu App ID', existingAppId);
+  const appSecret = await ask(rl, 'Feishu App Secret', existingAppSecret ? '****' + existingAppSecret.slice(-4) : undefined);
+  const actualSecret = appSecret.startsWith('****') ? existingAppSecret : appSecret;
+
+  const domainIdx = await select(rl, 'Platform:', ['Feishu (飞书)', 'Lark (international)'], existingDomain === 'lark' ? 1 : 0);
   const domain = domainIdx === 1 ? 'lark' : '';
 
   heading('📁 Working Directory');
@@ -188,7 +198,7 @@ async function setupWizard() {
   const restrictUsers = await confirm(rl, 'Restrict to specific Feishu users?', false);
   let allowedUsers = '';
   if (restrictUsers) {
-    allowedUsers = await ask(rl, 'Allowed user IDs (comma-separated)', existing.CTI_FEISHU_ALLOWED_USERS);
+    allowedUsers = await ask(rl, 'Allowed user IDs (comma-separated)', existingAllowedUsers);
   }
 
   // Claude model
@@ -213,17 +223,14 @@ async function setupWizard() {
     `CTI_DEFAULT_WORKDIR=${workDir}`,
     `CTI_DEFAULT_MODE=${mode}`,
     '',
-    '# Feishu / Lark profiles',
-    'CTI_FEISHU_PROFILE_IDS=default',
-    `CTI_FEISHU_PROFILE_DEFAULT_APP_ID=${appId}`,
-    `CTI_FEISHU_PROFILE_DEFAULT_APP_SECRET=${actualSecret || ''}`,
-    `CTI_FEISHU_PROFILE_DEFAULT_LABEL=Default Bot`,
-    'CTI_RUNTIME_CLAUDE_FEISHU_PROFILE=default',
-    'CTI_RUNTIME_CODEX_FEISHU_PROFILE=default',
+    '# Feishu / Lark bot',
+    `CTI_FEISHU_APP_ID=${appId}`,
+    `CTI_FEISHU_APP_SECRET=${actualSecret || ''}`,
+    'CTI_FEISHU_LABEL=Default Bot',
   ];
 
-  if (domain) lines.push(`CTI_FEISHU_PROFILE_DEFAULT_DOMAIN=${domain}`);
-  if (allowedUsers) lines.push(`CTI_FEISHU_PROFILE_DEFAULT_ALLOWED_USERS=${allowedUsers}`);
+  if (domain) lines.push(`CTI_FEISHU_DOMAIN=${domain}`);
+  if (allowedUsers) lines.push(`CTI_FEISHU_ALLOWED_USERS=${allowedUsers}`);
   if (autoApprove) lines.push('', 'CTI_AUTO_APPROVE=true');
   if (claudeModel) lines.push('', `CTI_CLAUDE_DEFAULT_MODEL=${claudeModel}`);
   if (claudeCliPath) lines.push(`CTI_CLAUDE_CODE_EXECUTABLE=${claudeCliPath}`);

@@ -72,20 +72,16 @@ async function main(): Promise<void> {
   const pendingStructuredInputs = new PendingStructuredInputs();
   const llm = new MultiplexLLMProvider(store, pendingPerms, pendingApprovals, pendingStructuredInputs, config);
   console.log('[agents-to-im] Runtime selection: per-session multiplex (claude/codex)');
-  const feishuAdapters = config.feishuProfiles.map((profile) => new FeishuAdapter({
-    profile,
-    runtimeProfileMap: config.runtimeFeishuProfiles,
-    profileLabels: Object.fromEntries(
-      config.feishuProfiles.map((item) => [item.id, item.label]),
-    ),
-  }));
-  for (const adapter of feishuAdapters) {
-    const configError = adapter.validateConfig();
-    if (configError) {
-      console.warn(`[agents-to-im] Skip Feishu adapter ${adapter.adapterId}: ${configError}`);
-      continue;
-    }
-    bridgeManager.registerAdapter(adapter);
+  const feishuAdapter = new FeishuAdapter({
+    profile: config.feishu,
+  });
+  const enabledChannelIds: string[] = [];
+  const configError = feishuAdapter.validateConfig();
+  if (configError) {
+    console.warn(`[agents-to-im] Skip Feishu adapter ${feishuAdapter.adapterId}: ${configError}`);
+  } else {
+    bridgeManager.registerAdapter(feishuAdapter);
+    enabledChannelIds.push(feishuAdapter.adapterId);
   }
 
   const gateway = {
@@ -116,10 +112,10 @@ async function main(): Promise<void> {
           pid: process.pid,
           runId,
           startedAt: new Date().toISOString(),
-          channels: feishuAdapters.map((adapter) => adapter.adapterId),
+          channels: enabledChannelIds,
         });
         console.log(
-          `[agents-to-im] Bridge started (PID: ${process.pid}, channels: ${feishuAdapters.map((adapter) => adapter.adapterId).join(', ') || 'none'})`,
+          `[agents-to-im] Bridge started (PID: ${process.pid}, channels: ${enabledChannelIds.join(', ') || 'none'})`,
         );
       },
       onBridgeStop: () => {

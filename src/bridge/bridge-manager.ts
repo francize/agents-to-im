@@ -976,7 +976,8 @@ async function handleMessage(
   }
 
   // ── Numeric shortcut for permission replies (feishu/qq only) ──
-  // On mobile, typing `/perm allow <uuid>` is painful.
+  // On some mobile clients, a short numeric reply is more reliable than
+  // returning to the original approval UI.
   // If the user sends "1", "2", or "3" and there is exactly one pending
   // permission for this chat, map it: 1→allow, 2→allow_session, 3→deny.
   //
@@ -1024,7 +1025,7 @@ async function handleMessage(
         // Multiple pending permissions — numeric shortcut is ambiguous.
         await deliver(adapter, {
           address: msg.address,
-          text: `Multiple pending permissions (${pendingLinks.length}). Please use the full command:\n/perm allow|allow_session|deny <id>`,
+          text: `Multiple pending permissions (${pendingLinks.length}). Please use the original permission card or wait until only one request is pending.`,
           parseMode: 'plain',
           replyToMessageId: msg.messageId,
         });
@@ -2162,7 +2163,6 @@ async function handleCommand(
         '/status - Show current status',
         '/sessions - List recent sessions',
         '/stop - Stop current session',
-        '/perm allow|allow_session|deny &lt;id&gt; - Respond to permission',
         '/help - Show this help',
       ].join('\n');
       break;
@@ -2275,29 +2275,6 @@ async function handleCommand(
       break;
     }
 
-    case '/perm': {
-      // Text-based permission approval fallback (for channels without inline buttons)
-      // Usage: /perm allow <id> | /perm allow_session <id> | /perm deny <id>
-      const permParts = args.split(/\s+/);
-      const permAction = permParts[0];
-      const permId = permParts.slice(1).join(' ');
-      if (!permAction || !permId || !['allow', 'allow_session', 'deny'].includes(permAction)) {
-        response = 'Usage: /perm allow|allow_session|deny &lt;permission_id&gt;';
-        break;
-      }
-      const callbackData = `perm:${permAction}:${permId}`;
-      const handled = broker.handlePermissionCallback(callbackData, msg.address.chatId, undefined, {
-        channelType: msg.address.channelType,
-        channelInstanceId: msg.address.channelInstanceId,
-      });
-      if (handled) {
-        response = `Permission ${permAction}: recorded.`;
-      } else {
-        response = `Permission not found or already resolved.`;
-      }
-      break;
-    }
-
     case '/help':
       response = [
         '<b>CodePilot Bridge Commands</b>',
@@ -2309,7 +2286,6 @@ async function handleCommand(
         '/status - Show current status',
         '/sessions - List recent sessions',
         '/stop - Stop current session',
-        '/perm allow|allow_session|deny &lt;id&gt; - Respond to permission request',
         '1/2/3 - Quick permission reply (Feishu/QQ, single pending)',
         '/help - Show this help',
       ].join('\n');
