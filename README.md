@@ -28,7 +28,7 @@
 
 ```bash
 npm install -g agents-to-im@beta
-agents-to-im onboard
+agents-to-im onboard   # choose language first, then follow the guided platform setup step by step
 ```
 
 ---
@@ -78,6 +78,8 @@ npm install -g agents-to-im@beta
 agents-to-im onboard
 ```
 
+`onboard` now starts with a language picker, uses `↑/↓` + `Enter` for every choice, asks before copying scopes JSON or opening Feishu pages, and waits for you to press Enter after each platform step is actually done.
+
 Use `agents-to-im ...` for daily operation:
 
 ```bash
@@ -123,10 +125,13 @@ bash scripts/daemon.sh restart
 
 1. Create a custom app at [Feishu](https://open.feishu.cn/app) or [Lark](https://open.larksuite.com/app)
 2. Enable the **Bot** capability
-3. Switch event delivery to **Long Connection**
-4. Subscribe to `im.message.receive_v1` and `card.action.trigger`
-5. Import the full scopes JSON from [references/setup-guides.md](references/setup-guides.md) in one shot
-6. Publish the app
+3. Import the full scopes JSON from [references/setup-guides.md](references/setup-guides.md) in one shot
+4. Publish one app version first
+5. After the local bridge is running, switch `Events & Callbacks` to **Long Connection**
+6. Add `im.message.receive_v1`, `im.message.message_read_v1`, and `im.chat.member.bot.added_v1`
+7. Add the `card.action.trigger` callback
+8. Publish again so events and callbacks go live
+9. Optional: add `/new:claude` and `/new:codex` to the Bot floating menu
 
 ### 2. Configure the bridge
 

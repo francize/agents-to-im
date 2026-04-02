@@ -589,7 +589,7 @@ describe('bridge-manager plan workflow', () => {
     const store = new JsonFileStore(makeSettings());
     let releaseExecution: (() => void) | null = null;
     const executionReleased = new Promise<void>((resolve) => {
-      releaseExecution = resolve;
+      releaseExecution = () => resolve();
     });
     initBridgeContext({
       store,
@@ -677,7 +677,11 @@ describe('bridge-manager plan workflow', () => {
       actionCardOpenMessageId: '',
       resolved: true,
     });
-    releaseExecution?.();
+    const release = releaseExecution as (() => void) | null;
+    if (!release) {
+      throw new Error('Expected releaseExecution to be set');
+    }
+    release();
 
     await waitFor(() => adapter.sent.length === 2);
 

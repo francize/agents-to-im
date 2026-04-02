@@ -28,7 +28,7 @@
 
 ```bash
 npm install -g agents-to-im@beta
-agents-to-im onboard
+agents-to-im onboard   # 先选中文/英文，再按步骤引导权限、事件、回调和发布
 ```
 
 ---
@@ -78,6 +78,8 @@ npm install -g agents-to-im@beta
 agents-to-im onboard
 ```
 
+`onboard` 现在会优先让你选择中文或英文；所有选择题都支持 `↑/↓` 和 `Enter`；复制 scopes JSON、打开飞书页面前都会先确认，每一步做完后再按回车继续。
+
 后续统一通过 `agents-to-im ...` 管理 daemon：
 
 ```bash
@@ -123,10 +125,13 @@ bash scripts/daemon.sh restart
 
 1. 在[飞书开放平台](https://open.feishu.cn/app)或 [Lark](https://open.larksuite.com/app) 创建自建应用
 2. 开启 **Bot** 能力
-3. 事件分发方式切到**长连接**
-4. 订阅 `im.message.receive_v1` 和 `card.action.trigger`
-5. 使用 [references/setup-guides.md](references/setup-guides.md) 中的完整 scopes JSON 一次性导入权限
-6. 发布应用
+3. 使用 [references/setup-guides.md](references/setup-guides.md) 中的完整 scopes JSON 一次性导入权限
+4. 先发布一次应用版本
+5. 本地启动 bridge 后，再去 `Events & Callbacks` 切到**长连接**
+6. 添加事件 `im.message.receive_v1`、`im.message.message_read_v1`、`im.chat.member.bot.added_v1`
+7. 添加回调 `card.action.trigger`
+8. 再发布一次应用版本
+9. 可选：在 Bot 菜单里添加 `/new:claude` 和 `/new:codex` 悬浮菜单
 
 ### 2. 配置 bridge
 

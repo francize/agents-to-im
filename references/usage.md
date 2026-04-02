@@ -10,6 +10,24 @@
 agents-to-im onboard
 ```
 
+它会先让你选择中文或英文，再写本地 `config.env`，然后按步骤引导飞书/Lark 平台侧配置：
+- 导入 scopes JSON
+- 先发布一次版本
+- 启动/重启本地 bridge
+- 配置 `Long Connection`
+- 添加 `im.message.receive_v1`
+- 添加 `im.message.message_read_v1`
+- 添加 `im.chat.member.bot.added_v1`
+- 添加 `card.action.trigger`
+- 再发布一次让事件和卡片回调生效
+- 可选配置 Bot 悬浮菜单 `/new:claude` 和 `/new:codex`
+
+交互细节：
+- 所有选择题都支持 `↑/↓` 和 `Enter`
+- 复制 scopes JSON、打开 auth / event / callback / bot 页面前都会先确认
+- 每一步都等你实际操作完再按回车继续
+- 每个辅助动作都有 `Skip Now`
+
 日常维护统一使用：
 
 ```bash
