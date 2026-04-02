@@ -36,7 +36,7 @@ npm install -g github:francize/agents-to-im
 
 Claude Code and Codex are excellent coding agents — but they only talk to you in the terminal. If your team lives in Feishu/Lark, there's no clean way to bring that capability into your IM workspace without mixing sessions into a noisy shared thread.
 
-Generic IM bridges treat the chat window as the session container. That means no isolation, no recovery after restarts, and Feishu gets reduced to a plain-text command relay.
+Most terminal-to-chat relays treat the chat window as the session container. That means no isolation, no recovery after restarts, and Feishu gets reduced to a plain-text command relay.
 
 `agents-to-im` takes a different approach: DM is the control plane, each `/new:claude` or `/new:codex` creates a dedicated Feishu group bound to exactly one session and one runtime. State lives locally, so the workspace survives bridge restarts.
 
@@ -182,7 +182,7 @@ agents-to-im doctor        # check for common issues
 agents-to-im status        # confirm the bridge is running
 ```
 
-Open `http://127.0.0.1:3456` to access the local dashboard, then DM the bot with `/new:claude` or `/new:codex`.
+Open `http://127.0.0.1:13578` to access the local dashboard, then DM the bot with `/new:claude` or `/new:codex`.
 
 ---
 
@@ -271,6 +271,14 @@ Your groups, session bindings, and message history are preserved locally. Send a
 
 **Is my code sent to Feishu servers?**
 The bridge streams AI-generated text and activity summaries to Feishu. Your source code stays local — only the agent's output and your messages transit through the Feishu API.
+
+---
+
+## Acknowledgements
+
+Special thanks to [op7418/Claude-to-IM-skill](https://github.com/op7418/Claude-to-IM-skill).
+
+This project was inspired by that work, and this repository is a Feishu/Lark-focused second-pass vibe built on top of that inspiration.
 
 ---
 

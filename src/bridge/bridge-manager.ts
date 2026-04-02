@@ -1,5 +1,5 @@
 /**
- * Bridge Manager — singleton orchestrator for the multi-IM bridge system.
+ * Bridge Manager — singleton orchestrator for the Feishu bridge system.
  *
  * Manages adapter lifecycles, routes inbound messages through the
  * conversation engine, and coordinates permission handling.
@@ -26,10 +26,8 @@ import type { BaseChannelAdapter } from './channel-adapter.js';
 import * as router from './channel-router.js';
 import * as engine from './conversation-engine.js';
 import * as broker from './permission-broker.js';
-import { deliver, deliverRendered } from './delivery-layer.js';
+import { deliver } from './delivery-layer.js';
 import { buildInteractionTimeoutText } from './interaction-timeout.js';
-import { markdownToTelegramChunks } from './markdown/telegram.js';
-import { markdownToDiscordChunks } from './markdown/discord.js';
 import { getBridgeContext } from './context.js';
 import {
   buildClaudePlanExitCard,
@@ -45,7 +43,6 @@ import {
 } from '../runtime/claude-plan-exit.js';
 import type { ClaudePermissionMode } from '../runtime/claude-mode.js';
 import { PENDING_PERMISSIONS_TIMEOUT_MS } from '../providers/claude/permission-gateway.js';
-import { escapeHtml } from './adapters/telegram-utils.js';
 import {
   validateWorkingDirectory,
   validateSessionId,
@@ -56,6 +53,13 @@ import {
 import { appendLocalCommandExchange } from './local-command-history.js';
 
 const GLOBAL_KEY = '__bridge_manager__';
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
 
 // ── Streaming preview helpers ──────────────────────────────────
 
@@ -73,13 +77,12 @@ interface StreamConfig {
 
 /** Default stream config per channel type. */
 const STREAM_DEFAULTS: Record<string, StreamConfig> = {
-  telegram: { intervalMs: 700, minDeltaChars: 20, maxChars: 3900, primeDelayMs: 900 },
-  discord: { intervalMs: 1500, minDeltaChars: 40, maxChars: 1900, primeDelayMs: 900 },
+  feishu: { intervalMs: 700, minDeltaChars: 20, maxChars: 3900, primeDelayMs: 900 },
 };
 
-function getStreamConfig(channelType = 'telegram'): StreamConfig {
+function getStreamConfig(channelType = 'feishu'): StreamConfig {
   const { store } = getBridgeContext();
-  const defaults = STREAM_DEFAULTS[channelType] || STREAM_DEFAULTS.telegram;
+  const defaults = STREAM_DEFAULTS[channelType] || STREAM_DEFAULTS.feishu;
   const prefix = `bridge_${channelType}_stream_`;
   const intervalMs = parseInt(store.getSetting(`${prefix}interval_ms`) || '', 10) || defaults.intervalMs;
   const minDeltaChars = parseInt(store.getSetting(`${prefix}min_delta_chars`) || '', 10) || defaults.minDeltaChars;
@@ -351,7 +354,7 @@ function extractInlineToolResultImages(blocks: MessageContentBlock[]): Array<{
 
 /**
  * Check if a message looks like a numeric permission shortcut (1/2/3) for
- * feishu/qq channels WITH at least one pending permission in that chat.
+ * Feishu chats with at least one pending permission in that chat.
  *
  * This is used by the adapter loop to route these messages to the inline
  * (non-session-locked) path, avoiding deadlock: the session is blocked
@@ -364,7 +367,7 @@ function isNumericPermissionShortcut(
   chatId: string,
   channelInstanceId?: string,
 ): boolean {
-  if (channelType !== 'feishu' && channelType !== 'qq') return false;
+  if (channelType !== 'feishu') return false;
   const normalized = rawText.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
   if (!/^[123]$/.test(normalized)) return false;
   const { store } = getBridgeContext();
@@ -569,9 +572,7 @@ async function settleLightweightActivity(state: LightweightActivityState | null)
 import type { ChannelAddress } from './types.js';
 
 /**
- * Render response text and deliver via the appropriate channel format.
- * Telegram: Markdown → HTML chunks via deliverRendered.
- * Other channels: plain text via deliver (no HTML).
+ * Render response text and deliver it through the Feishu adapter.
  */
 async function deliverResponse(
   adapter: BaseChannelAdapter,
@@ -580,41 +581,10 @@ async function deliverResponse(
   sessionId: string,
   replyToMessageId?: string,
 ): Promise<SendResult> {
-  if (adapter.channelType === 'telegram') {
-    const chunks = markdownToTelegramChunks(responseText, 4096);
-    if (chunks.length > 0) {
-      return deliverRendered(adapter, address, chunks, { sessionId, replyToMessageId });
-    }
-    return { ok: true };
-  }
-  if (adapter.channelType === 'discord') {
-    // Discord: native markdown, chunk at 2000 chars with fence repair
-    const chunks = markdownToDiscordChunks(responseText, 2000);
-    for (let i = 0; i < chunks.length; i++) {
-      const result = await deliver(adapter, {
-        address,
-        text: chunks[i].text,
-        parseMode: 'Markdown',
-        replyToMessageId,
-      }, { sessionId });
-      if (!result.ok) return result;
-    }
-    return { ok: true };
-  }
-  if (adapter.channelType === 'feishu') {
-    // Feishu: pass markdown through for adapter to format as post/card
-    return deliver(adapter, {
-      address,
-      text: responseText,
-      parseMode: 'Markdown',
-      replyToMessageId,
-    }, { sessionId });
-  }
-  // Generic fallback: deliver as plain text (deliver() handles chunking internally)
   return deliver(adapter, {
     address,
     text: responseText,
-    parseMode: 'plain',
+    parseMode: 'Markdown',
     replyToMessageId,
   }, { sessionId });
 }
@@ -860,7 +830,7 @@ function runAdapterLoop(adapter: BaseChannelAdapter): void {
         // lightweight — process inline (outside session lock).
         // Regular messages use per-session locking for concurrency.
         //
-        // IMPORTANT: numeric shortcuts (1/2/3) for feishu/qq MUST run outside
+        // IMPORTANT: numeric shortcuts (1/2/3) for Feishu MUST run outside
         // the session lock. The current session is blocked waiting for the
         // permission to be resolved; if "1" enters the session lock queue it
         // deadlocks (permission waits for "1", "1" waits for lock release).
@@ -975,7 +945,7 @@ async function handleMessage(
     return;
   }
 
-  // ── Numeric shortcut for permission replies (feishu/qq only) ──
+  // ── Numeric shortcut for permission replies (Feishu only) ──
   // On some mobile clients, a short numeric reply is more reliable than
   // returning to the original approval UI.
   // If the user sends "1", "2", or "3" and there is exactly one pending
@@ -984,7 +954,7 @@ async function handleMessage(
   // Input normalization: mobile keyboards / IM clients may send fullwidth
   // digits (１２３), digits with zero-width joiners, or other Unicode
   // variants. NFKC normalization folds them all to ASCII 1/2/3.
-  if (adapter.channelType === 'feishu' || adapter.channelType === 'qq') {
+  if (adapter.channelType === 'feishu') {
     // eslint-disable-next-line no-control-regex
     const normalized = rawText.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
     if (/^[123]$/.test(normalized)) {
@@ -2151,9 +2121,9 @@ async function handleCommand(
   switch (command) {
     case '/start':
       response = [
-        '<b>CodePilot Bridge</b>',
+        '<b>agents-to-im</b>',
         '',
-        'Send any message to interact with Claude.',
+        'Send any message to interact with the current agent session.',
         '',
         '<b>Commands:</b>',
         '/new [path] - Start new session',
@@ -2277,7 +2247,7 @@ async function handleCommand(
 
     case '/help':
       response = [
-        '<b>CodePilot Bridge Commands</b>',
+        '<b>agents-to-im Commands</b>',
         '',
         '/new [path] - Start new session',
         '/bind &lt;session_id&gt; - Bind to existing session',
@@ -2286,7 +2256,7 @@ async function handleCommand(
         '/status - Show current status',
         '/sessions - List recent sessions',
         '/stop - Stop current session',
-        '1/2/3 - Quick permission reply (Feishu/QQ, single pending)',
+        '1/2/3 - Quick permission reply (Feishu, single pending)',
         '/help - Show this help',
       ].join('\n');
       break;

@@ -309,7 +309,7 @@ function showStatus() {
   }
 
   // Dashboard URL
-  const port = process.env.CTI_DASHBOARD_PORT || '3456';
+  const port = process.env.CTI_DASHBOARD_PORT || '13578';
   if (running) {
     info(`Dashboard: ${c.cyan}http://127.0.0.1:${port}${c.reset}`);
   }

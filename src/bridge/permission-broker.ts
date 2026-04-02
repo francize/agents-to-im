@@ -14,7 +14,6 @@ import type { ChannelAddress, OutboundMessage } from './types.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
 import { deliver } from './delivery-layer.js';
 import { getBridgeContext } from './context.js';
-import { escapeHtml } from './adapters/telegram-utils.js';
 import { buildInteractionTimeoutText } from './interaction-timeout.js';
 import {
   PENDING_APPROVALS_TIMEOUT_MS,
@@ -110,65 +109,32 @@ export async function forwardPermissionRequest(
 
   console.log(`[permission-broker] Forwarding permission request: ${permissionRequestId} tool=${toolName} channel=${adapter.channelType}`);
 
-  // Format the input summary (truncated)
-  const inputStr = JSON.stringify(toolInput, null, 2);
-  const truncatedInput = inputStr.length > 300
-    ? inputStr.slice(0, 300) + '...'
-    : inputStr;
   const timeoutHint = buildInteractionTimeoutText(
     resolvePermissionTimeoutMs(sessionId),
     '会自动拒绝',
   );
 
-  let result: import('./types.js').SendResult;
+  const text = buildPermissionMarkdown(toolName, toolInput, timeoutHint);
 
-  if (adapter.channelType === 'qq') {
-    // QQ: plain text permission prompt with numeric replies only.
-    const qqText = [
-      `Permission Required`,
-      ``,
-      `Tool: ${toolName}`,
-      truncatedInput,
-      ``,
-      timeoutHint,
-      ``,
-      `Reply:`,
-      `1 - Allow once`,
-      `2 - Allow session`,
-      `3 - Deny`,
-    ].join('\n');
-
-    const qqMessage: OutboundMessage = {
-      address,
-      text: qqText,
-      parseMode: 'plain',
-      replyToMessageId,
-    };
-
-    result = await deliver(adapter, qqMessage, { sessionId });
-  } else {
-    const text = buildPermissionMarkdown(toolName, toolInput, timeoutHint);
-
-    const message: OutboundMessage = {
-      address,
-      text,
-      parseMode: 'Markdown',
-      inlineButtons: [
-        [
-          { text: '本次允许', callbackData: `perm:allow:${permissionRequestId}` },
-          { text: '本会话允许', callbackData: `perm:allow_session:${permissionRequestId}` },
-          { text: '拒绝', callbackData: `perm:deny:${permissionRequestId}` },
-        ],
+  const message: OutboundMessage = {
+    address,
+    text,
+    parseMode: 'Markdown',
+    inlineButtons: [
+      [
+        { text: '本次允许', callbackData: `perm:allow:${permissionRequestId}` },
+        { text: '本会话允许', callbackData: `perm:allow_session:${permissionRequestId}` },
+        { text: '拒绝', callbackData: `perm:deny:${permissionRequestId}` },
       ],
-      replyToMessageId,
-      cardHeader: {
-        title: '需要授权',
-        template: 'orange',
-      },
-    };
+    ],
+    replyToMessageId,
+    cardHeader: {
+      title: '需要授权',
+      template: 'orange',
+    },
+  };
 
-    result = await deliver(adapter, message, { sessionId });
-  }
+  const result = await deliver(adapter, message, { sessionId });
 
   // Record the link so we can match callback queries back to this permission
   if (result.ok && result.messageId) {

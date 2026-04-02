@@ -4,13 +4,9 @@
  */
 
 import type {
-  ChannelType,
-  ChannelAddress,
   OutboundMessage,
   SendResult,
-  PLATFORM_LIMITS,
 } from './types.js';
-import type { TelegramChunk } from './markdown/telegram.js';
 import { PLATFORM_LIMITS as limits } from './types.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
 import { getBridgeContext } from './context.js';
@@ -118,12 +114,12 @@ function shouldRetry(category: ErrorCategory): boolean {
 }
 
 /**
- * Compute retry delay. For 429 responses, honor Telegram's retry_after field.
+ * Compute retry delay. For 429 responses, honor the adapter-provided retry hint.
  */
 function retryDelay(result: SendResult, attempt: number): number {
   const retryAfter = (result as { retryAfter?: number }).retryAfter;
   if (retryAfter && retryAfter > 0) {
-    // Telegram gives seconds; add a small buffer
+    // Adapters report retryAfter in seconds; add a small buffer.
     return retryAfter * 1000 + 200;
   }
   return backoffDelay(attempt);
@@ -156,18 +152,8 @@ export async function deliver(
     try { store.cleanupExpiredDedup(); } catch { /* best effort */ }
   }
 
-  const limit = limits[adapter.channelType] || 4096;
-  let chunks = chunkText(message.text, limit);
-
-  // QQ: limit to max 3 segments to avoid flooding
-  if (adapter.channelType === 'qq' && chunks.length > 3) {
-    const first2 = chunks.slice(0, 2);
-    let merged = chunks.slice(2).join('\n');
-    if (merged.length > limit) {
-      merged = merged.slice(0, limit - 25) + '\n[... response truncated]';
-    }
-    chunks = [...first2, merged];
-  }
+  const limit = limits[adapter.channelType] || limits.feishu;
+  const chunks = chunkText(message.text, limit);
 
   let lastMessageId: string | undefined;
 
@@ -185,7 +171,7 @@ export async function deliver(
       text: chunks[i],
       // Only attach inline buttons to the last chunk
       inlineButtons: i === chunks.length - 1 ? message.inlineButtons : undefined,
-      // Pass through replyToMessageId for platforms that need it (e.g. QQ passive reply)
+      // Pass through replyToMessageId so the adapter can preserve threading.
       replyToMessageId: message.replyToMessageId,
     };
 
@@ -274,94 +260,4 @@ async function sendWithRetry(
   }
 
   return { ok: false, error: lastError || 'Max retries exceeded' };
-}
-
-/**
- * Deliver pre-rendered chunks (from Markdown renderer).
- * Each chunk already has HTML and plain text fallback.
- */
-export async function deliverRendered(
-  adapter: BaseChannelAdapter,
-  address: ChannelAddress,
-  chunks: TelegramChunk[],
-  opts?: { sessionId?: string; dedupKey?: string; replyToMessageId?: string },
-): Promise<SendResult> {
-  const { store } = getBridgeContext();
-
-  // Dedup check
-  if (opts?.dedupKey) {
-    if (store.checkDedup(opts.dedupKey)) {
-      return { ok: true, messageId: undefined };
-    }
-  }
-  if (Math.random() < 0.01) {
-    try { store.cleanupExpiredDedup(); } catch { /* best effort */ }
-  }
-
-  let lastMessageId: string | undefined;
-  let failedCount = 0;
-
-  for (let i = 0; i < chunks.length; i++) {
-    await rateLimiter.acquire(address.chatId);
-    if (i > 0) {
-      await new Promise(r => setTimeout(r, INTER_CHUNK_DELAY_MS));
-    }
-
-    const chunk = chunks[i];
-    const htmlMessage: OutboundMessage = {
-      address,
-      text: chunk.html,
-      parseMode: 'HTML',
-      replyToMessageId: opts?.replyToMessageId,
-    };
-
-    // Try HTML first, fall back to plain text on parse error
-    const result = await sendWithRetry(adapter, htmlMessage, chunk.text);
-    if (!result.ok) {
-      console.warn(
-        `[delivery-layer] Chunk ${i + 1}/${chunks.length} failed for chat ${address.chatId}: ${result.error}`,
-      );
-      failedCount++;
-      // Continue delivering remaining chunks instead of aborting
-      continue;
-    }
-    lastMessageId = result.messageId;
-
-    if (result.messageId && opts?.sessionId) {
-      try {
-        store.insertOutboundRef({
-          channelType: adapter.channelType,
-          chatId: address.chatId,
-          codepilotSessionId: opts.sessionId,
-          platformMessageId: result.messageId,
-          purpose: 'response',
-        });
-      } catch { /* best effort */ }
-    }
-  }
-
-  // Notify user about incomplete delivery
-  if (failedCount > 0 && lastMessageId) {
-    const notice = `[${failedCount}/${chunks.length} part(s) failed to send — response may be incomplete]`;
-    await adapter.send({ address, text: notice, parseMode: 'plain' }).catch(() => {});
-  }
-
-  if (opts?.dedupKey) {
-    try { store.insertDedup(opts.dedupKey); } catch { /* best effort */ }
-  }
-
-  try {
-    store.insertAuditLog({
-      channelType: adapter.channelType,
-      chatId: address.chatId,
-      direction: 'outbound',
-      messageId: lastMessageId || '',
-      summary: chunks.map(c => c.text).join('').slice(0, 200),
-    });
-  } catch { /* best effort */ }
-
-  if (failedCount > 0) {
-    return { ok: false, error: `${failedCount}/${chunks.length} chunk(s) failed`, messageId: lastMessageId };
-  }
-  return { ok: true, messageId: lastMessageId };
 }

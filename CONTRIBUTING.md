@@ -41,8 +41,8 @@ src/
 │   ├── bridge-manager.ts    # session lifecycle
 │   ├── conversation-engine.ts
 │   ├── delivery-layer.ts    # message delivery abstraction
-│   ├── channel-adapter.ts   # IM platform adapter interface
-│   ├── markdown/            # platform-specific markdown rendering
+│   ├── channel-adapter.ts   # bridge/adapter interface
+│   ├── markdown/            # Feishu markdown rendering helpers
 │   └── security/            # rate limiting, input validation
 ├── feishu/                  # Feishu/Lark adapter
 │   ├── adapter.ts           # channel adapter implementation

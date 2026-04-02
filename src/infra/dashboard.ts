@@ -1,7 +1,7 @@
 /**
  * Dashboard — lightweight Web status panel for agents-to-im.
  *
- * Starts an HTTP server on CTI_DASHBOARD_PORT (default 3456) that serves:
+ * Starts an HTTP server on CTI_DASHBOARD_PORT (default 13578) that serves:
  *   GET /            — Single-page HTML dashboard (dark theme, auto-refresh)
  *   GET /api/status  — JSON status data for the dashboard
  *
@@ -241,7 +241,7 @@ setInterval(refresh,5000);
 
 export function startDashboard(options: DashboardDeps): void {
   deps = options;
-  const port = parseInt(process.env.CTI_DASHBOARD_PORT || '3456', 10);
+  const port = parseInt(process.env.CTI_DASHBOARD_PORT || '13578', 10);
   const host = process.env.CTI_DASHBOARD_HOST || '127.0.0.1';
 
   server = http.createServer((req, res) => {

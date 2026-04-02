@@ -1,8 +1,8 @@
 /**
  * Abstract base class for IM channel adapters.
  *
- * Each adapter (Telegram, Discord, Slack, ...) extends this class to provide
- * platform-specific message consumption and delivery.
+ * The current bridge ships with a Feishu/Lark adapter; this abstraction keeps
+ * bridge lifecycle code decoupled from adapter-specific delivery details.
  */
 
 import type {
@@ -60,7 +60,7 @@ export abstract class BaseChannelAdapter {
 
   /**
    * Send an outbound message to the channel.
-   * Handles platform-specific formatting and API calls.
+   * Handles adapter-specific formatting and API calls.
    */
   abstract send(message: OutboundMessage): Promise<SendResult>;
 
@@ -70,8 +70,8 @@ export abstract class BaseChannelAdapter {
   sendImage?(_image: OutboundImage): Promise<SendResult>;
 
   /**
-   * Answer a callback query (e.g. Telegram inline button press).
-   * Not all platforms support this — default implementation is a no-op.
+   * Answer a callback query.
+   * Default implementation is a no-op for adapters that do not need it.
    */
   async answerCallback(_callbackQueryId: string, _text?: string): Promise<void> {
     // No-op by default; override in adapters that support callback queries

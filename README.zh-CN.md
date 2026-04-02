@@ -36,7 +36,7 @@ npm install -g github:francize/agents-to-im
 
 Claude Code 和 Codex 是优秀的编码代理 — 但它们只在终端里和你对话。如果你的团队在飞书/Lark 上协作，没有一种干净的方式把这种能力带进 IM 工作空间，而不是把所有会话混进一个嘈杂的群聊线程里。
 
-通用 IM 桥接方案把聊天窗口直接当作会话容器 — 没有隔离、重启后无法恢复、飞书被降级为纯文本命令转发器。
+常见的终端到聊天工具转发方案把聊天窗口直接当作会话容器 — 没有隔离、重启后无法恢复、飞书被降级为纯文本命令转发器。
 
 `agents-to-im` 采用不同的方式：私聊是控制面，每次 `/new:claude` 或 `/new:codex` 都会创建一个专属飞书群，绑定唯一的会话和 runtime。状态保存在本地，工作空间在 bridge 重启后依然可用。
 
@@ -182,7 +182,7 @@ agents-to-im doctor        # 检查常见问题
 agents-to-im status        # 确认 bridge 正在运行
 ```
 
-打开 `http://127.0.0.1:3456` 访问本地状态面板，然后私聊 Bot 发送 `/new:claude` 或 `/new:codex`。
+打开 `http://127.0.0.1:13578` 访问本地状态面板，然后私聊 Bot 发送 `/new:claude` 或 `/new:codex`。
 
 ---
 
@@ -271,6 +271,14 @@ bridge 重启后保留的内容：
 
 **我的代码会被发到飞书服务器吗？**
 Bridge 只把 AI 生成的文本和活动摘要发到飞书。你的源代码留在本地 — 只有代理的输出和你的消息经过飞书 API。
+
+---
+
+## 特别致谢
+
+特别感谢 [op7418/Claude-to-IM-skill](https://github.com/op7418/Claude-to-IM-skill)。
+
+本项目受该项目启发，并在这个方向上做了面向飞书/Lark 的二次 vibe 和收敛实现。
 
 ---
 

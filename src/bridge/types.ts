@@ -3,9 +3,7 @@ import type { ClaudePermissionMode } from '../runtime/claude-mode.js';
 /**
  * Bridge system types — shared across all bridge modules.
  *
- * The bridge connects external IM channels (Telegram, Discord, Slack)
- * to CodePilot chat sessions, allowing users to interact with Claude
- * from their preferred messaging platform.
+ * The bridge connects Feishu/Lark chats to local Claude/Codex sessions.
  */
 
 // Re-export bridge-local types from host.ts so consumers can import from one place
@@ -16,7 +14,7 @@ export type { ActivityEvent, FileAttachment } from './host.js';
 /**
  * Channel type identifier.
  * Extensible — any string is valid so new adapters can register without
- * modifying this definition. Well-known values: 'telegram', 'discord', 'slack'.
+ * modifying this definition. The built-in adapter uses `feishu`.
  */
 export type ChannelType = string;
 export const DEFAULT_CHANNEL_INSTANCE_ID = 'default';
@@ -74,7 +72,7 @@ export interface InboundMessage {
 export interface OutboundMessage {
   /** Target address */
   address: ChannelAddress;
-  /** Message text (may contain HTML for Telegram) */
+  /** Message text for the target adapter */
   text: string;
   /** Parse mode for the text */
   parseMode?: 'HTML' | 'Markdown' | 'plain';
@@ -229,9 +227,5 @@ export interface StreamingPreviewState {
 
 /** Platform-specific message length limits */
 export const PLATFORM_LIMITS: Record<string, number> = {
-  telegram: 4096,
-  discord: 2000,
-  slack: 40000,
   feishu: 30000,
-  qq: 2000,
 };

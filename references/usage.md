@@ -26,7 +26,7 @@ agents-to-im stop
 
 ## setup
 
-`setup` 不再是多平台向导，而是 Feishu-only 配置说明：
+`setup` 现在就是飞书/Lark 配置说明：
 
 ```bash
 agents-to-im
