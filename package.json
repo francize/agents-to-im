@@ -29,6 +29,7 @@
     "build": "node scripts/build.js",
     "build:cli": "node scripts/build-cli.js",
     "build:all": "node scripts/build.js && node scripts/build-cli.js",
+    "prepare": "npm run build:all",
     "typecheck": "tsc --noEmit",
     "dev": "tsx src/main.ts",
     "test": "CTI_HOME=$(mktemp -d) node --test --test-concurrency=1 --import tsx --test-timeout=15000 src/__tests__/*.test.ts"
