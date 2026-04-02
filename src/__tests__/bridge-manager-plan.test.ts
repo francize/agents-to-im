@@ -106,6 +106,12 @@ function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
   });
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 describe('bridge-manager plan workflow', () => {
   let adapter: PlanStubAdapter;
 
@@ -383,7 +389,7 @@ describe('bridge-manager plan workflow', () => {
     await waitFor(() => adapter.sent.length === 1);
 
     const workflow = store.getPlanWorkflow('wf-stop-workflow');
-    assert.match(adapter.sent[0].text || '', /Stopping current task/);
+    assert.equal(adapter.sent[0].text, 'Current task stopped.');
     assert.equal(workflow?.status, 'awaiting_input');
     assert.equal(workflow?.requestText, '');
     assert.equal(workflow?.activeAttemptId, '');
@@ -396,6 +402,202 @@ describe('bridge-manager plan workflow', () => {
         interrupt: true,
       },
     }]);
+    await sleep(50);
+    assert.equal(adapter.sent.length, 1);
+  });
+
+  it('sends a completion reply after /stop aborts an active task', async () => {
+    const store = new JsonFileStore(makeSettings());
+    let resolveStreamStarted: (() => void) | null = null;
+    const streamStarted = new Promise<void>((resolve) => {
+      resolveStreamStarted = resolve;
+    });
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: (params: Record<string, unknown>) => new ReadableStream<string>({
+          start(controller) {
+            resolveStreamStarted?.();
+            const abortController = params.abortController as AbortController | undefined;
+            assert.ok(abortController);
+            abortController.signal.addEventListener('abort', () => {
+              setTimeout(() => {
+                controller.error(new DOMException('Aborted', 'AbortError'));
+              }, 10);
+            }, { once: true });
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-stop-active',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5-codex',
+    });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-stop-active-1',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-stop-active' },
+      text: '开始执行',
+      timestamp: Date.now(),
+    });
+
+    await streamStarted;
+
+    adapter.push({
+      messageId: 'msg-stop-active-2',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-stop-active' },
+      text: '/stop',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length === 2);
+
+    assert.equal(adapter.sent[0].text, 'Stopping current task...');
+    assert.equal(adapter.sent[1].text, 'Current task stopped.');
+    assert.equal(
+      adapter.sent.some((message) => (message.text || '').includes('<b>Error:</b>')),
+      false,
+    );
+  });
+
+  it('deduplicates the async completion reply across repeated /stop commands', async () => {
+    const store = new JsonFileStore(makeSettings());
+    let resolveStreamStarted: (() => void) | null = null;
+    const streamStarted = new Promise<void>((resolve) => {
+      resolveStreamStarted = resolve;
+    });
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: (params: Record<string, unknown>) => new ReadableStream<string>({
+          start(controller) {
+            resolveStreamStarted?.();
+            const abortController = params.abortController as AbortController | undefined;
+            assert.ok(abortController);
+            abortController.signal.addEventListener('abort', () => {
+              setTimeout(() => {
+                controller.error(new DOMException('Aborted', 'AbortError'));
+              }, 20);
+            }, { once: true });
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-stop-repeat',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5-codex',
+    });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-stop-repeat-1',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-stop-repeat' },
+      text: '开始执行',
+      timestamp: Date.now(),
+    });
+
+    await streamStarted;
+
+    adapter.push({
+      messageId: 'msg-stop-repeat-2',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-stop-repeat' },
+      text: '/stop',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length === 1);
+
+    adapter.push({
+      messageId: 'msg-stop-repeat-3',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-stop-repeat' },
+      text: '/stop',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length === 3);
+
+    assert.equal(adapter.sent[0].text, 'Stopping current task...');
+    assert.equal(adapter.sent[1].text, 'Stopping current task...');
+    assert.equal(
+      adapter.sent.filter((message) => message.text === 'Current task stopped.').length,
+      1,
+    );
+  });
+
+  it('does not emit stop completion text for normal successful turns', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text', data: '正常完成。' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-normal-stop-1' }) })}\n`);
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-no-stop',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5-codex',
+    });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-no-stop-1',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-no-stop' },
+      text: '正常执行',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length === 1);
+
+    assert.equal(adapter.sent[0].text, '正常完成。');
+    assert.equal(
+      adapter.sent.some((message) => message.text === 'Current task stopped.'),
+      false,
+    );
   });
 
   it('drops stale queued plan attempts before they reach the LLM', async () => {

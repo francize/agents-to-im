@@ -130,6 +130,47 @@ export function interruptActiveTask(sessionId: string): boolean {
   return true;
 }
 
+function hasPendingStopFeedback(sessionId: string): boolean {
+  return getState().pendingStopFeedback.has(sessionId);
+}
+
+function ensurePendingStopFeedback(
+  sessionId: string,
+  address: ChannelAddress,
+  replyToMessageId?: string,
+): void {
+  const state = getState();
+  if (state.pendingStopFeedback.has(sessionId)) return;
+  state.pendingStopFeedback.set(sessionId, {
+    address,
+    replyToMessageId,
+  });
+}
+
+function clearPendingStopFeedback(sessionId: string): void {
+  getState().pendingStopFeedback.delete(sessionId);
+}
+
+async function sendPendingStopCompletion(
+  adapter: BaseChannelAdapter,
+  sessionId: string,
+): Promise<void> {
+  const pending = getState().pendingStopFeedback.get(sessionId);
+  if (!pending) return;
+  try {
+    await deliver(adapter, {
+      address: pending.address,
+      text: 'Current task stopped.',
+      parseMode: 'plain',
+      replyToMessageId: pending.replyToMessageId,
+    }, { sessionId });
+  } catch (error) {
+    console.warn(`[bridge-manager] Failed to send stop completion for session ${sessionId}:`, error);
+  } finally {
+    clearPendingStopFeedback(sessionId);
+  }
+}
+
 function releasePlanWorkflowAfterStop(
   binding: import('./types.js').ChannelBinding,
   address: InboundMessage['address'],
@@ -660,6 +701,11 @@ interface AdapterMeta {
   lastError: string | null;
 }
 
+interface PendingStopFeedback {
+  address: ChannelAddress;
+  replyToMessageId?: string;
+}
+
 interface BridgeManagerState {
   adapters: Map<string, BaseChannelAdapter>;
   adapterMeta: Map<string, AdapterMeta>;
@@ -667,6 +713,7 @@ interface BridgeManagerState {
   startedAt: string | null;
   loopAborts: Map<string, AbortController>;
   activeTasks: Map<string, AbortController>;
+  pendingStopFeedback: Map<string, PendingStopFeedback>;
   /** Per-session processing chains for concurrency control */
   sessionLocks: Map<string, Promise<void>>;
   autoStartChecked: boolean;
@@ -682,6 +729,7 @@ function getState(): BridgeManagerState {
       startedAt: null,
       loopAborts: new Map(),
       activeTasks: new Map(),
+      pendingStopFeedback: new Map(),
       sessionLocks: new Map(),
       autoStartChecked: false,
     };
@@ -689,6 +737,9 @@ function getState(): BridgeManagerState {
   // Backfill sessionLocks for states created before this field existed
   if (!g[GLOBAL_KEY].sessionLocks) {
     g[GLOBAL_KEY].sessionLocks = new Map();
+  }
+  if (!g[GLOBAL_KEY].pendingStopFeedback) {
+    g[GLOBAL_KEY].pendingStopFeedback = new Map();
   }
   return g[GLOBAL_KEY];
 }
@@ -802,6 +853,7 @@ export async function stop(): Promise<void> {
     abort.abort();
   }
   state.loopAborts.clear();
+  state.pendingStopFeedback.clear();
 
   // Stop all adapters
   for (const [adapterId, adapter] of state.adapters) {
@@ -1895,6 +1947,8 @@ async function handleMessage(
       }
       await adapter.resolveStructuredInputRequest?.(requestId);
     }, onResponseSegment, handleActivityEvent);
+    const stopRequestedByUser =
+      taskAbort.signal.aborted && hasPendingStopFeedback(binding.codepilotSessionId);
 
     // Send response text — render via channel-appropriate format
     let responseDelivery: SendResult | null = null;
@@ -1925,7 +1979,7 @@ async function handleMessage(
           previewClosed = true;
           hasVisibleAssistantOutput = true;
         }
-      } else if (result.hasError) {
+      } else if (result.hasError && !stopRequestedByUser) {
         const errorResponse: OutboundMessage = {
           address: msg.address,
           text: `<b>Error:</b> ${escapeHtml(result.errorMessage)}`,
@@ -1963,7 +2017,7 @@ async function handleMessage(
           adapter.endPreview?.(msg.address, previewState.draftId);
           previewClosed = true;
         }
-      } else if (result.hasError) {
+      } else if (result.hasError && !stopRequestedByUser) {
         const errorResponse: OutboundMessage = {
           address: msg.address,
           text: `<b>Error:</b> ${escapeHtml(result.errorMessage)}`,
@@ -2012,7 +2066,7 @@ async function handleMessage(
       if (responseDelivery.ok) {
         hasVisibleAssistantOutput = true;
       }
-    } else if (result.hasError) {
+    } else if (result.hasError && !stopRequestedByUser) {
       const errorResponse: OutboundMessage = {
         address: msg.address,
         text: `<b>Error:</b> ${escapeHtml(result.errorMessage)}`,
@@ -2207,6 +2261,11 @@ async function handleMessage(
     state.activeTasks.delete(binding.codepilotSessionId);
     // Notify adapter that message processing ended
     adapter.onMessageEnd?.(msg.address);
+    if (taskAbort.signal.aborted) {
+      await sendPendingStopCompletion(adapter, binding.codepilotSessionId);
+    } else {
+      clearPendingStopFeedback(binding.codepilotSessionId);
+    }
     // Commit the offset only after full processing (success or failure)
     ack();
   }
@@ -2365,11 +2424,19 @@ async function handleCommand(
 
     case '/stop': {
       const binding = router.resolve(msg.address);
+      const alreadyStopping = hasPendingStopFeedback(binding.codepilotSessionId);
       const stoppedTask = interruptActiveTask(binding.codepilotSessionId);
+      if (stoppedTask) {
+        ensurePendingStopFeedback(binding.codepilotSessionId, msg.address, msg.messageId);
+      }
       const releasedWorkflow = releasePlanWorkflowAfterStop(binding, msg.address);
-      response = (stoppedTask || releasedWorkflow)
-        ? 'Stopping current task...'
-        : 'No task is currently running.';
+      if (stoppedTask || alreadyStopping) {
+        response = 'Stopping current task...';
+      } else if (releasedWorkflow) {
+        response = 'Current task stopped.';
+      } else {
+        response = 'No task is currently running.';
+      }
       historySessionId = binding.codepilotSessionId;
       shouldAppendLocalHistory = true;
       break;
