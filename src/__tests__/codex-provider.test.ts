@@ -504,6 +504,105 @@ describe('CodexProvider', () => {
     });
   });
 
+  it('falls back to thread/read to resolve an in-flight turn before interrupting', async () => {
+    const { CodexProvider } = await import('../providers/codex/codex-provider.js');
+    const fake = new FakeCodexClient({
+      'thread/start': async () => ({ thread: { id: 'thread-stop-fallback' }, model: 'gpt-5.4' }),
+      'turn/start': async () => {
+        queueMicrotask(() => {
+          fake.emit({
+            kind: 'notification',
+            method: 'item/agentMessage/delta',
+            params: {
+              threadId: 'thread-stop-fallback',
+              turnId: 'turn-stop-fallback',
+              itemId: 'agent-stop-fallback',
+              delta: '正在处理...',
+            },
+          });
+        });
+        return { turn: {} };
+      },
+      'thread/read': async () => ({
+        thread: {
+          turns: [
+            { id: 'turn-stop-fallback', status: 'in_progress' },
+          ],
+        },
+      }),
+      'turn/interrupt': async (params) => {
+        queueMicrotask(() => {
+          fake.emit({
+            kind: 'notification',
+            method: 'turn/completed',
+            params: {
+              threadId: (params as { threadId: string }).threadId,
+              turn: { id: (params as { turnId: string }).turnId, error: null },
+            },
+          });
+        });
+        return {};
+      },
+    });
+
+    const provider = new CodexProvider();
+    (provider as any).client = fake;
+
+    const abortController = new AbortController();
+    const stream = provider.streamChat({
+      prompt: '继续执行',
+      sessionId: 'session-stop-fallback',
+      model: 'gpt-5.4',
+      abortController,
+    });
+
+    await waitFor(() => fake.calls.some((call) => call.method === 'turn/start'));
+    abortController.abort();
+
+    await collectStream(stream);
+
+    assert.equal(fake.calls.some((call) => call.method === 'thread/read'), true);
+    const interruptCall = fake.calls.find((call) => call.method === 'turn/interrupt');
+    assert.deepEqual(interruptCall?.params, {
+      threadId: 'thread-stop-fallback',
+      turnId: 'turn-stop-fallback',
+    });
+  });
+
+  it('treats a missing in-flight turn during interrupt fallback as already stopped', async () => {
+    const { CodexProvider } = await import('../providers/codex/codex-provider.js');
+    const fake = new FakeCodexClient({
+      'thread/start': async () => ({ thread: { id: 'thread-stop-missing' }, model: 'gpt-5.4' }),
+      'turn/start': async () => ({ turn: {} }),
+      'thread/read': async () => ({
+        thread: {
+          turns: [
+            { id: 'turn-old', status: 'completed' },
+          ],
+        },
+      }),
+    });
+
+    const provider = new CodexProvider();
+    (provider as any).client = fake;
+
+    const abortController = new AbortController();
+    const stream = provider.streamChat({
+      prompt: '继续执行',
+      sessionId: 'session-stop-missing',
+      model: 'gpt-5.4',
+      abortController,
+    });
+
+    await waitFor(() => fake.calls.some((call) => call.method === 'turn/start'));
+    abortController.abort();
+
+    await collectStream(stream);
+
+    assert.equal(fake.calls.some((call) => call.method === 'thread/read'), true);
+    assert.equal(fake.calls.some((call) => call.method === 'turn/interrupt'), false);
+  });
+
   it('emits tool_activity events for MCP tool calls so channel adapters can render streaming cards', async () => {
     const { CodexProvider } = await import('../providers/codex/codex-provider.js');
     const fake = new FakeCodexClient({

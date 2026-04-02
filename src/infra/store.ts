@@ -280,7 +280,6 @@ export class JsonFileStore implements BridgeStore {
     const legacyTitleStatus = typeof record.title_status === 'string' ? record.title_status : undefined;
     if (!extPartial.runtime) {
       extPartial.runtime = (legacyRuntime as RuntimeName)
-        || (this.settings.get('bridge_default_runtime') as RuntimeName)
         || 'claude';
     }
     if (!extPartial.title && legacyTitle) extPartial.title = legacyTitle;
@@ -306,7 +305,7 @@ export class JsonFileStore implements BridgeStore {
     const record = binding as ChannelBinding & Record<string, unknown>;
     const mode = record.mode === 'plan' || record.mode === 'ask' || record.mode === 'code'
       ? record.mode
-      : ((this.settings.get('bridge_default_mode') as 'code' | 'plan' | 'ask') || 'code');
+      : 'code';
     const claudePermissionMode = normalizeClaudePermissionMode(
       typeof record.claudePermissionMode === 'string' ? record.claudePermissionMode : undefined,
     );
@@ -339,6 +338,16 @@ export class JsonFileStore implements BridgeStore {
         ...workflow.address,
         channelInstanceId: resolveChannelInstanceId(workflow.address || { channelInstanceId }),
       },
+      ...(workflow.pendingAddress
+        ? {
+            pendingAddress: {
+              ...workflow.pendingAddress,
+              channelInstanceId: resolveChannelInstanceId(
+                workflow.pendingAddress || { channelInstanceId },
+              ),
+            },
+          }
+        : {}),
     };
   }
 
@@ -395,7 +404,7 @@ export class JsonFileStore implements BridgeStore {
       sdkSessionId: '',
       workingDirectory: data.workingDirectory,
       model: data.model,
-      mode: (this.settings.get('bridge_default_mode') as 'code' | 'plan' | 'ask') || 'code',
+      mode: 'code',
       ...(data.claudePermissionMode !== undefined
         ? { claudePermissionMode: data.claudePermissionMode }
         : {}),
@@ -446,7 +455,7 @@ export class JsonFileStore implements BridgeStore {
       model,
       system_prompt: systemPrompt,
       ext: {
-        runtime: (this.settings.get('bridge_default_runtime') as RuntimeName) || 'claude',
+        runtime: 'claude',
         titleStatus: 'pending',
       },
     };
@@ -466,7 +475,7 @@ export class JsonFileStore implements BridgeStore {
       params.model,
       params.systemPrompt,
       params.cwd,
-      this.settings.get('bridge_default_mode') || 'code',
+      'code',
     ) as SessionRecord;
     session.ext = {
       runtime: params.runtime,
@@ -560,7 +569,7 @@ export class JsonFileStore implements BridgeStore {
     if (!session) return;
     session.ext = {
       ...(session.ext || {
-        runtime: (this.settings.get('bridge_default_runtime') as RuntimeName) || 'claude',
+        runtime: 'claude',
         titleStatus: 'pending',
       }),
       codexThreadId: threadId,
@@ -586,7 +595,7 @@ export class JsonFileStore implements BridgeStore {
     if (!session) return null;
     session.ext = {
       ...(session.ext || {
-        runtime: (this.settings.get('bridge_default_runtime') as RuntimeName) || 'claude',
+        runtime: 'claude',
         titleStatus: 'pending',
       }),
       ...updates,
@@ -599,7 +608,7 @@ export class JsonFileStore implements BridgeStore {
     return this.sessions.get(sessionId)?.sdk_session_id || '';
   }
 
-  migrateLegacySessions(defaultRuntime: RuntimeName): boolean {
+  migrateLegacySessions(defaultRuntime: RuntimeName = 'claude'): boolean {
     let changed = false;
     for (const session of this.sessions.values()) {
       if (!session.ext?.runtime) {
@@ -761,6 +770,12 @@ export class JsonFileStore implements BridgeStore {
       ...(workflow.planText ? { planText: workflow.planText } : {}),
       ...(workflow.planFilePath ? { planFilePath: workflow.planFilePath } : {}),
       ...(workflow.allowedPrompts ? { allowedPrompts: workflow.allowedPrompts } : {}),
+      ...(typeof workflow.activeAttemptId === 'string' ? { activeAttemptId: workflow.activeAttemptId } : {}),
+      ...(typeof workflow.pendingFollowUpText === 'string' ? { pendingFollowUpText: workflow.pendingFollowUpText } : {}),
+      ...(workflow.pendingFollowUpAttachments ? { pendingFollowUpAttachments: workflow.pendingFollowUpAttachments } : {}),
+      ...(typeof workflow.pendingRequestMessageId === 'string' ? { pendingRequestMessageId: workflow.pendingRequestMessageId } : {}),
+      ...(workflow.pendingAddress ? { pendingAddress: workflow.pendingAddress } : {}),
+      ...(typeof workflow.pendingRouteKey === 'string' ? { pendingRouteKey: workflow.pendingRouteKey } : {}),
       resolved: workflow.resolved ?? existing?.resolved ?? false,
       createdAt: existing?.createdAt || now(),
       updatedAt: now(),

@@ -68,13 +68,6 @@ This project no longer has a multi-platform setup wizard. Setup means:
 3. Explain optional fields:
    - `CTI_FEISHU_DOMAIN`
    - `CTI_FEISHU_ALLOWED_USERS`
-   - `CTI_FEISHU_TOOL_OUTPUT_CARDS`
-   - `CTI_FEISHU_AUTO_IMAGE_SEND`
-   - `CTI_FEISHU_LABEL`
-   - `CTI_CLAUDE_DEFAULT_MODEL`
-   - `CTI_CODEX_DEFAULT_MODEL`
-   - `CTI_CLAUDE_CODE_EXECUTABLE`
-   - `CTI_AUTO_APPROVE`
    - external `CODEX_HOME` override if the user stores Codex config outside `~/.codex`
 4. Point the user to `references/setup-guides.md` for the one-shot Feishu scopes import JSON.
 5. Remind the user to enable Feishu long connection events:

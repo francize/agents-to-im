@@ -199,7 +199,7 @@ export interface PermissionLinkRecord {
   suggestions: string;
 }
 
-export type PlanWorkflowStatus = 'awaiting_input' | 'planning' | 'awaiting_confirmation';
+export type PlanWorkflowStatus = 'awaiting_input' | 'planning' | 'interrupting' | 'awaiting_confirmation';
 
 export interface PlanWorkflowInput {
   workflowId?: string;
@@ -221,6 +221,12 @@ export interface PlanWorkflowInput {
   planText?: string;
   planFilePath?: string;
   allowedPrompts?: ClaudePlanAllowedPrompt[] | null;
+  activeAttemptId?: string;
+  pendingFollowUpText?: string;
+  pendingFollowUpAttachments?: FileAttachment[];
+  pendingRequestMessageId?: string;
+  pendingAddress?: ChannelAddress;
+  pendingRouteKey?: string;
   resolved?: boolean;
 }
 

@@ -19,12 +19,8 @@ describe('maskSecret', () => {
 describe('configToSettings', () => {
   const base: Config = {
     defaultWorkDir: '/tmp/test',
-    defaultMode: 'code',
     feishu: {
       id: 'default',
-      label: '默认 Bot',
-      toolOutputCards: true,
-      autoImageSend: true,
     },
   };
 
@@ -32,8 +28,6 @@ describe('configToSettings', () => {
     const settings = configToSettings(base);
     assert.equal(settings.get('remote_bridge_enabled'), 'true');
     assert.equal(settings.get('bridge_feishu_enabled'), 'true');
-    assert.equal(settings.get('bridge_feishu_tool_output_cards'), 'true');
-    assert.equal(settings.get('bridge_feishu_auto_image_send'), 'true');
   });
 
   it('maps feishu credentials and allowlist', () => {
@@ -41,13 +35,10 @@ describe('configToSettings', () => {
       ...base,
       feishu: {
         id: 'default',
-        label: '默认 Bot',
         appId: 'app-id',
         appSecret: 'app-secret',
         domain: 'lark',
         allowedUsers: ['ou_1', 'ou_2'],
-        toolOutputCards: true,
-        autoImageSend: true,
       },
     });
     assert.equal(settings.get('bridge_feishu_app_id'), 'app-id');
@@ -61,68 +52,24 @@ describe('configToSettings', () => {
       ...base,
       feishu: {
         id: 'default',
-        label: 'Main Bot',
         appId: 'main-app',
         appSecret: 'main-secret',
-        toolOutputCards: false,
-        autoImageSend: false,
       },
     });
     assert.equal(settings.get('bridge_feishu_app_id'), 'main-app');
     assert.equal(settings.get('bridge_feishu_app_secret'), 'main-secret');
-    assert.equal(settings.get('bridge_feishu_tool_output_cards'), 'false');
-    assert.equal(settings.get('bridge_feishu_auto_image_send'), 'false');
     assert.equal(settings.has('bridge_feishu_profile_ids'), false);
     assert.equal(settings.has('bridge_runtime_claude_feishu_profile'), false);
     assert.equal(settings.has('bridge_runtime_codex_feishu_profile'), false);
   });
 
-  it('maps default workdir and mode', () => {
+  it('maps default workdir', () => {
     const settings = configToSettings(base);
     assert.equal(settings.get('bridge_default_work_dir'), '/tmp/test');
-    assert.equal(settings.get('bridge_default_mode'), 'code');
-    assert.equal(settings.get('bridge_default_runtime'), 'claude');
-  });
-
-  it('maps per-runtime default models', () => {
-    const settings = configToSettings({
-      ...base,
-      claudeDefaultModel: 'claude-sonnet-4-6',
-      codexDefaultModel: 'gpt-5-codex',
-    });
-    assert.equal(settings.get('bridge_default_model'), 'claude-sonnet-4-6');
-    assert.equal(settings.get('default_model'), 'claude-sonnet-4-6');
-    assert.equal(settings.get('bridge_claude_default_model'), 'claude-sonnet-4-6');
-    assert.equal(settings.get('bridge_codex_default_model'), 'gpt-5-codex');
-  });
-
-  it('preserves legacy runtime for session migration', () => {
-    const settings = configToSettings({
-      ...base,
-      legacyRuntime: 'codex',
-    });
-    assert.equal(settings.get('bridge_default_runtime'), 'codex');
-  });
-
-  it('allows disabling feishu tool output cards explicitly', () => {
-    const settings = configToSettings({
-      ...base,
-      feishu: {
-        ...base.feishu,
-        toolOutputCards: false,
-      },
-    });
-    assert.equal(settings.get('bridge_feishu_tool_output_cards'), 'false');
-  });
-
-  it('allows disabling automatic feishu image sends explicitly', () => {
-    const settings = configToSettings({
-      ...base,
-      feishu: {
-        ...base.feishu,
-        autoImageSend: false,
-      },
-    });
-    assert.equal(settings.get('bridge_feishu_auto_image_send'), 'false');
+    assert.equal(settings.has('bridge_default_mode'), false);
+    assert.equal(settings.has('bridge_default_runtime'), false);
+    assert.equal(settings.has('bridge_default_model'), false);
+    assert.equal(settings.has('bridge_claude_default_model'), false);
+    assert.equal(settings.has('bridge_codex_default_model'), false);
   });
 });

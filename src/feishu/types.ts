@@ -231,6 +231,7 @@ export interface AdapterContext {
     workflowId: string,
     requestText: string,
     options?: {
+      attemptId?: string;
       promptText?: string;
       attachments?: FileAttachment[];
     },
@@ -240,7 +241,10 @@ export interface AdapterContext {
     messageId: string,
     workflowId: string,
     requestText: string,
-    attachments?: FileAttachment[],
+    options?: {
+      attemptId?: string;
+      attachments?: FileAttachment[];
+    },
   ): InboundMessage;
   buildPlanExecutionInbound(
     address: ChannelAddress,
@@ -248,6 +252,7 @@ export interface AdapterContext {
     workflowId: string,
     requestText: string,
     options?: {
+      attemptId?: string;
       permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions';
       planText?: string;
     },

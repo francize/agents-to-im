@@ -8,7 +8,7 @@
  */
 
 import fs from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -100,6 +100,72 @@ function clearPrimeTimer(state: StreamingPreviewState): void {
 
 function getPlanWorkflowMeta(msg: InboundMessage): NonNullable<InboundMessage['bridgeMeta']>['planWorkflow'] | null {
   return msg.bridgeMeta?.planWorkflow || null;
+}
+
+function routeKeyForAddress(address: InboundMessage['address']): string {
+  return address.threadId
+    ? `${address.chatId}:thread:${address.threadId}`
+    : `${address.chatId}:main`;
+}
+
+function createPlanAttemptId(): string {
+  return randomUUID();
+}
+
+function isPlanAttemptCurrent(
+  meta: NonNullable<InboundMessage['bridgeMeta']>['planWorkflow'] | null,
+): boolean {
+  if (!meta?.workflowId || !meta.attemptId) return true;
+  const { store } = getBridgeContext();
+  const workflow = store.getPlanWorkflow(meta.workflowId);
+  return !!workflow && workflow.activeAttemptId === meta.attemptId;
+}
+
+export function interruptActiveTask(sessionId: string): boolean {
+  const state = getState();
+  const taskAbort = state.activeTasks.get(sessionId);
+  if (!taskAbort) return false;
+  taskAbort.abort();
+  state.activeTasks.delete(sessionId);
+  return true;
+}
+
+function releasePlanWorkflowAfterStop(
+  binding: import('./types.js').ChannelBinding,
+  address: InboundMessage['address'],
+): boolean {
+  const { store, permissions } = getBridgeContext();
+  const workflow = store.getActivePlanWorkflowByBinding(binding.id);
+  if (!workflow) return false;
+  if (workflow.approvalRequestId) {
+    permissions.resolvePendingPermission?.(workflow.approvalRequestId, {
+      behavior: 'deny',
+      message: 'Interrupted by /stop',
+      interrupt: true,
+    });
+  }
+  store.updatePlanWorkflow(workflow.workflowId, {
+    status: 'awaiting_input',
+    requestText: '',
+    address,
+    routeKey: routeKeyForAddress(address),
+    requestMessageId: '',
+    planMessageId: '',
+    actionCardMessageId: '',
+    actionCardOpenMessageId: '',
+    approvalRequestId: '',
+    planText: '',
+    planFilePath: '',
+    allowedPrompts: null,
+    activeAttemptId: '',
+    pendingFollowUpText: '',
+    pendingFollowUpAttachments: [],
+    pendingRequestMessageId: '',
+    pendingAddress: undefined,
+    pendingRouteKey: '',
+    resolved: true,
+  });
+  return true;
 }
 
 function isCodexRuntime(sessionId: string): boolean {
@@ -1040,6 +1106,7 @@ async function handleMessage(
     const requestText = text || (hasAttachments ? 'Describe this image.' : '');
     if (isCodexRuntime(binding.codepilotSessionId)) {
       if (binding.mode !== 'plan') return null;
+      const attemptId = createPlanAttemptId();
       const workflow = store.upsertPlanWorkflow({
         bindingId: binding.id,
         channelType: adapter.channelType,
@@ -1050,15 +1117,20 @@ async function handleMessage(
         previousMode: binding.mode,
         requestText,
         address: msg.address,
-        routeKey: msg.address.threadId
-          ? `${msg.address.chatId}:thread:${msg.address.threadId}`
-          : `${msg.address.chatId}:main`,
+        routeKey: routeKeyForAddress(msg.address),
         requestMessageId: msg.messageId,
+        activeAttemptId: attemptId,
+        pendingFollowUpText: '',
+        pendingFollowUpAttachments: [],
+        pendingRequestMessageId: '',
+        pendingAddress: undefined,
+        pendingRouteKey: '',
         resolved: true,
       });
       return {
         kind: 'native_plan_request' as const,
         workflowId: workflow.workflowId,
+        attemptId,
         promptText: requestText,
         storedUserText: requestText,
         permissionMode: 'plan' as const,
@@ -1066,6 +1138,7 @@ async function handleMessage(
       };
     }
     if (resolveClaudePermissionMode(binding) !== 'plan') return null;
+    const attemptId = createPlanAttemptId();
     const workflow = store.upsertPlanWorkflow({
       bindingId: binding.id,
       channelType: adapter.channelType,
@@ -1076,25 +1149,55 @@ async function handleMessage(
       previousMode: binding.mode,
       requestText,
       address: msg.address,
-      routeKey: msg.address.threadId
-        ? `${msg.address.chatId}:thread:${msg.address.threadId}`
-        : `${msg.address.chatId}:main`,
+      routeKey: routeKeyForAddress(msg.address),
       requestMessageId: msg.messageId,
+      activeAttemptId: attemptId,
+      pendingFollowUpText: '',
+      pendingFollowUpAttachments: [],
+      pendingRequestMessageId: '',
+      pendingAddress: undefined,
+      pendingRouteKey: '',
       resolved: true,
     });
     return {
       kind: 'plan_request' as const,
       workflowId: workflow.workflowId,
+      attemptId,
       promptText: requestText,
       storedUserText: requestText,
       permissionMode: 'plan' as const,
     };
   })();
+  if (effectivePlanWorkflowMeta?.attemptId && !isPlanAttemptCurrent(effectivePlanWorkflowMeta)) {
+    ack();
+    return;
+  }
+  if (effectivePlanWorkflowMeta?.workflowId && effectivePlanWorkflowMeta.attemptId) {
+    const workflow = store.getPlanWorkflow(effectivePlanWorkflowMeta.workflowId);
+    if (
+      workflow
+      && workflow.activeAttemptId === effectivePlanWorkflowMeta.attemptId
+      && workflow.status === 'interrupting'
+    ) {
+      store.updatePlanWorkflow(workflow.workflowId, {
+        status: 'planning',
+        requestText: effectivePlanWorkflowMeta.storedUserText || text || '',
+        address: msg.address,
+        routeKey: routeKeyForAddress(msg.address),
+        requestMessageId: msg.messageId,
+        pendingFollowUpText: '',
+        pendingFollowUpAttachments: [],
+        pendingRequestMessageId: '',
+        pendingAddress: undefined,
+        pendingRouteKey: '',
+        resolved: true,
+      });
+    }
+  }
   const turnStartedAtMs = Date.now();
   const sentAutoImagePaths = new Set<string>();
   const sentInlineToolResultImageDigests = new Set<string>();
-  const autoImageSendEnabled = adapter.allowsAutoImageSend?.()
-    ?? (store.getSetting('bridge_feishu_auto_image_send') !== 'false');
+  const autoImageSendEnabled = !!adapter.sendImage;
 
   // Notify adapter that message processing is starting (e.g., typing indicator)
   adapter.onMessageStart?.(msg.address);
@@ -1141,6 +1244,7 @@ async function handleMessage(
   const activityVersionBySignature = new Map<string, number>();
   const activitySignatureById = new Map<string, string>();
   let hasVisibleProgressCard = false;
+  const planAttemptIsCurrent = (): boolean => isPlanAttemptCurrent(effectivePlanWorkflowMeta);
 
   const compactActivityText = (value: string | undefined): string => (value || '').replace(/\s+/g, ' ').trim();
 
@@ -1389,6 +1493,7 @@ async function handleMessage(
   };
 
   const maybeSendAutoImages = async (event: ActivityEvent): Promise<void> => {
+    if (!planAttemptIsCurrent()) return;
     if (!autoImageSendEnabled || !adapter.sendImage) return;
     if (event.kind !== 'command_execution' && event.kind !== 'file_change') return;
     if (event.status !== 'completed') return;
@@ -1431,6 +1536,7 @@ async function handleMessage(
   };
 
   const maybeSendInlineToolResultImages = async (blocks: MessageContentBlock[]): Promise<void> => {
+    if (!planAttemptIsCurrent()) return;
     if (!autoImageSendEnabled || !adapter.sendImage) return;
 
     const images = extractInlineToolResultImages(blocks);
@@ -1467,6 +1573,7 @@ async function handleMessage(
   };
 
   const handleActivityEvent = async (event: ActivityEvent): Promise<void> => {
+    if (!planAttemptIsCurrent()) return;
     if (event.kind !== 'context_usage') {
       await maybeSendAutoImages(event);
     }
@@ -1495,6 +1602,7 @@ async function handleMessage(
 
   // Build the onPartialText callback (or undefined if preview not supported)
   const onPartialText = (previewState && streamCfg) ? (fullText: string) => {
+    if (!planAttemptIsCurrent()) return;
     const ps = previewState!;
     const cfg = streamCfg!;
     if (ps.degraded) return;
@@ -1546,6 +1654,7 @@ async function handleMessage(
   const onResponseSegment = (previewState && (
     previewFinalDelivery === 'separate_message' || previewFinalizesPerSegment
   )) ? async (segmentText: string) => {
+    if (!planAttemptIsCurrent()) return;
     const normalized = segmentText.trim();
     if (!normalized) return;
     const ps = previewState!;
@@ -1590,6 +1699,7 @@ async function handleMessage(
       approvalRequestId: string,
       planFilePath: string,
     ): Promise<boolean> => {
+      if (!planAttemptIsCurrent()) return false;
       const workflow = store.getPlanWorkflow(workflowId);
       if (!workflow) return false;
       hasVisibleProgressCard = true;
@@ -1635,6 +1745,14 @@ async function handleMessage(
     };
 
     const result = await engine.processMessage(binding, promptText, async (perm) => {
+      if (!planAttemptIsCurrent()) {
+        getBridgeContext().permissions.resolvePendingPermission?.(perm.permissionRequestId, {
+          behavior: 'deny',
+          message: 'Interrupted by a newer PLAN follow-up',
+          interrupt: true,
+        });
+        return;
+      }
       const workflowId = effectivePlanWorkflowMeta?.workflowId;
       const workflow = workflowId ? store.getPlanWorkflow(workflowId) : null;
       const isClaudePlanExit =
@@ -1688,6 +1806,7 @@ async function handleMessage(
       permissionModeOverride: effectivePlanWorkflowMeta?.permissionMode,
       collaborationModeOverride: resolveCodexCollaborationMode(binding, effectivePlanWorkflowMeta),
       onModeChanged: async (mode) => {
+        if (!planAttemptIsCurrent()) return;
         if (isCodexRuntime(binding.codepilotSessionId)) return;
         if (binding.claudePermissionMode === mode) return;
         store.updateChannelBinding(binding.id, { claudePermissionMode: mode, mode: 'code' });
@@ -1699,6 +1818,10 @@ async function handleMessage(
         }
       },
     }, async (request: StructuredInputRequestInfo) => {
+      if (!planAttemptIsCurrent()) {
+        getBridgeContext().permissions.resolvePendingStructuredInput?.(request.requestId, { answers: {} });
+        return;
+      }
       hasVisibleProgressCard = true;
       cancelPendingLightweightActivity();
       if (previewState) {
@@ -1776,6 +1899,9 @@ async function handleMessage(
     // Send response text — render via channel-appropriate format
     let responseDelivery: SendResult | null = null;
     await settlePreview(previewState);
+    if (!planAttemptIsCurrent()) {
+      return;
+    }
     await maybeSendInlineToolResultImages(result.contentBlocks);
     const remainingSegments = result.responseSegments
       .filter((segment) => segment.trim())
@@ -1906,6 +2032,7 @@ async function handleMessage(
         { text: '取消', callbackData: `plan:cancel:${workflowId}` },
       ]],
     ): Promise<boolean> => {
+      if (!planAttemptIsCurrent()) return false;
       const workflow = store.getPlanWorkflow(workflowId);
       if (!workflow) return false;
       cancelPendingLightweightActivity();
@@ -2231,15 +2358,11 @@ async function handleCommand(
 
     case '/stop': {
       const binding = router.resolve(msg.address);
-      const st = getState();
-      const taskAbort = st.activeTasks.get(binding.codepilotSessionId);
-      if (taskAbort) {
-        taskAbort.abort();
-        st.activeTasks.delete(binding.codepilotSessionId);
-        response = 'Stopping current task...';
-      } else {
-        response = 'No task is currently running.';
-      }
+      const stoppedTask = interruptActiveTask(binding.codepilotSessionId);
+      const releasedWorkflow = releasePlanWorkflowAfterStop(binding, msg.address);
+      response = (stoppedTask || releasedWorkflow)
+        ? 'Stopping current task...'
+        : 'No task is currently running.';
       historySessionId = binding.codepilotSessionId;
       shouldAppendLocalHistory = true;
       break;

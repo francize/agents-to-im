@@ -41,13 +41,12 @@ export function createBinding(
     || store.getSetting('bridge_default_work_dir')
     || process.env.HOME
     || '';
-  const defaultModel = store.getSetting('bridge_default_model') || '';
   const defaultProviderId = store.getSetting('bridge_default_provider_id') || '';
 
   const displayName = address.displayName || address.chatId;
   const session = store.createSession(
     `Bridge: ${displayName}`,
-    defaultModel,
+    '',
     undefined,
     defaultCwd,
     'code',
@@ -63,7 +62,7 @@ export function createBinding(
     chatId: address.chatId,
     codepilotSessionId: session.id,
     workingDirectory: defaultCwd,
-    model: defaultModel,
+    model: '',
   });
 }
 

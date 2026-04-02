@@ -168,10 +168,10 @@ async function setupWizard() {
   info(`Create one at: ${c.cyan}https://open.feishu.cn/app${c.reset}`);
   console.log('');
 
-  const existingAppId = existing.CTI_FEISHU_APP_ID || existing.CTI_FEISHU_PROFILE_DEFAULT_APP_ID;
-  const existingAppSecret = existing.CTI_FEISHU_APP_SECRET || existing.CTI_FEISHU_PROFILE_DEFAULT_APP_SECRET;
-  const existingDomain = existing.CTI_FEISHU_DOMAIN || existing.CTI_FEISHU_PROFILE_DEFAULT_DOMAIN || '';
-  const existingAllowedUsers = existing.CTI_FEISHU_ALLOWED_USERS || existing.CTI_FEISHU_PROFILE_DEFAULT_ALLOWED_USERS;
+  const existingAppId = existing.CTI_FEISHU_APP_ID || '';
+  const existingAppSecret = existing.CTI_FEISHU_APP_SECRET || '';
+  const existingDomain = existing.CTI_FEISHU_DOMAIN || '';
+  const existingAllowedUsers = existing.CTI_FEISHU_ALLOWED_USERS || '';
 
   const appId = await ask(rl, 'Feishu App ID', existingAppId);
   const appSecret = await ask(rl, 'Feishu App Secret', existingAppSecret ? '****' + existingAppSecret.slice(-4) : undefined);
@@ -185,14 +185,6 @@ async function setupWizard() {
   const defaultWorkDir = existing.CTI_DEFAULT_WORKDIR || process.cwd();
   const workDir = await ask(rl, 'Default working directory', defaultWorkDir);
 
-  heading('⚙️  Runtime Options');
-
-  const modeIdx = await select(rl, 'Default mode:', ['code (edit files)', 'plan (read-only planning)', 'ask (Q&A only)']);
-  const modes = ['code', 'plan', 'ask'];
-  const mode = modes[modeIdx];
-
-  const autoApprove = await confirm(rl, 'Auto-approve all tool permissions? (not recommended)', false);
-
   // Optional: allowed users
   console.log('');
   const restrictUsers = await confirm(rl, 'Restrict to specific Feishu users?', false);
@@ -200,15 +192,6 @@ async function setupWizard() {
   if (restrictUsers) {
     allowedUsers = await ask(rl, 'Allowed user IDs (comma-separated)', existingAllowedUsers);
   }
-
-  // Claude model
-  const claudeModel = await ask(rl, 'Claude default model (leave empty for default)', existing.CTI_CLAUDE_DEFAULT_MODEL || '');
-
-  // Claude CLI path
-  const claudeAgent = agents.find(a => a.name === 'Claude Code');
-  const claudeCliPath = claudeAgent?.path
-    ? await ask(rl, 'Claude CLI path', claudeAgent.path)
-    : await ask(rl, 'Claude CLI path (optional)', existing.CTI_CLAUDE_CODE_EXECUTABLE || '');
 
   rl.close();
 
@@ -221,19 +204,14 @@ async function setupWizard() {
     '',
     '# Working directory',
     `CTI_DEFAULT_WORKDIR=${workDir}`,
-    `CTI_DEFAULT_MODE=${mode}`,
     '',
     '# Feishu / Lark bot',
     `CTI_FEISHU_APP_ID=${appId}`,
     `CTI_FEISHU_APP_SECRET=${actualSecret || ''}`,
-    'CTI_FEISHU_LABEL=Default Bot',
   ];
 
   if (domain) lines.push(`CTI_FEISHU_DOMAIN=${domain}`);
   if (allowedUsers) lines.push(`CTI_FEISHU_ALLOWED_USERS=${allowedUsers}`);
-  if (autoApprove) lines.push('', 'CTI_AUTO_APPROVE=true');
-  if (claudeModel) lines.push('', `CTI_CLAUDE_DEFAULT_MODEL=${claudeModel}`);
-  if (claudeCliPath) lines.push(`CTI_CLAUDE_CODE_EXECUTABLE=${claudeCliPath}`);
 
   lines.push('');
 
@@ -253,7 +231,6 @@ async function setupWizard() {
   console.log(`  ${c.dim}App ID:${c.reset}     ${appId || '(not set)'}`);
   console.log(`  ${c.dim}Platform:${c.reset}   ${domain || 'feishu'}`);
   console.log(`  ${c.dim}Work dir:${c.reset}   ${workDir}`);
-  console.log(`  ${c.dim}Mode:${c.reset}       ${mode}`);
   console.log(`  ${c.dim}Config:${c.reset}     ${CONFIG_PATH}`);
   console.log('');
   info(`Install CLI once: ${c.cyan}npm install -g github:francize/agents-to-im${c.reset}`);
@@ -348,16 +325,12 @@ function runDoctor() {
     try {
       const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
       const hasAppId = (
-        (content.includes('CTI_FEISHU_PROFILE_DEFAULT_APP_ID=')
-          && !content.includes('CTI_FEISHU_PROFILE_DEFAULT_APP_ID=your-app-id'))
-        || (content.includes('CTI_FEISHU_APP_ID=')
-          && !content.includes('CTI_FEISHU_APP_ID=your-app-id'))
+        content.includes('CTI_FEISHU_APP_ID=')
+        && !content.includes('CTI_FEISHU_APP_ID=your-app-id')
       );
       const hasSecret = (
-        (content.includes('CTI_FEISHU_PROFILE_DEFAULT_APP_SECRET=')
-          && !content.includes('CTI_FEISHU_PROFILE_DEFAULT_APP_SECRET=your-app-secret'))
-        || (content.includes('CTI_FEISHU_APP_SECRET=')
-          && !content.includes('CTI_FEISHU_APP_SECRET=your-app-secret'))
+        content.includes('CTI_FEISHU_APP_SECRET=')
+        && !content.includes('CTI_FEISHU_APP_SECRET=your-app-secret')
       );
       if (hasAppId) { ok('Feishu App ID configured'); } else { fail('Feishu App ID missing or placeholder'); }
       if (hasSecret) { ok('Feishu App Secret configured'); } else { fail('Feishu App Secret missing or placeholder'); }

@@ -47,7 +47,7 @@ export class MultiplexLLMProvider implements LLMProvider {
   }
 
   private getSessionRuntime(sessionId: string): RuntimeName {
-    return this.store.getSessionExt(sessionId)?.runtime || this.config.legacyRuntime || 'claude';
+    return this.store.getSessionExt(sessionId)?.runtime || 'claude';
   }
 
   getRuntimeCapabilities(runtime: RuntimeName): ProviderCapabilities {
@@ -60,10 +60,10 @@ export class MultiplexLLMProvider implements LLMProvider {
 
   private async getClaudeProvider(): Promise<SDKLLMProvider> {
     if (this.claudeProvider) return this.claudeProvider;
-    const cliPath = this.config.claudeCliExecutable || resolveClaudeCliPath();
+    const cliPath = resolveClaudeCliPath();
     if (!cliPath) {
       throw new Error(
-        'Cannot find the `claude` CLI executable. Install Claude Code CLI or set CTI_CLAUDE_CODE_EXECUTABLE.',
+        'Cannot find the `claude` CLI executable. Install Claude Code CLI and ensure it is available in PATH.',
       );
     }
     const check = preflightCheck(cliPath);
@@ -75,7 +75,6 @@ export class MultiplexLLMProvider implements LLMProvider {
       this.pendingPerms,
       this.pendingStructuredInputs,
       cliPath,
-      this.config.autoApprove,
     );
     return this.claudeProvider;
   }

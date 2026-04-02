@@ -246,7 +246,7 @@ export async function processMessage(
     }
 
     // Effective model
-    const effectiveModel = binding.model || session?.model || store.getSetting('default_model') || undefined;
+    const effectiveModel = binding.model || session?.model || undefined;
 
     // Permission mode from binding mode
     let permissionMode = options?.permissionModeOverride;

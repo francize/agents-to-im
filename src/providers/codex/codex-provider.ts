@@ -287,6 +287,32 @@ function extractTurnId(message: CodexServerMessage): string {
   return typeof params.turnId === 'string' ? params.turnId : '';
 }
 
+function isRunningTurnStatus(status: unknown): boolean {
+  if (typeof status !== 'string') return false;
+  const normalized = status.trim().toLowerCase();
+  return normalized === 'in_progress'
+    || normalized === 'running'
+    || normalized === 'active'
+    || normalized === 'pending';
+}
+
+function extractInFlightTurnIdFromThreadRead(response: unknown): string {
+  const root = typeof response === 'object' && response ? response as JsonRecord : {};
+  const thread = typeof root.thread === 'object' && root.thread ? root.thread as JsonRecord : root;
+  const turns = Array.isArray(thread.turns)
+    ? thread.turns
+    : Array.isArray(root.turns)
+      ? root.turns
+      : [];
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index] as JsonRecord;
+    if (!isRunningTurnStatus(turn.status)) continue;
+    const id = firstString(turn.id, turn.turnId);
+    if (id) return id;
+  }
+  return '';
+}
+
 function firstString(...values: unknown[]): string {
   for (const value of values) {
     if (typeof value === 'string' && value.trim()) return value.trim();
@@ -663,12 +689,25 @@ export class CodexProvider implements LLMProvider {
       let turnInterrupted = false;
 
       const interruptActiveTurn = async (): Promise<void> => {
-        if (turnInterrupted || !threadId || !activeTurnId) return;
+        if (turnInterrupted || !threadId) return;
+        let turnIdToInterrupt = activeTurnId;
+        if (!turnIdToInterrupt) {
+          try {
+            const threadState = await client.call('thread/read', { threadId });
+            turnIdToInterrupt = extractInFlightTurnIdFromThreadRead(threadState);
+          } catch (error) {
+            console.warn('[codex-provider] Failed to resolve in-flight turn before interrupt:', error);
+          }
+        }
+        if (!turnIdToInterrupt) {
+          turnInterrupted = true;
+          return;
+        }
         turnInterrupted = true;
         try {
           await client.call('turn/interrupt', {
             threadId,
-            turnId: activeTurnId,
+            turnId: turnIdToInterrupt,
           });
         } catch (error) {
           console.warn('[codex-provider] Failed to interrupt active turn:', error);

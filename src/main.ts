@@ -43,22 +43,9 @@ function writeStatus(info: StatusInfo): void {
   fs.renameSync(tmp, STATUS_FILE);
 }
 
-function applyConfigToEnv(config: ReturnType<typeof loadConfig>): void {
-  if (config.claudeDefaultModel && !process.env.CTI_CLAUDE_DEFAULT_MODEL) {
-    process.env.CTI_CLAUDE_DEFAULT_MODEL = config.claudeDefaultModel;
-  }
-  if (config.codexDefaultModel && !process.env.CTI_CODEX_DEFAULT_MODEL) {
-    process.env.CTI_CODEX_DEFAULT_MODEL = config.codexDefaultModel;
-  }
-  if (config.claudeCliExecutable && !process.env.CTI_CLAUDE_CODE_EXECUTABLE) {
-    process.env.CTI_CLAUDE_CODE_EXECUTABLE = config.claudeCliExecutable;
-  }
-}
-
 async function main(): Promise<void> {
   const config = loadConfig();
   setupLogger();
-  applyConfigToEnv(config);
 
   const runId = crypto.randomUUID();
   const startTime = Date.now();
@@ -66,7 +53,7 @@ async function main(): Promise<void> {
 
   const settings = configToSettings(config);
   const store = new JsonFileStore(settings);
-  store.migrateLegacySessions(config.legacyRuntime || 'claude');
+  store.migrateLegacySessions();
   const pendingPerms = new PendingPermissions();
   const pendingApprovals = new PendingApprovals();
   const pendingStructuredInputs = new PendingStructuredInputs();

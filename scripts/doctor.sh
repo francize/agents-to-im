@@ -50,20 +50,13 @@ fi
 
 APP_ID=$(get_config CTI_FEISHU_APP_ID || true)
 APP_SECRET=$(get_config CTI_FEISHU_APP_SECRET || true)
-LEGACY_APP_ID=$(get_config CTI_FEISHU_PROFILE_DEFAULT_APP_ID || true)
-LEGACY_APP_SECRET=$(get_config CTI_FEISHU_PROFILE_DEFAULT_APP_SECRET || true)
 WORKDIR=$(get_config CTI_DEFAULT_WORKDIR || true)
 
-[ -n "$APP_ID" ] || APP_ID="$LEGACY_APP_ID"
-[ -n "$APP_SECRET" ] || APP_SECRET="$LEGACY_APP_SECRET"
 [ -n "$APP_ID" ] && check "Feishu App ID configured" 0 || check "Feishu App ID configured" 1
 [ -n "$APP_SECRET" ] && check "Feishu App Secret configured" 0 || check "Feishu App Secret configured" 1
 [ -n "$WORKDIR" ] && check "CTI_DEFAULT_WORKDIR configured" 0 || check "CTI_DEFAULT_WORKDIR configured" 1
 
-CLAUDE_EXE=$(get_config CTI_CLAUDE_CODE_EXECUTABLE || true)
-if [ -n "$CLAUDE_EXE" ]; then
-  [ -x "$CLAUDE_EXE" ] && check "Claude CLI executable is valid ($CLAUDE_EXE)" 0 || check "Claude CLI executable is valid ($CLAUDE_EXE)" 1
-elif command -v claude >/dev/null 2>&1; then
+if command -v claude >/dev/null 2>&1; then
   check "Claude CLI available in PATH ($(claude --version 2>/dev/null || echo unknown))" 0
 else
   check "Claude CLI available in PATH" 1

@@ -16,20 +16,14 @@ function makeSettings(): Map<string, string> {
     ['remote_bridge_enabled', 'true'],
     ['bridge_feishu_enabled', 'true'],
     ['bridge_default_work_dir', '/tmp/test-cwd'],
-    ['bridge_default_mode', 'code'],
-    ['bridge_default_runtime', 'claude'],
   ]);
 }
 
 function makeConfig(): Config {
   return {
     defaultWorkDir: '/tmp',
-    defaultMode: 'code',
     feishu: {
       id: 'default',
-      label: '默认 Bot',
-      toolOutputCards: true,
-      autoImageSend: true,
     },
   };
 }

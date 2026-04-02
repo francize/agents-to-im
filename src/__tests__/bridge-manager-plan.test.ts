@@ -18,9 +18,6 @@ function makeSettings(): Map<string, string> {
     ['remote_bridge_enabled', 'true'],
     [`bridge_${CHANNEL_TYPE}_enabled`, 'true'],
     ['bridge_default_work_dir', '/tmp/test-cwd'],
-    ['bridge_default_mode', 'code'],
-    ['bridge_default_runtime', 'claude'],
-    ['bridge_default_model', 'claude-sonnet-4-6'],
     [`bridge_${CHANNEL_TYPE}_stream_interval_ms`, '1'],
     [`bridge_${CHANNEL_TYPE}_stream_min_delta_chars`, '1'],
     [`bridge_${CHANNEL_TYPE}_stream_max_chars`, '4000'],
@@ -326,6 +323,164 @@ describe('bridge-manager plan workflow', () => {
     const history = store.getMessages(session.id).messages.slice(-2);
     assert.equal(history[0]?.content, '/stop');
     assert.match(history[1]?.content || '', /No task is currently running/);
+  });
+
+  it('releases an active plan workflow on /stop even when no task controller is registered', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const permissionResolutions: Array<{ id: string; resolution: unknown }> = [];
+    initBridgeContext({
+      store,
+      llm: {} as any,
+      permissions: {
+        resolvePendingPermission: (id: string, resolution: unknown) => {
+          permissionResolutions.push({ id, resolution });
+          return true;
+        },
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-stop-workflow',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+    store.upsertPlanWorkflow({
+      workflowId: 'wf-stop-workflow',
+      bindingId: binding.id,
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-stop-workflow',
+      codepilotSessionId: session.id,
+      status: 'planning',
+      previousMode: 'plan',
+      requestText: '先做计划',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-stop-workflow', threadId: 'thread-1' },
+      routeKey: 'chat-stop-workflow:thread:thread-1',
+      requestMessageId: 'msg-stop-workflow-1',
+      approvalRequestId: 'perm-stop-workflow',
+      activeAttemptId: 'attempt-stop-workflow',
+      pendingFollowUpText: '补充要求',
+      pendingRequestMessageId: 'msg-follow-up-1',
+      pendingRouteKey: 'chat-stop-workflow:thread:thread-1',
+      resolved: true,
+    });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-stop-workflow-2',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-stop-workflow', threadId: 'thread-1' },
+      text: '/stop',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length === 1);
+
+    const workflow = store.getPlanWorkflow('wf-stop-workflow');
+    assert.match(adapter.sent[0].text || '', /Stopping current task/);
+    assert.equal(workflow?.status, 'awaiting_input');
+    assert.equal(workflow?.requestText, '');
+    assert.equal(workflow?.activeAttemptId, '');
+    assert.equal(workflow?.pendingFollowUpText, '');
+    assert.deepEqual(permissionResolutions, [{
+      id: 'perm-stop-workflow',
+      resolution: {
+        behavior: 'deny',
+        message: 'Interrupted by /stop',
+        interrupt: true,
+      },
+    }]);
+  });
+
+  it('drops stale queued plan attempts before they reach the LLM', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const llmCalls: Array<Record<string, unknown>> = [];
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: (params: Record<string, unknown>) => {
+          llmCalls.push(params);
+          return new ReadableStream<string>({
+            start(controller) {
+              controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-stale' }) })}\n`);
+              controller.close();
+            },
+          });
+        },
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-stale-attempt',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+    store.upsertPlanWorkflow({
+      workflowId: 'wf-stale-attempt',
+      bindingId: binding.id,
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-stale-attempt',
+      codepilotSessionId: session.id,
+      status: 'interrupting',
+      previousMode: 'plan',
+      requestText: '旧计划',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-stale-attempt', threadId: 'thread-1' },
+      routeKey: 'chat-stale-attempt:thread:thread-1',
+      requestMessageId: 'msg-stale-1',
+      activeAttemptId: 'attempt-new',
+      pendingFollowUpText: '最新要求',
+      pendingRequestMessageId: 'msg-stale-2',
+      pendingRouteKey: 'chat-stale-attempt:thread:thread-1',
+      resolved: true,
+    });
+
+    let acked = false;
+    adapter.acknowledgeUpdate = (updateId: number) => {
+      if (updateId === 42) {
+        acked = true;
+      }
+    };
+
+    await start();
+    adapter.push({
+      messageId: 'msg-stale-queued',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-stale-attempt', threadId: 'thread-1' },
+      text: '已经过期的补充要求',
+      timestamp: Date.now(),
+      updateId: 42,
+      bridgeMeta: {
+        planWorkflow: {
+          kind: 'plan_request',
+          workflowId: 'wf-stale-attempt',
+          attemptId: 'attempt-old',
+          promptText: 'PLAN PROMPT',
+          storedUserText: '已经过期的补充要求',
+          permissionMode: 'plan',
+        },
+      },
+    });
+
+    await waitFor(() => acked);
+
+    assert.equal(llmCalls.length, 0);
+    assert.equal(adapter.sent.length, 0);
   });
 
   it('treats Claude ExitPlanMode as a dedicated plan approval instead of a generic permission card', async () => {
@@ -1668,70 +1823,6 @@ describe('bridge-manager plan workflow', () => {
 
     assert.equal(adapter.sentImages.length, 0);
     assert.equal(adapter.sent[0].text, '没有有效截图需要发送。');
-  });
-
-  it('does not auto-send screenshots when bridge_feishu_auto_image_send is disabled', async () => {
-    const settings = makeSettings();
-    settings.set('bridge_feishu_auto_image_send', 'false');
-    const store = new JsonFileStore(settings);
-    const imagePath = path.resolve('/tmp/test-cwd/disabled-preview.png');
-    initBridgeContext({
-      store,
-      llm: {
-        streamChat: () => new ReadableStream<string>({
-          start(controller) {
-            fs.mkdirSync(path.dirname(imagePath), { recursive: true });
-            fs.writeFileSync(imagePath, 'fake-png-data');
-            controller.enqueue(`data: ${JSON.stringify({
-              type: 'activity_event',
-              data: JSON.stringify({
-                kind: 'command_execution',
-                id: 'cmd-disabled-image',
-                turnId: 'turn-disabled-image',
-                status: 'completed',
-                command: `python capture.py --output ${imagePath}`,
-                cwd: '/tmp/test-cwd',
-                output: imagePath,
-                exitCode: 0,
-              }),
-            })}\n`);
-            controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '图片不会自动发送。' })}\n`);
-            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-disabled-image' }) })}\n`);
-            controller.close();
-          },
-        }),
-      } as any,
-      permissions: {
-        resolvePendingPermission: () => true,
-      },
-      lifecycle: {},
-    });
-
-    const session = store.createRuntimeSession({
-      runtime: 'codex',
-      model: 'gpt-5.4',
-      cwd: '/tmp/test-cwd',
-    });
-    store.upsertChannelBinding({
-      channelType: CHANNEL_TYPE,
-      chatId: 'chat-disabled-image',
-      codepilotSessionId: session.id,
-      workingDirectory: '/tmp/test-cwd',
-      model: 'gpt-5.4',
-    });
-
-    await start();
-    adapter.push({
-      messageId: 'msg-disabled-image',
-      address: { channelType: CHANNEL_TYPE, chatId: 'chat-disabled-image' },
-      text: '不要自动发图',
-      timestamp: Date.now(),
-    });
-
-    await waitFor(() => adapter.sent.length === 1);
-
-    assert.equal(adapter.sentImages.length, 0);
-    assert.equal(adapter.sent[0].text, '图片不会自动发送。');
   });
 
   it('keeps delivering assistant text even when automatic screenshot sending fails', async () => {

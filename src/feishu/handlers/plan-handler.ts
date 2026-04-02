@@ -1,6 +1,8 @@
 import * as lark from '@larksuiteoapi/node-sdk';
+import { randomUUID } from 'node:crypto';
 
 import { getBridgeContext } from '../../bridge/context.js';
+import { interruptActiveTask } from '../../bridge/bridge-manager.js';
 import {
   CLAUDE_PLAN_FOLLOW_UP_REJECT_MESSAGE,
   buildClaudePlanFollowUpPrompt,
@@ -16,6 +18,47 @@ import type {
 import { resolveActionOpenMessageId, routeKeyForAddress } from '../utils.js';
 import type { InboundMessage } from '../../bridge/types.js';
 import type { MultiplexLLMProvider } from '../../providers/multiplex.js';
+
+function createAttemptId(): string {
+  return randomUUID();
+}
+
+function enqueuePlanAttempt(
+  ctx: AdapterContext,
+  runtime: 'claude' | 'codex',
+  workflowId: string,
+  attemptId: string,
+  inbound: InboundMessage,
+  requestText: string,
+  options?: {
+    promptText?: string;
+  },
+): void {
+  if (runtime === 'codex') {
+    ctx.enqueue(ctx.buildNativePlanRequestInbound(
+      inbound.address,
+      inbound.messageId,
+      workflowId,
+      requestText,
+      {
+        attemptId,
+        attachments: inbound.attachments,
+      },
+    ));
+    return;
+  }
+  ctx.enqueue(ctx.buildPlanRequestInbound(
+    inbound.address,
+    inbound.messageId,
+    workflowId,
+    requestText,
+    {
+      attemptId,
+      promptText: options?.promptText,
+      attachments: inbound.attachments,
+    },
+  ));
+}
 
 export async function handlePlanCommand(
   ctx: AdapterContext,
@@ -75,6 +118,12 @@ export async function handlePlanCommand(
         address: inbound.address,
         routeKey: routeKeyForAddress(inbound.address),
         requestMessageId: inbound.messageId,
+        activeAttemptId: '',
+        pendingFollowUpText: '',
+        pendingFollowUpAttachments: [],
+        pendingRequestMessageId: '',
+        pendingAddress: undefined,
+        pendingRouteKey: '',
         resolved: true,
       });
       await ctx.syncChatName(inbound.address.chatId);
@@ -83,6 +132,7 @@ export async function handlePlanCommand(
       ctx.appendBindingCommandExchange(binding, inbound.text, 'Bridge 已进入 Codex 原生 PLAN 流程，下一条同线程消息会作为 plan 请求发送。');
       return;
     }
+    const attemptId = createAttemptId();
     const workflow = store.upsertPlanWorkflow({
       bindingId,
       channelType: ctx.channelType,
@@ -95,19 +145,20 @@ export async function handlePlanCommand(
       address: inbound.address,
       routeKey: routeKeyForAddress(inbound.address),
       requestMessageId: inbound.messageId,
+      activeAttemptId: attemptId,
+      pendingFollowUpText: '',
+      pendingFollowUpAttachments: [],
+      pendingRequestMessageId: '',
+      pendingAddress: undefined,
+      pendingRouteKey: '',
       resolved: true,
     });
     await ctx.syncChatName(inbound.address.chatId);
-    ctx.enqueue(ctx.buildNativePlanRequestInbound(
-      inbound.address,
-      inbound.messageId,
-      workflow.workflowId,
-      requestText,
-      inbound.attachments,
-    ));
+    enqueuePlanAttempt(ctx, 'codex', workflow.workflowId, attemptId, inbound, requestText);
     return;
   }
 
+  const attemptId = requestText ? createAttemptId() : '';
   const workflow = store.upsertPlanWorkflow({
     bindingId,
     channelType: ctx.channelType,
@@ -120,6 +171,12 @@ export async function handlePlanCommand(
     address: inbound.address,
     routeKey: routeKeyForAddress(inbound.address),
     requestMessageId: inbound.messageId,
+    activeAttemptId: attemptId,
+    pendingFollowUpText: '',
+    pendingFollowUpAttachments: [],
+    pendingRequestMessageId: '',
+    pendingAddress: undefined,
+    pendingRouteKey: '',
     resolved: true,
   });
   await ctx.syncChatName(inbound.address.chatId);
@@ -131,15 +188,7 @@ export async function handlePlanCommand(
     return;
   }
 
-  ctx.enqueue(ctx.buildPlanRequestInbound(
-    inbound.address,
-    inbound.messageId,
-    workflow.workflowId,
-    requestText,
-    {
-      attachments: inbound.attachments,
-    },
-  ));
+  enqueuePlanAttempt(ctx, 'claude', workflow.workflowId, attemptId, inbound, requestText);
 }
 
 export async function handlePlanWorkflowMessage(
@@ -168,50 +217,68 @@ export async function handlePlanWorkflowMessage(
 
   switch (workflow.status) {
     case 'awaiting_input':
-      if (runtime === 'codex') {
+      {
+        const attemptId = createAttemptId();
+        if (runtime === 'codex') {
+          store.updatePlanWorkflow(workflow.workflowId, {
+            status: 'planning',
+            requestText: inbound.text.trim(),
+            address: inbound.address,
+            routeKey,
+            requestMessageId: inbound.messageId,
+            activeAttemptId: attemptId,
+            pendingFollowUpText: '',
+            pendingFollowUpAttachments: [],
+            pendingRequestMessageId: '',
+            pendingAddress: undefined,
+            pendingRouteKey: '',
+            resolved: true,
+          });
+          enqueuePlanAttempt(ctx, 'codex', workflow.workflowId, attemptId, inbound, inbound.text.trim());
+          return true;
+        }
         store.updatePlanWorkflow(workflow.workflowId, {
           status: 'planning',
           requestText: inbound.text.trim(),
           address: inbound.address,
           routeKey,
           requestMessageId: inbound.messageId,
+          planMessageId: '',
+          actionCardMessageId: '',
+          activeAttemptId: attemptId,
+          pendingFollowUpText: '',
+          pendingFollowUpAttachments: [],
+          pendingRequestMessageId: '',
+          pendingAddress: undefined,
+          pendingRouteKey: '',
           resolved: true,
         });
-        ctx.enqueue(ctx.buildNativePlanRequestInbound(
-          inbound.address,
-          inbound.messageId,
-          workflow.workflowId,
-          inbound.text.trim(),
-          inbound.attachments,
-        ));
+        enqueuePlanAttempt(ctx, 'claude', workflow.workflowId, attemptId, inbound, inbound.text.trim());
         return true;
       }
+    case 'planning':
+    case 'interrupting': {
+      const requestText = inbound.text.trim();
+      const attemptId = createAttemptId();
       store.updatePlanWorkflow(workflow.workflowId, {
-        status: 'planning',
-        requestText: inbound.text.trim(),
-        address: inbound.address,
-        routeKey,
-        requestMessageId: inbound.messageId,
-        planMessageId: '',
-        actionCardMessageId: '',
+        status: 'interrupting',
+        activeAttemptId: attemptId,
+        pendingFollowUpText: requestText,
+        pendingFollowUpAttachments: inbound.attachments || [],
+        pendingRequestMessageId: inbound.messageId,
+        pendingAddress: inbound.address,
+        pendingRouteKey: routeKey,
         resolved: true,
       });
-      ctx.enqueue(ctx.buildPlanRequestInbound(
-        inbound.address,
-        inbound.messageId,
-        workflow.workflowId,
-        inbound.text.trim(),
-        {
-          attachments: inbound.attachments,
-        },
-      ));
+      interruptActiveTask(binding?.codepilotSessionId || workflow.codepilotSessionId);
+      enqueuePlanAttempt(ctx, runtime, workflow.workflowId, attemptId, inbound, requestText);
+      await ctx.sendAsPost(inbound.address, '已收到补充要求，正在按新要求重试。', inbound.messageId);
       return true;
-    case 'planning':
-      await ctx.sendAsPost(inbound.address, '当前 PLAN 请求正在处理中，请等待本轮计划完成。', inbound.messageId);
-      return true;
+    }
     case 'awaiting_confirmation':
       if (runtime === 'codex') {
         const requestText = inbound.text.trim();
+        const attemptId = createAttemptId();
         store.updatePlanWorkflow(workflow.workflowId, {
           status: 'planning',
           requestText,
@@ -220,19 +287,20 @@ export async function handlePlanWorkflowMessage(
           requestMessageId: inbound.messageId,
           actionCardMessageId: '',
           actionCardOpenMessageId: '',
+          activeAttemptId: attemptId,
+          pendingFollowUpText: '',
+          pendingFollowUpAttachments: [],
+          pendingRequestMessageId: '',
+          pendingAddress: undefined,
+          pendingRouteKey: '',
           resolved: true,
         });
-        ctx.enqueue(ctx.buildNativePlanRequestInbound(
-          inbound.address,
-          inbound.messageId,
-          workflow.workflowId,
-          requestText,
-          inbound.attachments,
-        ));
+        enqueuePlanAttempt(ctx, 'codex', workflow.workflowId, attemptId, inbound, requestText);
         return true;
       }
       {
         const requestText = inbound.text.trim();
+        const attemptId = createAttemptId();
         console.log(
           `[feishu-adapter] Claude PLAN follow-up reply captured for workflow ${workflow.workflowId}; ` +
           'stopping pending ExitPlanMode and enqueueing a fresh planning turn',
@@ -246,6 +314,12 @@ export async function handlePlanWorkflowMessage(
           actionCardMessageId: '',
           actionCardOpenMessageId: '',
           approvalRequestId: '',
+          activeAttemptId: attemptId,
+          pendingFollowUpText: '',
+          pendingFollowUpAttachments: [],
+          pendingRequestMessageId: '',
+          pendingAddress: undefined,
+          pendingRouteKey: '',
           resolved: true,
         });
         if (workflow.approvalRequestId) {
@@ -255,19 +329,12 @@ export async function handlePlanWorkflowMessage(
             interrupt: true,
           });
         }
-        ctx.enqueue(ctx.buildPlanRequestInbound(
-          inbound.address,
-          inbound.messageId,
-          workflow.workflowId,
-          requestText,
-          {
-            promptText: buildClaudePlanFollowUpPrompt(requestText, {
-              planText: workflow.planText,
-              planFilePath: workflow.planFilePath,
-            }),
-            attachments: inbound.attachments,
-          },
-        ));
+        enqueuePlanAttempt(ctx, 'claude', workflow.workflowId, attemptId, inbound, requestText, {
+          promptText: buildClaudePlanFollowUpPrompt(requestText, {
+            planText: workflow.planText,
+            planFilePath: workflow.planFilePath,
+          }),
+        });
       }
       return true;
     default:
@@ -334,6 +401,17 @@ export async function handlePlanCardAction(
       );
       store.updatePlanWorkflow(workflowId, {
         status: 'awaiting_input',
+        requestText: '',
+        planMessageId: '',
+        actionCardMessageId: '',
+        actionCardOpenMessageId: '',
+        approvalRequestId: '',
+        activeAttemptId: '',
+        pendingFollowUpText: '',
+        pendingFollowUpAttachments: [],
+        pendingRequestMessageId: '',
+        pendingAddress: undefined,
+        pendingRouteKey: '',
         resolved: true,
       });
       await ctx.syncChatName(workflow.chatId);

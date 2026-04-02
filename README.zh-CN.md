@@ -159,18 +159,10 @@ CTI_DEFAULT_WORKDIR=/path/to/your/project
 | `CTI_DEFAULT_WORKDIR` | 是 | 新会话的默认工作目录 |
 | `CTI_FEISHU_APP_ID` | 是 | 飞书 App ID |
 | `CTI_FEISHU_APP_SECRET` | 是 | 飞书 App Secret |
-| `CTI_DEFAULT_MODE` | 否 | 默认模式：`code` / `plan` / `ask` |
 | `CTI_FEISHU_DOMAIN` | 否 | 国际版填 `lark` |
 | `CTI_FEISHU_ALLOWED_USERS` | 否 | 逗号分隔的允许用户 ID |
-| `CTI_FEISHU_TOOL_OUTPUT_CARDS` | 否 | 以卡片展示工具输出 |
-| `CTI_FEISHU_AUTO_IMAGE_SEND` | 否 | 自动发送生成的图片 |
-| `CTI_FEISHU_LABEL` | 否 | Bot 显示标签 |
-| `CTI_CLAUDE_DEFAULT_MODEL` | 否 | Claude 会话默认模型 |
-| `CTI_CODEX_DEFAULT_MODEL` | 否 | Codex 会话默认模型 |
-| `CTI_CLAUDE_CODE_EXECUTABLE` | 否 | 自定义 Claude CLI 路径 |
-| `CTI_AUTO_APPROVE` | 否 | 自动批准工具权限（谨慎使用） |
 
-Codex 会话直接复用本地 `~/.codex/config.toml` 中的认证、trusted 目录、sandbox 和审批策略。
+Claude 和 Codex 的默认模型、审批策略都直接由本机 CLI 自己决定。Codex 会话直接复用本地 `~/.codex/config.toml` 中的认证、trusted 目录、sandbox 和审批策略。
 
 </details>
 

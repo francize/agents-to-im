@@ -16,10 +16,6 @@ function makeSettings(): Map<string, string> {
     ['remote_bridge_enabled', 'true'],
     ['bridge_feishu_enabled', 'true'],
     ['bridge_default_work_dir', '/tmp/test-cwd'],
-    ['bridge_default_mode', 'code'],
-    ['bridge_default_runtime', 'codex'],
-    ['bridge_codex_default_model', 'gpt-5.4'],
-    ['default_model', 'gpt-5.4'],
   ]);
 }
 

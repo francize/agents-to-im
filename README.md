@@ -159,18 +159,10 @@ CTI_DEFAULT_WORKDIR=/path/to/your/project
 | `CTI_DEFAULT_WORKDIR` | Yes | Default working directory for new sessions |
 | `CTI_FEISHU_APP_ID` | Yes | Feishu app ID |
 | `CTI_FEISHU_APP_SECRET` | Yes | Feishu app secret |
-| `CTI_DEFAULT_MODE` | No | Default mode: `code` / `plan` / `ask` |
 | `CTI_FEISHU_DOMAIN` | No | `lark` for Lark international |
 | `CTI_FEISHU_ALLOWED_USERS` | No | Comma-separated allowed user IDs |
-| `CTI_FEISHU_TOOL_OUTPUT_CARDS` | No | Show tool output as cards |
-| `CTI_FEISHU_AUTO_IMAGE_SEND` | No | Auto-send generated images |
-| `CTI_FEISHU_LABEL` | No | Display label for the bot |
-| `CTI_CLAUDE_DEFAULT_MODEL` | No | Default model for Claude sessions |
-| `CTI_CODEX_DEFAULT_MODEL` | No | Default model for Codex sessions |
-| `CTI_CLAUDE_CODE_EXECUTABLE` | No | Custom path to Claude CLI |
-| `CTI_AUTO_APPROVE` | No | Auto-approve tool permissions (use with caution) |
 
-Codex sessions reuse your local `~/.codex/config.toml` for auth, trusted directories, sandbox, and approval policy.
+Claude and Codex both use the local CLI defaults on the host machine for model selection and approvals. Codex sessions reuse your local `~/.codex/config.toml` for auth, trusted directories, sandbox, and approval policy.
 
 </details>
 

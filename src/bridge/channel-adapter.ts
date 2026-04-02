@@ -159,11 +159,6 @@ export abstract class BaseChannelAdapter {
     _replyToMessageId?: string,
   ): Promise<SendResult>;
 
-  /**
-   * Whether the adapter allows automatic local image uploads for generated output.
-   * Undefined falls back to store-level defaults for legacy adapters.
-   */
-  allowsAutoImageSend?(): boolean;
 }
 
 // ── Adapter Registry ────────────────────────────────────────────

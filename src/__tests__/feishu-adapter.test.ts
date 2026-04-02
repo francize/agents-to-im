@@ -25,10 +25,6 @@ function makeSettings(): Map<string, string> {
     ['bridge_feishu_app_id', 'app-id'],
     ['bridge_feishu_app_secret', 'app-secret'],
     ['bridge_default_work_dir', '/tmp/test-cwd'],
-    ['bridge_default_mode', 'code'],
-    ['bridge_default_runtime', 'claude'],
-    ['bridge_claude_default_model', 'claude-sonnet-4-6'],
-    ['bridge_codex_default_model', 'gpt-5-codex'],
   ]);
 }
 
@@ -57,11 +53,8 @@ describe('FeishuAdapter', () => {
     const adapter = new FeishuAdapter({
       profile: {
         id: 'profile-codex',
-        label: 'Codex Bot',
         appId: 'app-id',
         appSecret: 'app-secret',
-        toolOutputCards: true,
-        autoImageSend: true,
       },
     });
 
@@ -925,62 +918,6 @@ describe('FeishuAdapter', () => {
     assert.match(patchedPayloads[0], /已完成/);
   });
 
-  it('skips tool output cards when bridge_feishu_tool_output_cards is disabled', async () => {
-    const settings = makeSettings();
-    settings.set('bridge_feishu_tool_output_cards', 'false');
-    const store = new JsonFileStore(settings);
-    installContext(store, {});
-
-    let replyCalls = 0;
-    let patchCalls = 0;
-    const adapter = new FeishuAdapter() as any;
-    adapter.lastIncomingMessageId.set('group-activity-disabled:main', 'incoming-disabled-1');
-    adapter.restClient = {
-      im: {
-        message: {
-          reply: async () => {
-            replyCalls += 1;
-            return { code: 0, data: { message_id: 'activity-disabled-msg-1' } };
-          },
-          patch: async () => {
-            patchCalls += 1;
-            return { code: 0, data: {} };
-          },
-        },
-      },
-    };
-
-    const running = await adapter.upsertActivityEvent(
-      { channelType: 'feishu', chatId: 'group-activity-disabled' },
-      {
-        kind: 'command_execution',
-        id: 'command:turn-disabled:cmd-1',
-        turnId: 'turn-disabled',
-        status: 'running',
-        command: 'pwd',
-        cwd: '/tmp/test-cwd',
-      },
-    );
-    const completed = await adapter.upsertActivityEvent(
-      { channelType: 'feishu', chatId: 'group-activity-disabled' },
-      {
-        kind: 'command_execution',
-        id: 'command:turn-disabled:cmd-1',
-        turnId: 'turn-disabled',
-        status: 'completed',
-        command: 'pwd',
-        cwd: '/tmp/test-cwd',
-        output: '/tmp/test-cwd',
-        exitCode: 0,
-      },
-    );
-
-    assert.equal(running.ok, true);
-    assert.equal(completed.ok, true);
-    assert.equal(replyCalls, 0);
-    assert.equal(patchCalls, 0);
-  });
-
   it('uploads a local image and sends it as a native Feishu image reply', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});
@@ -1763,6 +1700,95 @@ describe('FeishuAdapter', () => {
     assert.equal(queued.bridgeMeta.planWorkflow.storedUserText, '请先做一个实现计划');
     assert.match(queued.bridgeMeta.planWorkflow.promptText, /只输出计划/);
     assert.equal(store.getPlanWorkflow(waiting!.workflowId)?.status, 'planning');
+  });
+
+  it('interrupts an in-flight planning workflow, acknowledges the steer, and keeps only the latest attempt active', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-plan-steer',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+    store.upsertPlanWorkflow({
+      workflowId: 'wf-steer',
+      bindingId: binding.id,
+      channelType: 'feishu',
+      chatId: 'group-plan-steer',
+      codepilotSessionId: session.id,
+      status: 'planning',
+      previousMode: 'code',
+      requestText: '先做计划',
+      address: { channelType: 'feishu', chatId: 'group-plan-steer', threadId: 'thread-1' },
+      routeKey: 'group-plan-steer:thread:thread-1',
+      requestMessageId: 'plan-msg-1',
+      activeAttemptId: 'attempt-old',
+      resolved: true,
+    });
+
+    const replies: string[] = [];
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        chat: {
+          update: async () => ({ code: 0, data: {} }),
+        },
+        message: {
+          create: async (payload: { data: { content: string } }) => {
+            replies.push(payload.data.content);
+            return { code: 0, data: { message_id: `msg-${replies.length}` } };
+          },
+          reply: async (payload: { data: { content: string } }) => {
+            replies.push(payload.data.content);
+            return { code: 0, data: { message_id: `msg-${replies.length}` } };
+          },
+        },
+      },
+    };
+
+    await adapter.handleGroupMessage(
+      { id: 'ou_123', type: 'open_id' },
+      {
+        messageId: 'user-steer-1',
+        address: { channelType: 'feishu', chatId: 'group-plan-steer', threadId: 'thread-1' },
+        text: '把范围缩小到单文件',
+        timestamp: Date.now(),
+      },
+    );
+
+    const workflowAfterFirst = store.getPlanWorkflow('wf-steer');
+    const firstAttemptId = (adapter as any).queue[0].bridgeMeta.planWorkflow.attemptId;
+    assert.equal(workflowAfterFirst?.status, 'interrupting');
+    assert.equal(workflowAfterFirst?.pendingFollowUpText, '把范围缩小到单文件');
+    assert.equal(workflowAfterFirst?.activeAttemptId, firstAttemptId);
+    assert.match(replies[0] || '', /正在按新要求重试/);
+    assert.doesNotMatch(replies[0] || '', /当前 PLAN 请求正在处理中/);
+
+    await adapter.handleGroupMessage(
+      { id: 'ou_123', type: 'open_id' },
+      {
+        messageId: 'user-steer-2',
+        address: { channelType: 'feishu', chatId: 'group-plan-steer', threadId: 'thread-1' },
+        text: '再把步骤压缩成两步',
+        timestamp: Date.now(),
+      },
+    );
+
+    const workflowAfterSecond = store.getPlanWorkflow('wf-steer');
+    const secondAttemptId = (adapter as any).queue[1].bridgeMeta.planWorkflow.attemptId;
+    assert.equal(workflowAfterSecond?.status, 'interrupting');
+    assert.equal(workflowAfterSecond?.pendingFollowUpText, '再把步骤压缩成两步');
+    assert.equal(workflowAfterSecond?.activeAttemptId, secondAttemptId);
+    assert.notEqual(secondAttemptId, firstAttemptId);
+    assert.equal((adapter as any).queue[0].bridgeMeta.planWorkflow.storedUserText, '把范围缩小到单文件');
+    assert.equal((adapter as any).queue[1].bridgeMeta.planWorkflow.storedUserText, '再把步骤压缩成两步');
   });
 
   it('writes /reset local replies into the new session history instead of the old session', async () => {

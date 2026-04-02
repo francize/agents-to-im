@@ -289,19 +289,14 @@ function findAllInPath(): string[] {
  * Resolve the path to the `claude` CLI executable.
  *
  * Priority:
- *   1. CTI_CLAUDE_CODE_EXECUTABLE env var (explicit override)
- *   2. All `claude` executables in PATH — pick first compatible (>= 2.x)
- *   3. Common install locations — pick first compatible (>= 2.x)
+ *   1. All `claude` executables in PATH — pick first compatible (>= 2.x)
+ *   2. Common install locations — pick first compatible (>= 2.x)
  *
  * This multi-candidate approach handles the common scenario where
  * nvm/npm puts an old 1.x claude in PATH before the native 2.x CLI.
  */
 export function resolveClaudeCliPath(): string | undefined {
-  // 1. Explicit env var — trust the user
-  const fromEnv = process.env.CTI_CLAUDE_CODE_EXECUTABLE;
-  if (fromEnv && isExecutable(fromEnv)) return fromEnv;
-
-  // 2. Gather all candidates
+  // 1. Gather all candidates
   const isWindows = process.platform === 'win32';
   const pathCandidates = findAllInPath();
   const wellKnown = isWindows
@@ -327,7 +322,7 @@ export function resolveClaudeCliPath(): string | undefined {
     }
   }
 
-  // 3. Pick the first compatible candidate
+  // 2. Pick the first compatible candidate
   let firstUnverifiable: string | undefined;
   for (const p of allCandidates) {
     if (!isExecutable(p)) continue;
@@ -725,23 +720,19 @@ function enqueueActivityEvent(
 
 export class SDKLLMProvider implements LLMProvider {
   private cliPath: string | undefined;
-  private autoApprove: boolean;
 
   constructor(
     private pendingPerms: PendingPermissions,
     private pendingStructuredInputs: PendingStructuredInputs,
     cliPath?: string,
-    autoApprove = false,
   ) {
     this.cliPath = cliPath;
-    this.autoApprove = autoApprove;
   }
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
     const pendingPerms = this.pendingPerms;
     const pendingStructuredInputs = this.pendingStructuredInputs;
     const cliPath = this.cliPath;
-    const autoApprove = this.autoApprove;
 
     return new ReadableStream({
       start(controller) {
@@ -764,15 +755,6 @@ export class SDKLLMProvider implements LLMProvider {
             let model = params.model;
             if (isNonClaudeModel(model)) {
               console.warn(`[llm-provider] Ignoring non-Claude model "${model}", using CLI default`);
-              model = undefined;
-            }
-
-            // Only pass model to CLI if explicitly configured via CTI_CLAUDE_DEFAULT_MODEL.
-            // Letting the CLI choose its own default avoids exit-code-1 failures
-            // when a stored model is inaccessible on the current machine/plan.
-            const passModel = !!process.env.CTI_CLAUDE_DEFAULT_MODEL;
-            if (model && !passModel) {
-              console.log(`[llm-provider] Skipping model "${model}", using CLI default (set CTI_CLAUDE_DEFAULT_MODEL to override)`);
               model = undefined;
             }
 
@@ -846,12 +828,6 @@ export class SDKLLMProvider implements LLMProvider {
                       behavior: 'deny' as const,
                       message: 'User input request timed out',
                     };
-                  }
-
-                  // Auto-approve if configured (useful for channels without
-                  // interactive permission UI, e.g. Feishu WebSocket mode)
-                  if (autoApprove) {
-                    return { behavior: 'allow' as const, updatedInput: input };
                   }
 
                   enqueueActivityEvent(controller, buildToolActivityEvent(opts.toolUseID, toolName, {

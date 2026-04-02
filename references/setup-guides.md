@@ -235,26 +235,16 @@ agents-to-im start
 常见可选项：
 - `CTI_FEISHU_DOMAIN`
 - `CTI_FEISHU_ALLOWED_USERS`
-- `CTI_FEISHU_TOOL_OUTPUT_CARDS`
-- `CTI_FEISHU_AUTO_IMAGE_SEND`
-- `CTI_FEISHU_LABEL`
-- `CTI_CLAUDE_DEFAULT_MODEL`
-- `CTI_CODEX_DEFAULT_MODEL`
-- `CTI_CLAUDE_CODE_EXECUTABLE`
-- `CTI_AUTO_APPROVE`
 
-Codex runtime 会直接复用本地 `codex` CLI 及其 `~/.codex/config.toml`（或 `$CODEX_HOME/config.toml`）。
+Claude 和 Codex 都直接使用本机 CLI 自己的默认模型、审批和安装路径。Codex runtime 会直接复用本地 `codex` CLI 及其 `~/.codex/config.toml`（或 `$CODEX_HOME/config.toml`）。
 
 单 Bot 配置示例：
 
 ```env
 CTI_FEISHU_APP_ID=cli_xxx
 CTI_FEISHU_APP_SECRET=xxx
-CTI_FEISHU_LABEL=Main Bot
 CTI_DEFAULT_WORKDIR=/path/to/workdir
 ```
-
-如果你是从旧配置升级上来，旧的 `CTI_FEISHU_PROFILE_DEFAULT_*` 单 Bot 变量仍然会被兼容读取；新配置统一使用 `CTI_FEISHU_*`。
 
 ## 9. 使用方式
 

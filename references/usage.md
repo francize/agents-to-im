@@ -40,15 +40,8 @@ agents-to-im
 可选项：
 - `CTI_FEISHU_DOMAIN`
 - `CTI_FEISHU_ALLOWED_USERS`
-- `CTI_FEISHU_TOOL_OUTPUT_CARDS`
-- `CTI_FEISHU_AUTO_IMAGE_SEND`
-- `CTI_FEISHU_LABEL`
-- `CTI_CLAUDE_DEFAULT_MODEL`
-- `CTI_CODEX_DEFAULT_MODEL`
-- `CTI_CLAUDE_CODE_EXECUTABLE`
-- `CTI_AUTO_APPROVE`
 
-Codex 直接复用本地 `codex` CLI 和 `~/.codex/config.toml`（或 `$CODEX_HOME/config.toml`）。
+Claude 和 Codex 都直接复用本机 CLI 默认行为。Codex 直接复用本地 `codex` CLI 和 `~/.codex/config.toml`（或 `$CODEX_HOME/config.toml`）。
 
 还需要在飞书开放平台开启：
 - 长连接事件 `im.message.receive_v1`

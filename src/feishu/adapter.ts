@@ -147,7 +147,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
   readonly channelType: ChannelType = 'feishu';
   private readonly instanceAdapterId: string;
   private readonly instanceProfileId: string;
-  private readonly instanceLabel: string;
 
   private running = false;
   private queue: InboundMessage[] = [];
@@ -175,16 +174,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
     private readonly options: FeishuAdapterOptions = {
       profile: {
         id: DEFAULT_CHANNEL_INSTANCE_ID,
-        label: '默认 Bot',
-        toolOutputCards: true,
-        autoImageSend: true,
       },
     },
   ) {
     super();
     this.instanceProfileId = options.profile.id || DEFAULT_CHANNEL_INSTANCE_ID;
     this.instanceAdapterId = `${this.channelType}:${this.instanceProfileId}`;
-    this.instanceLabel = options.profile.label || this.instanceProfileId;
   }
 
   get adapterId(): string {
@@ -196,7 +191,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
   }
 
   get label(): string {
-    return this.instanceLabel;
+    return this.instanceProfileId;
   }
 
   get restClient(): lark.Client | null {
@@ -318,13 +313,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
       downloadInboundImageAttachment: this.downloadInboundImageAttachment.bind(this),
       resolveReferencedInboundImages: this.resolveReferencedInboundImages.bind(this),
     };
-  }
-
-  allowsAutoImageSend(): boolean {
-    if (this.usesLegacyStoreSettings()) {
-      return this.getStore().getSetting('bridge_feishu_auto_image_send') !== 'false';
-    }
-    return this.options.profile.autoImageSend !== false;
   }
 
   private withInstance(address: ChannelAddress): ChannelAddress {
@@ -583,14 +571,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
     event: ActivityEvent,
     replyToMessageId?: string,
   ): Promise<SendResult> {
-    const enabled = this.usesLegacyStoreSettings()
-      ? this.getStore().getSetting('bridge_feishu_tool_output_cards') !== 'false'
-      : this.options.profile.toolOutputCards !== false;
     return this.activityService.upsertActivityEvent(
       this.withInstance(address),
       event,
       replyToMessageId,
-      enabled,
+      true,
     );
   }
 
@@ -776,13 +761,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
   ): Promise<{ chatId: string; binding: ChannelBinding }> {
     await this.ensureRuntimeAvailable(runtime);
     const store = this.getStore();
-    const model = runtime === 'codex'
-      ? store.getSetting('bridge_codex_default_model') || ''
-      : store.getSetting('bridge_claude_default_model') || store.getSetting('bridge_default_model') || '';
     const chatId = await this.createSessionGroup(runtime, sender, options?.claudePermissionMode);
     const session = store.createRuntimeSession({
       runtime,
-      model,
+      model: '',
       cwd: options?.cwd || store.getSetting('bridge_default_work_dir') || process.cwd(),
     });
     const initialBinding = store.upsertChannelBinding({
@@ -913,6 +895,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     workflowId: string,
     requestText: string,
     options?: {
+      attemptId?: string;
       promptText?: string;
       attachments?: FileAttachment[];
     },
@@ -927,6 +910,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         planWorkflow: {
           kind: 'plan_request',
           workflowId,
+          ...(options?.attemptId ? { attemptId: options.attemptId } : {}),
           promptText: options?.promptText || buildPlanningPrompt(requestText),
           storedUserText: requestText,
           permissionMode: 'plan',
@@ -940,18 +924,22 @@ export class FeishuAdapter extends BaseChannelAdapter {
     messageId: string,
     workflowId: string,
     requestText: string,
-    attachments?: FileAttachment[],
+    options?: {
+      attemptId?: string;
+      attachments?: FileAttachment[];
+    },
   ): InboundMessage {
     return {
       messageId,
       address,
       text: requestText,
       timestamp: Date.now(),
-      ...(attachments?.length ? { attachments } : {}),
+      ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
       bridgeMeta: {
         planWorkflow: {
           kind: 'native_plan_request',
           workflowId,
+          ...(options?.attemptId ? { attemptId: options.attemptId } : {}),
           promptText: requestText,
           storedUserText: requestText,
           permissionMode: 'plan',
@@ -967,6 +955,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     workflowId: string,
     requestText: string,
     options?: {
+      attemptId?: string;
       permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions';
       planText?: string;
     },
@@ -981,6 +970,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         planWorkflow: {
           kind: 'plan_execute',
           workflowId,
+          ...(options?.attemptId ? { attemptId: options.attemptId } : {}),
           promptText: buildClaudePlanExecutionPrompt(requestText, options?.planText),
           storedUserText,
           permissionMode: options?.permissionMode || 'acceptEdits',

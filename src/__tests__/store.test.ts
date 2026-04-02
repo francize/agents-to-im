@@ -12,8 +12,6 @@ function makeSettings(): Map<string, string> {
   return new Map([
     ['remote_bridge_enabled', 'true'],
     ['bridge_default_work_dir', '/tmp/test-cwd'],
-    ['bridge_default_model', 'test-model'],
-    ['bridge_default_mode', 'code'],
   ]);
 }
 
@@ -26,7 +24,7 @@ describe('JsonFileStore', () => {
   it('getSetting returns values from settings map', () => {
     const store = new JsonFileStore(makeSettings());
     assert.equal(store.getSetting('remote_bridge_enabled'), 'true');
-    assert.equal(store.getSetting('bridge_default_model'), 'test-model');
+    assert.equal(store.getSetting('bridge_default_work_dir'), '/tmp/test-cwd');
     assert.equal(store.getSetting('nonexistent'), null);
   });
 
@@ -130,10 +128,8 @@ describe('JsonFileStore', () => {
     assert.equal(store.getChannelBinding('feishu', '123', 'codex')?.codepilotSessionId, 'sess-2');
   });
 
-  it('upsertChannelBinding uses default mode from settings', () => {
-    const settings = makeSettings();
-    settings.set('bridge_default_mode', 'plan');
-    const store = new JsonFileStore(settings);
+  it('upsertChannelBinding defaults to code mode', () => {
+    const store = new JsonFileStore(makeSettings());
     const b = store.upsertChannelBinding({
       channelType: 'feishu',
       chatId: '456',
@@ -141,7 +137,7 @@ describe('JsonFileStore', () => {
       workingDirectory: '/tmp',
       model: 'model-1',
     });
-    assert.equal(b.mode, 'plan');
+    assert.equal(b.mode, 'code');
   });
 
   it('upsertChannelBinding preserves Claude permission mode unless explicitly changed', () => {

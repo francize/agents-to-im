@@ -111,6 +111,7 @@ export interface BridgeMessageMeta {
   planWorkflow?: {
     kind: 'plan_request' | 'plan_execute' | 'native_plan_request';
     workflowId: string;
+    attemptId?: string;
     promptText: string;
     storedUserText?: string;
     permissionMode?: ClaudePermissionMode;
