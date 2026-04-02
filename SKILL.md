@@ -40,15 +40,16 @@ If no configuration exists at `~/.agents-to-im/config.env`, show `config.env.exa
 
 ## CLI usage
 
-Prefer `npx` as the primary entrypoint:
+Prefer the globally installed npm CLI:
 
-- `npx github:francize/agents-to-im onboard`
-- `npx github:francize/agents-to-im start`
-- `npx github:francize/agents-to-im restart`
-- `npx github:francize/agents-to-im status`
-- `npx github:francize/agents-to-im doctor`
-- `npx github:francize/agents-to-im upgrade`
-- `npx github:francize/agents-to-im logs 100`
+- install once: `npm install -g agents-to-im@beta`
+- `agents-to-im onboard`
+- `agents-to-im start`
+- `agents-to-im restart`
+- `agents-to-im status`
+- `agents-to-im doctor`
+- `agents-to-im upgrade`
+- `agents-to-im logs 100`
 
 Use source checkout commands only for development/debugging.
 
@@ -82,7 +83,7 @@ This project no longer has a multi-platform setup wizard. Setup means:
 
 Use:
 
-- `npx github:francize/agents-to-im onboard`
+- `agents-to-im onboard`
 - `bash "SKILL_DIR/scripts/daemon.sh" start`
 - `bash "SKILL_DIR/scripts/daemon.sh" stop`
 - `bash "SKILL_DIR/scripts/daemon.sh" status`

@@ -202,7 +202,7 @@
 在本地配置好 `config.env` 后，启动：
 
 ```bash
-npx github:francize/agents-to-im start
+agents-to-im start
 ```
 
 飞书在保存长连接事件时会校验应用连接状态，所以 bridge 必须先起来。
@@ -254,4 +254,4 @@ CTI_DEFAULT_WORKDIR=/path/to/workdir
 4. 需要中断当前输出时，在群内发送 `/stop`
 5. 需要清空会话但保留 runtime 时，在群内发送 `/reset`
 
-如果你升级的是旧版 Feishu 接入，任何权限、事件或回调修改都需要重新发布版本并执行 `npx github:francize/agents-to-im restart`。
+如果你升级的是旧版 Feishu 接入，任何权限、事件或回调修改都需要重新发布版本并执行 `agents-to-im restart`。

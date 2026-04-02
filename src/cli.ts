@@ -3,13 +3,13 @@
  * Interactive CLI for agents-to-im.
  *
  * Daily usage:
- *   npx github:francize/agents-to-im onboard → Interactive onboarding wizard
- *   npx github:francize/agents-to-im start   → Start the bridge
- *   npx github:francize/agents-to-im restart → Restart the bridge
- *   npx github:francize/agents-to-im stop    → Stop the bridge
- *   npx github:francize/agents-to-im status  → Show bridge status
- *   npx github:francize/agents-to-im doctor  → Run diagnostics
- *   npx github:francize/agents-to-im upgrade → Upgrade the local installation
+ *   agents-to-im onboard → Interactive onboarding wizard
+ *   agents-to-im start   → Start the bridge
+ *   agents-to-im restart → Restart the bridge
+ *   agents-to-im stop    → Stop the bridge
+ *   agents-to-im status  → Show bridge status
+ *   agents-to-im doctor  → Run diagnostics
+ *   agents-to-im upgrade → Upgrade the local installation
  */
 
 import fs from 'node:fs';
@@ -30,12 +30,18 @@ const CONFIG_PATH = path.join(CTI_HOME, 'config.env');
 const PID_FILE = path.join(CTI_HOME, 'runtime', 'bridge.pid');
 const STATUS_FILE = path.join(CTI_HOME, 'runtime', 'status.json');
 const CLI_DIR = path.dirname(fileURLToPath(import.meta.url));
-const NPX_PACKAGE_SPEC = 'github:francize/agents-to-im';
+const CLI_COMMAND = 'agents-to-im';
+const NPM_INSTALL_SPEC = 'agents-to-im@beta';
+const MACOS_LAUNCHD_LABEL = 'com.agents-to-im.bridge';
 
-function npxCommand(command?: string): string {
+function cliCommand(command?: string): string {
   return command
-    ? `npx ${NPX_PACKAGE_SPEC} ${command}`
-    : `npx ${NPX_PACKAGE_SPEC}`;
+    ? `${CLI_COMMAND} ${command}`
+    : CLI_COMMAND;
+}
+
+function npmInstallCommand(): string {
+  return `npm install -g ${NPM_INSTALL_SPEC}`;
 }
 
 // ── Colors ──
@@ -134,12 +140,39 @@ function showBanner() {
   console.log('');
 }
 
+export function parseLaunchdPid(output: string): string {
+  const match = output.match(/^\s*pid = ([^\s]+)\s*$/m);
+  if (!match) return '';
+  const pid = match[1].trim();
+  if (!pid || pid === '0' || pid === '-') return '';
+  return pid;
+}
+
+function getLaunchdPid(): string {
+  if (process.platform !== 'darwin') return '';
+  try {
+    const uid = execSync('id -u', { encoding: 'utf-8', timeout: 3000 }).trim();
+    const output = execSync(`launchctl print gui/${uid}/${MACOS_LAUNCHD_LABEL}`, {
+      encoding: 'utf-8',
+      timeout: 3000,
+    });
+    return parseLaunchdPid(output);
+  } catch {
+    return '';
+  }
+}
+
 function getBridgeStatusSnapshot(): { running: boolean; pid: string; statusJson: Record<string, unknown> } {
   let pid = '';
   try { pid = fs.readFileSync(PID_FILE, 'utf-8').trim(); } catch { /* */ }
 
   let statusJson: Record<string, unknown> = {};
   try { statusJson = JSON.parse(fs.readFileSync(STATUS_FILE, 'utf-8')); } catch { /* */ }
+
+  const launchdPid = getLaunchdPid();
+  if (launchdPid) {
+    return { running: true, pid: launchdPid, statusJson };
+  }
 
   if (statusJson.running !== true || !pid) {
     return { running: false, pid, statusJson };
@@ -307,11 +340,26 @@ async function setupWizard() {
   console.log(`  ${c.dim}Work dir:${c.reset}   ${workDir}`);
   console.log(`  ${c.dim}Config:${c.reset}     ${CONFIG_PATH}`);
   console.log('');
-  info(`Onboard again:    ${c.cyan}${npxCommand('onboard')}${c.reset}`);
-  info(`Start the bridge: ${c.cyan}${npxCommand('start')}${c.reset}`);
-  info(`Quick restart:    ${c.cyan}${npxCommand('restart')}${c.reset}`);
-  info(`Check status:     ${c.cyan}${npxCommand('status')}${c.reset}`);
-  info(`Run diagnostics:  ${c.cyan}${npxCommand('doctor')}${c.reset}`);
+
+  const bridge = getBridgeStatusSnapshot();
+  const nextCommand = bridge.running ? 'restart' : 'start';
+  const nextLabel = bridge.running ? 'Restart bridge now' : 'Start bridge now';
+  const actionRl = createRl();
+  const nextStepIdx = await select(actionRl, 'Next step:', [nextLabel, 'Not now'], 0);
+  actionRl.close();
+
+  if (nextStepIdx === 0) {
+    info(`${nextLabel}...`);
+    await runDaemonCommand(nextCommand);
+    ok(`Bridge ${bridge.running ? 'restarted' : 'started'}`);
+    console.log('');
+  }
+
+  info(`Onboard again:     ${c.cyan}${cliCommand('onboard')}${c.reset}`);
+  info(`Start the bridge:  ${c.cyan}${cliCommand('start')}${c.reset}`);
+  info(`Quick restart:     ${c.cyan}${cliCommand('restart')}${c.reset}`);
+  info(`Check status:      ${c.cyan}${cliCommand('status')}${c.reset}`);
+  info(`Run diagnostics:   ${c.cyan}${cliCommand('doctor')}${c.reset}`);
   console.log('');
 }
 
@@ -355,7 +403,7 @@ function showStatus() {
     ok(`Config: ${CONFIG_PATH}`);
   } else {
     fail(`Config not found: ${CONFIG_PATH}`);
-    info(`Run onboarding: ${c.cyan}${npxCommand('onboard')}${c.reset}`);
+    info(`Run onboarding: ${c.cyan}${cliCommand('onboard')}${c.reset}`);
   }
 
   // Dashboard URL
@@ -410,7 +458,7 @@ function runDoctor() {
     } catch { fail('Cannot read config file'); }
   } else {
     fail(`Config not found: ${CONFIG_PATH}`);
-    info(`Run onboarding: ${c.cyan}${npxCommand('onboard')}${c.reset}`);
+    info(`Run onboarding: ${c.cyan}${cliCommand('onboard')}${c.reset}`);
   }
 
   // 4. Data directory
@@ -486,7 +534,12 @@ function delegateToDaemon(command: string) {
     process.exit(0);
   }).catch((error) => {
     fail(error instanceof Error ? error.message : String(error));
-    info('If running from source, make sure you are in the project directory');
+    const packageRoot = findAgentsToImPackageRoot(CLI_DIR) || findAgentsToImPackageRoot(process.cwd());
+    if (packageRoot && fs.existsSync(path.join(packageRoot, '.git'))) {
+      info('If running from source, make sure you are in the project directory');
+    } else {
+      info(`If this is a packaged install, refresh it with ${c.cyan}${npmInstallCommand()}${c.reset}`);
+    }
     process.exit(1);
   });
 }
@@ -541,7 +594,7 @@ async function runUpgrade() {
     ensureCommandAvailable(command);
   }
   info(`Current version: ${plan.currentVersion}`);
-  info(`Install mode: ${plan.mode === 'source' ? 'source checkout' : 'npx package'}`);
+  info(`Install mode: ${plan.mode === 'source' ? 'source checkout' : 'global npm package'}`);
   info(`Package root: ${plan.packageRoot}`);
   info(`Bridge running: ${bridge.running ? `yes${bridge.pid ? ` (PID: ${bridge.pid})` : ''}` : 'no'}`);
   console.log('');
@@ -569,85 +622,94 @@ async function runUpgrade() {
     await runDaemonCommand('restart');
     ok('Bridge restarted');
   } else {
-    info(`Upgrade complete. Use ${c.cyan}${npxCommand('start')}${c.reset} when you want to run the bridge.`);
+    info(`Upgrade complete. Use ${c.cyan}${cliCommand('start')}${c.reset} when you want to run the bridge.`);
   }
 
   console.log('');
 }
 
-// ── Main ──
+function isCliEntrypoint(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  return path.resolve(entry) === fileURLToPath(import.meta.url);
+}
 
-const args = process.argv.slice(2);
-const command = args[0] || '';
+export function runCli(args = process.argv.slice(2)): void {
+  const command = args[0] || '';
 
-switch (command) {
-  case 'onboard':
-  case 'setup':
-    setupWizard().catch((err) => {
-      console.error('Setup error:', err);
-      process.exit(1);
-    });
-    break;
-  case 'start':
-    delegateToDaemon('start');
-    break;
-  case 'restart':
-    delegateToDaemon('restart');
-    break;
-  case 'stop':
-    delegateToDaemon('stop');
-    break;
-  case 'status':
-    showStatus();
-    break;
-  case 'doctor':
-    runDoctor();
-    break;
-  case 'upgrade':
-    runUpgrade().catch((error) => {
-      fail(error instanceof Error ? error.message : String(error));
-      process.exit(1);
-    });
-    break;
-  case 'logs': {
-    const n = parseInt(args[1] || '50', 10);
-    const logFile = path.join(CTI_HOME, 'logs', 'bridge.log');
-    if (fs.existsSync(logFile)) {
-      const lines = fs.readFileSync(logFile, 'utf-8').trim().split('\n');
-      console.log(lines.slice(-n).join('\n'));
-    } else {
-      fail('No log file found');
+  switch (command) {
+    case 'onboard':
+    case 'setup':
+      setupWizard().catch((err) => {
+        console.error('Setup error:', err);
+        process.exit(1);
+      });
+      break;
+    case 'start':
+      delegateToDaemon('start');
+      break;
+    case 'restart':
+      delegateToDaemon('restart');
+      break;
+    case 'stop':
+      delegateToDaemon('stop');
+      break;
+    case 'status':
+      showStatus();
+      break;
+    case 'doctor':
+      runDoctor();
+      break;
+    case 'upgrade':
+      runUpgrade().catch((error) => {
+        fail(error instanceof Error ? error.message : String(error));
+        process.exit(1);
+      });
+      break;
+    case 'logs': {
+      const n = parseInt(args[1] || '50', 10);
+      const logFile = path.join(CTI_HOME, 'logs', 'bridge.log');
+      if (fs.existsSync(logFile)) {
+        const lines = fs.readFileSync(logFile, 'utf-8').trim().split('\n');
+        console.log(lines.slice(-n).join('\n'));
+      } else {
+        fail('No log file found');
+      }
+      break;
     }
-    break;
+    case 'help':
+    case '--help':
+    case '-h':
+      showBanner();
+      console.log(`  Usage: ${cliCommand()} [command]`);
+      console.log('');
+      console.log('  Commands:');
+      console.log(`    ${c.cyan}(none)${c.reset}    Interactive onboarding wizard`);
+      console.log(`    ${c.cyan}onboard${c.reset}   Run the onboarding wizard explicitly`);
+      console.log(`    ${c.cyan}start${c.reset}     Start the bridge daemon`);
+      console.log(`    ${c.cyan}restart${c.reset}   Restart the bridge daemon`);
+      console.log(`    ${c.cyan}stop${c.reset}      Stop the bridge daemon`);
+      console.log(`    ${c.cyan}status${c.reset}    Show bridge status`);
+      console.log(`    ${c.cyan}doctor${c.reset}    Run diagnostics`);
+      console.log(`    ${c.cyan}upgrade${c.reset}   Upgrade the local installation`);
+      console.log(`    ${c.cyan}logs${c.reset} [n]  Show last n log lines (default 50)`);
+      console.log(`    ${c.cyan}help${c.reset}      Show this help`);
+      console.log('');
+      break;
+    default:
+      if (command && !command.startsWith('-')) {
+        fail(`Unknown command: ${command}`);
+        info('Run with --help for usage');
+        process.exit(1);
+      }
+      // No command = interactive onboarding
+      setupWizard().catch((err) => {
+        console.error('Setup error:', err);
+        process.exit(1);
+      });
   }
-  case 'help':
-  case '--help':
-  case '-h':
-    showBanner();
-    console.log(`  Usage: ${npxCommand()} [command]`);
-    console.log('');
-    console.log('  Commands:');
-    console.log(`    ${c.cyan}(none)${c.reset}    Interactive onboarding wizard`);
-    console.log(`    ${c.cyan}onboard${c.reset}   Run the onboarding wizard explicitly`);
-    console.log(`    ${c.cyan}start${c.reset}     Start the bridge daemon`);
-    console.log(`    ${c.cyan}restart${c.reset}   Restart the bridge daemon`);
-    console.log(`    ${c.cyan}stop${c.reset}      Stop the bridge daemon`);
-    console.log(`    ${c.cyan}status${c.reset}    Show bridge status`);
-    console.log(`    ${c.cyan}doctor${c.reset}    Run diagnostics`);
-    console.log(`    ${c.cyan}upgrade${c.reset}   Upgrade the local installation`);
-    console.log(`    ${c.cyan}logs${c.reset} [n]  Show last n log lines (default 50)`);
-    console.log(`    ${c.cyan}help${c.reset}      Show this help`);
-    console.log('');
-    break;
-  default:
-    if (command && !command.startsWith('-')) {
-      fail(`Unknown command: ${command}`);
-      info('Run with --help for usage');
-      process.exit(1);
-    }
-    // No command = interactive onboarding
-    setupWizard().catch((err) => {
-      console.error('Setup error:', err);
-      process.exit(1);
-    });
+}
+
+if (isCliEntrypoint()) {
+  runCli();
 }

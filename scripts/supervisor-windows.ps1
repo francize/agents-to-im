@@ -48,13 +48,26 @@ function Ensure-Dirs {
     }
 }
 
+function Test-SourceCheckout {
+    return Test-Path (Join-Path $SkillDir '.git')
+}
+
 function Ensure-Built {
     if (-not (Test-Path $DaemonMjs)) {
+        if (-not (Test-SourceCheckout)) {
+            Write-Host "Missing prebuilt daemon bundle: $DaemonMjs"
+            Write-Host "This installation looks like a packaged npm install, so runtime rebuild is not supported here."
+            Write-Host "Refresh the package with: npm install -g agents-to-im@beta"
+            exit 1
+        }
         Write-Host "Building daemon bundle..."
         Push-Location $SkillDir
         npm run build
         Pop-Location
     } else {
+        if (-not (Test-SourceCheckout)) {
+            return
+        }
         $srcFiles = Get-ChildItem -Path (Join-Path $SkillDir 'src') -Filter '*.ts' -Recurse
         $bundleTime = (Get-Item $DaemonMjs).LastWriteTime
         $stale = $srcFiles | Where-Object { $_.LastWriteTime -gt $bundleTime } | Select-Object -First 1
@@ -106,7 +119,11 @@ function Show-FailureHelp {
     Write-Host "Next steps:"
     Write-Host "  1. Run diagnostics:  powershell -File `"$SkillDir\scripts\doctor.ps1`""
     Write-Host "  2. Check full logs:  powershell -File `"$SkillDir\scripts\daemon.ps1`" logs 100"
-    Write-Host "  3. Rebuild bundle:   cd `"$SkillDir`"; npm run build"
+    if (Test-SourceCheckout) {
+        Write-Host "  3. Rebuild bundle:   cd `"$SkillDir`"; npm run build"
+    } else {
+        Write-Host "  3. Refresh install:  npm install -g agents-to-im@beta"
+    }
 }
 
 function Get-NodePath {
@@ -246,7 +263,11 @@ switch ($Command) {
         if ($existingPid -and (Test-PidAlive $existingPid)) {
             Write-Host "Bridge already running (PID: $existingPid)"
             if (Test-Path $StatusFile) { Get-Content $StatusFile -Raw }
-            exit 1
+            if (-not (Test-StatusRunning)) {
+                Write-Host "Warning: supervisor reports a running bridge, but status.json is stale."
+                Write-Host "Use 'agents-to-im restart' if you want to refresh the runtime state."
+            }
+            exit 0
         }
 
         # Check if registered as Windows Service

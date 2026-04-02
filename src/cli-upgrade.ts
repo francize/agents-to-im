@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const DEFAULT_UPGRADE_PACKAGE_SPEC = 'github:francize/agents-to-im';
+export const DEFAULT_UPGRADE_PACKAGE_SPEC = 'agents-to-im@beta';
 
 export interface UpgradeStep {
   command: string;
@@ -11,7 +11,7 @@ export interface UpgradeStep {
 }
 
 export interface UpgradePlan {
-  mode: 'source' | 'npx';
+  mode: 'source' | 'npm';
   packageRoot: string;
   currentVersion: string;
   restartBridge: boolean;
@@ -121,19 +121,17 @@ export function buildUpgradePlan(options: {
   return {
     ok: true,
     plan: {
-      mode: 'npx',
+      mode: 'npm',
       packageRoot: options.packageRoot,
       currentVersion: options.currentVersion,
-      restartBridge: false,
+      restartBridge: options.bridgeRunning,
       steps: [
         {
-          command: 'npx',
-          args: options.bridgeRunning
-            ? ['--yes', packageSpec, 'restart']
-            : ['--yes', packageSpec, 'help'],
+          command: 'npm',
+          args: ['install', '-g', packageSpec],
           description: options.bridgeRunning
-            ? 'Fetch latest package via npx and restart bridge'
-            : 'Fetch latest package via npx',
+            ? 'Install latest npm package globally before restarting bridge'
+            : 'Install latest npm package globally',
         },
       ],
     },

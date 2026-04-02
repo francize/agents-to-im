@@ -89,7 +89,7 @@ describe('CLI upgrade helpers', () => {
     });
   });
 
-  it('builds an npx upgrade plan for packaged installs', () => {
+  it('builds an npm upgrade plan for packaged installs', () => {
     const result = buildUpgradePlan({
       packageRoot: '/opt/homebrew/lib/node_modules/agents-to-im',
       currentVersion: '0.1.0',
@@ -101,21 +101,21 @@ describe('CLI upgrade helpers', () => {
     if (!result.ok) return;
 
     assert.deepEqual(result.plan, {
-      mode: 'npx',
+      mode: 'npm',
       packageRoot: '/opt/homebrew/lib/node_modules/agents-to-im',
       currentVersion: '0.1.0',
       restartBridge: false,
       steps: [
         {
-          command: 'npx',
-          args: ['--yes', 'github:francize/agents-to-im', 'help'],
-          description: 'Fetch latest package via npx',
+          command: 'npm',
+          args: ['install', '-g', 'agents-to-im@beta'],
+          description: 'Install latest npm package globally',
         },
       ],
     });
   });
 
-  it('uses npx restart when a packaged install upgrades a running bridge', () => {
+  it('restarts bridge after upgrading a packaged npm install', () => {
     const result = buildUpgradePlan({
       packageRoot: '/opt/homebrew/lib/node_modules/agents-to-im',
       currentVersion: '0.1.0',
@@ -127,15 +127,15 @@ describe('CLI upgrade helpers', () => {
     if (!result.ok) return;
 
     assert.deepEqual(result.plan, {
-      mode: 'npx',
+      mode: 'npm',
       packageRoot: '/opt/homebrew/lib/node_modules/agents-to-im',
       currentVersion: '0.1.0',
-      restartBridge: false,
+      restartBridge: true,
       steps: [
         {
-          command: 'npx',
-          args: ['--yes', 'github:francize/agents-to-im', 'restart'],
-          description: 'Fetch latest package via npx and restart bridge',
+          command: 'npm',
+          args: ['install', '-g', 'agents-to-im@beta'],
+          description: 'Install latest npm package globally before restarting bridge',
         },
       ],
     });

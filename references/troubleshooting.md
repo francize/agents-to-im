@@ -3,17 +3,17 @@
 ## Bridge 无法启动
 
 症状：
-- `npx github:francize/agents-to-im start` 失败
+- `agents-to-im start` 失败
 - daemon 启动后立即退出
 
 排查顺序：
-1. 运行 `npx github:francize/agents-to-im doctor`
+1. 运行 `agents-to-im doctor`
 2. 确认 Node.js >= 20：`node --version`
 3. 确认 `~/.agents-to-im/config.env` 存在且包含 `CTI_FEISHU_APP_ID`、`CTI_FEISHU_APP_SECRET`
 4. 确认至少一个 runtime 可用：
    - Claude：`claude --version`
    - Codex：检查 `codex --version`、`codex app-server --help` 与 `~/.codex/config.toml`
-5. 查看日志：`npx github:francize/agents-to-im logs 200`
+5. 查看日志：`agents-to-im logs 200`
 
 常见原因：
 - Feishu 凭据缺失或填错
@@ -100,10 +100,10 @@
 ## PID 状态异常
 
 症状：
-- `npx github:francize/agents-to-im status` 显示运行中，但进程实际不存在
+- `agents-to-im status` 显示运行中，但进程实际不存在
 - `start` 认为已经启动
 
 排查顺序：
-1. 先执行 `npx github:francize/agents-to-im stop`
+1. 先执行 `agents-to-im stop`
 2. 仍异常时，删除 `~/.agents-to-im/runtime/bridge.pid`
-3. 重新执行 `npx github:francize/agents-to-im restart`
+3. 重新执行 `agents-to-im restart`

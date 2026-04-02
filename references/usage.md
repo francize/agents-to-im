@@ -1,26 +1,26 @@
 # Usage Guide
 
-推荐直接通过 `npx github:francize/agents-to-im ...` 管理 daemon；真正的模型对话发生在 Bot 自动创建的群里。
+先执行 `npm install -g agents-to-im@beta`，然后通过 `agents-to-im ...` 管理 daemon；真正的模型对话发生在 Bot 自动创建的群里。
 
 ## onboard
 
 显式运行引导：
 
 ```bash
-npx github:francize/agents-to-im onboard
+agents-to-im onboard
 ```
 
 日常维护统一使用：
 
 ```bash
-npx github:francize/agents-to-im onboard
-npx github:francize/agents-to-im start
-npx github:francize/agents-to-im restart
-npx github:francize/agents-to-im status
-npx github:francize/agents-to-im doctor
-npx github:francize/agents-to-im upgrade
-npx github:francize/agents-to-im logs 200
-npx github:francize/agents-to-im stop
+agents-to-im onboard
+agents-to-im start
+agents-to-im restart
+agents-to-im status
+agents-to-im doctor
+agents-to-im upgrade
+agents-to-im logs 200
+agents-to-im stop
 ```
 
 ## setup
@@ -28,7 +28,7 @@ npx github:francize/agents-to-im stop
 `setup` 现在就是飞书/Lark 配置说明：
 
 ```bash
-npx github:francize/agents-to-im onboard
+agents-to-im onboard
 ```
 
 你需要准备：
@@ -53,17 +53,17 @@ Claude 和 Codex 都直接复用本机 CLI 默认行为。Codex 直接复用本�
 启动 bridge daemon：
 
 ```bash
-npx github:francize/agents-to-im start
+agents-to-im start
 ```
 
-如果启动失败，优先执行 `npx github:francize/agents-to-im doctor`。
+如果启动失败，优先执行 `agents-to-im doctor`。
 
 ## restart
 
 配置或代码变化后的推荐恢复方式：
 
 ```bash
-npx github:francize/agents-to-im restart
+agents-to-im restart
 bash scripts/daemon.sh restart
 ```
 
@@ -74,7 +74,7 @@ bash scripts/daemon.sh restart
 停止 daemon：
 
 ```bash
-npx github:francize/agents-to-im stop
+agents-to-im stop
 ```
 
 ## status
@@ -82,7 +82,7 @@ npx github:francize/agents-to-im stop
 查看 daemon 运行状态：
 
 ```bash
-npx github:francize/agents-to-im status
+agents-to-im status
 ```
 
 输出会包含：
@@ -96,8 +96,8 @@ npx github:francize/agents-to-im status
 查看最近日志：
 
 ```bash
-npx github:francize/agents-to-im logs
-npx github:francize/agents-to-im logs 200
+agents-to-im logs
+agents-to-im logs 200
 ```
 
 日志文件默认位于 `~/.agents-to-im/logs/`，会自动脱敏。
@@ -107,7 +107,7 @@ npx github:francize/agents-to-im logs 200
 执行本地诊断：
 
 ```bash
-npx github:francize/agents-to-im doctor
+agents-to-im doctor
 ```
 
 当前检查项包括：

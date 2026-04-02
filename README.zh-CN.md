@@ -22,12 +22,13 @@
 >
 > **凭据：** 存储在 `~/.agents-to-im/config.env`，文件权限 `600`。所有日志输出中的密钥均已脱敏。
 >
-> **停用：** `npx github:francize/agents-to-im stop`
+> **停用：** `agents-to-im stop`
 >
 > **卸载：** `rm -rf ~/.agents-to-im`
 
 ```bash
-npx github:francize/agents-to-im onboard
+npm install -g agents-to-im@beta
+agents-to-im onboard
 ```
 
 ---
@@ -70,23 +71,24 @@ Bot → 完成。已修复 handleCallback() 中的重定向循环。
 
 ## 安装
 
-### 推荐：直接通过 npx 使用
+### 推荐：通过 npm 安装
 
 ```bash
-npx github:francize/agents-to-im onboard
+npm install -g agents-to-im@beta
+agents-to-im onboard
 ```
 
-后续统一通过 `npx github:francize/agents-to-im ...` 管理 daemon：
+后续统一通过 `agents-to-im ...` 管理 daemon：
 
 ```bash
-npx github:francize/agents-to-im onboard      # 显式运行引导
-npx github:francize/agents-to-im start        # 启动 daemon
-npx github:francize/agents-to-im stop         # 停止 daemon
-npx github:francize/agents-to-im restart      # 配置变更后重启
-npx github:francize/agents-to-im status       # 检查运行状态
-npx github:francize/agents-to-im doctor       # 诊断常见问题
-npx github:francize/agents-to-im upgrade      # 升级本地服务并在运行中时重启 bridge
-npx github:francize/agents-to-im logs 200     # 查看最近日志
+agents-to-im onboard      # 显式运行引导
+agents-to-im start        # 启动 daemon
+agents-to-im stop         # 停止 daemon
+agents-to-im restart      # 配置变更后重启
+agents-to-im status       # 检查运行状态
+agents-to-im doctor       # 诊断常见问题
+agents-to-im upgrade      # 升级本地服务并在运行中时重启 bridge
+agents-to-im logs 200     # 查看最近日志
 ```
 
 <details>
@@ -160,9 +162,9 @@ Claude 和 Codex 的默认模型、审批策略都直接由本机 CLI 自己决�
 ### 3. 启动并验证
 
 ```bash
-npx github:francize/agents-to-im start
-npx github:francize/agents-to-im doctor        # 检查常见问题
-npx github:francize/agents-to-im status        # 确认 bridge 正在运行
+agents-to-im start
+agents-to-im doctor        # 检查常见问题
+agents-to-im status        # 确认 bridge 正在运行
 ```
 
 打开 `http://127.0.0.1:13578` 访问本地状态面板，然后私聊 Bot 发送 `/new:claude` 或 `/new:codex`。
@@ -269,7 +271,7 @@ Bridge 只把 AI 生成的文本和活动摘要发到飞书。你的源代码留
 
 | 症状 | 第一步 |
 |------|--------|
-| bridge 启动失败 | `npx github:francize/agents-to-im doctor` |
+| bridge 启动失败 | `agents-to-im doctor` |
 | 私聊 Bot 没反应 | 检查应用是否已发布、Bot 是否启用、长连接是否配置 |
 | `/new:*` 建群但绑定失败 | 检查应用权限和本地 runtime 可用性 |
 | 卡片退化为普通文本 | 验证 CardKit 和消息更新权限 |

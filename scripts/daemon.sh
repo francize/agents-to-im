@@ -11,24 +11,36 @@ RESTART_SETTLE_SECONDS="${CTI_RESTART_SETTLE_SECONDS:-12}"
 
 ensure_dirs() { mkdir -p "$CTI_HOME"/{data,logs,runtime,data/messages}; }
 
+is_source_checkout() {
+  [ -d "$SKILL_DIR/.git" ]
+}
+
 load_config_env() {
   [ -f "$CTI_HOME/config.env" ] && set -a && source "$CTI_HOME/config.env" && set +a
 }
 
 ensure_built() {
-  local need_build=0
   if [ ! -f "$SKILL_DIR/dist/daemon.mjs" ]; then
-    need_build=1
-  else
-    # Check if any source file is newer than the bundle
-    local newest_src
-    newest_src=$(find "$SKILL_DIR/src" -name '*.ts' -newer "$SKILL_DIR/dist/daemon.mjs" 2>/dev/null | head -1)
-    if [ -n "$newest_src" ]; then
-      need_build=1
+    if ! is_source_checkout; then
+      echo "Missing prebuilt daemon bundle: $SKILL_DIR/dist/daemon.mjs"
+      echo "This installation looks like a packaged npm install, so runtime rebuild is not supported here."
+      echo "Refresh the package with: npm install -g agents-to-im@beta"
+      exit 1
     fi
-  fi
-  if [ "$need_build" = "1" ]; then
     echo "Building daemon bundle..."
+    (cd "$SKILL_DIR" && npm run build)
+    return
+  fi
+
+  if ! is_source_checkout; then
+    return
+  fi
+
+  # Only a live source checkout should trigger rebuild-on-change.
+  local newest_src
+  newest_src=$(find "$SKILL_DIR/src" -name '*.ts' -newer "$SKILL_DIR/dist/daemon.mjs" 2>/dev/null | head -1)
+  if [ -n "$newest_src" ]; then
+    echo "Rebuilding daemon bundle (source changed)..."
     (cd "$SKILL_DIR" && npm run build)
   fi
 }
@@ -75,7 +87,11 @@ show_failure_help() {
   echo "Next steps:"
   echo "  1. Run diagnostics:  bash \"$SKILL_DIR/scripts/doctor.sh\""
   echo "  2. Check full logs:  bash \"$SKILL_DIR/scripts/daemon.sh\" logs 100"
-  echo "  3. Rebuild bundle:   cd \"$SKILL_DIR\" && npm run build"
+  if is_source_checkout; then
+    echo "  3. Rebuild bundle:   cd \"$SKILL_DIR\" && npm run build"
+  else
+    echo "  3. Refresh install:  npm install -g agents-to-im@beta"
+  fi
 }
 
 feishu_ws_endpoint_code() {
@@ -227,7 +243,11 @@ case "${1:-help}" in
       EXISTING_PID=$(read_pid)
       echo "Bridge already running${EXISTING_PID:+ (PID: $EXISTING_PID)}"
       cat "$STATUS_FILE" 2>/dev/null
-      exit 1
+      if ! status_running; then
+        echo "Warning: supervisor reports a running bridge, but status.json is stale."
+        echo "Use 'agents-to-im restart' if you want to refresh the runtime state."
+      fi
+      exit 0
     fi
 
     # Source config.env BEFORE clean_env so that CTI_ANTHROPIC_PASSTHROUGH
