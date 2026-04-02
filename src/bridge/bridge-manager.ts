@@ -2072,6 +2072,13 @@ async function handleMessage(
         if (handledByClaudeExitPlan) {
           // Claude SDK already surfaced its native plan-exit approval. Do not
           // stack the legacy bridge-owned execute/continue/cancel card on top.
+          if (
+            effectivePlanWorkflowMeta?.attemptId
+            && workflow.activeAttemptId === effectivePlanWorkflowMeta.attemptId
+            && workflow.status !== 'awaiting_confirmation'
+          ) {
+            store.deletePlanWorkflow(workflow.workflowId);
+          }
         } else if (!isCodexRuntime(binding.codepilotSessionId) && result.responseText) {
           const sent = await sendClaudePlanConfirmationCard(
             workflow.workflowId,

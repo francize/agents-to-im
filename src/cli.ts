@@ -60,6 +60,44 @@ const c = {
   bgBlue: '\x1b[44m',
 };
 
+const ANSI_ESCAPE_PATTERN = /\x1B\[[0-?]*[ -/]*[@-~]/g;
+const BANNER_SIDE_PADDING = 2;
+
+function stripAnsi(value: string): string {
+  return value.replace(ANSI_ESCAPE_PATTERN, '');
+}
+
+function isWideCodePoint(codePoint: number): boolean {
+  return codePoint >= 0x1100 && (
+    codePoint <= 0x115f ||
+    codePoint === 0x2329 ||
+    codePoint === 0x232a ||
+    (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+    (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+    (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+    (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+    (codePoint >= 0x1f300 && codePoint <= 0x1f64f) ||
+    (codePoint >= 0x1f900 && codePoint <= 0x1f9ff) ||
+    (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+  );
+}
+
+export function getDisplayWidth(value: string): number {
+  const text = stripAnsi(value);
+  let width = 0;
+  for (const char of text) {
+    const codePoint = char.codePointAt(0);
+    if (!codePoint) continue;
+    if (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)) continue;
+    if (codePoint === 0xfe0e || codePoint === 0xfe0f || /\p{Mark}/u.test(char)) continue;
+    width += isWideCodePoint(codePoint) ? 2 : 1;
+  }
+  return width;
+}
+
 function ok(msg: string) { console.log(`  ${c.green}✓${c.reset} ${msg}`); }
 function warn(msg: string) { console.log(`  ${c.yellow}⚠${c.reset} ${msg}`); }
 function fail(msg: string) { console.log(`  ${c.red}✗${c.reset} ${msg}`); }
@@ -131,13 +169,39 @@ function detectAgents(): AgentInfo[] {
 
 // ── Banner ──
 
+type BannerLine = {
+  text: string;
+  format: (value: string) => string;
+};
+
+const BANNER_LINES: BannerLine[] = [
+  { text: '⚡ agents-to-im', format: (value) => `${c.bold}${value}${c.reset}` },
+  { text: 'Feishu/Lark bridge for AI coding agents', format: (value) => `${c.dim}${value}${c.reset}` },
+];
+
+export function buildBannerLines(): string[] {
+  const contentWidth = Math.max(...BANNER_LINES.map((line) => getDisplayWidth(line.text)));
+  const innerWidth = contentWidth + (BANNER_SIDE_PADDING * 2);
+  const border = `${c.bold}${c.magenta}`;
+  const top = `  ${border}┌${'─'.repeat(innerWidth)}┐${c.reset}`;
+  const bottom = `  ${border}└${'─'.repeat(innerWidth)}┘${c.reset}`;
+  const body = BANNER_LINES.map(({ text, format }) => {
+    const trailingSpaces = innerWidth - BANNER_SIDE_PADDING - getDisplayWidth(text);
+    return (
+      `  ${border}│${c.reset}` +
+      `${' '.repeat(BANNER_SIDE_PADDING)}` +
+      `${format(text)}` +
+      `${' '.repeat(trailingSpaces)}` +
+      `${border}│${c.reset}`
+    );
+  });
+  return ['', top, ...body, bottom, ''];
+}
+
 function showBanner() {
-  console.log('');
-  console.log(`  ${c.bold}${c.magenta}┌─────────────────────────────────────────┐${c.reset}`);
-  console.log(`  ${c.bold}${c.magenta}│${c.reset}  ${c.bold}⚡ agents-to-im${c.reset}                        ${c.bold}${c.magenta}│${c.reset}`);
-  console.log(`  ${c.bold}${c.magenta}│${c.reset}  ${c.dim}Feishu/Lark bridge for AI coding agents${c.reset}  ${c.bold}${c.magenta}│${c.reset}`);
-  console.log(`  ${c.bold}${c.magenta}└─────────────────────────────────────────┘${c.reset}`);
-  console.log('');
+  for (const line of buildBannerLines()) {
+    console.log(line);
+  }
 }
 
 export function parseLaunchdPid(output: string): string {

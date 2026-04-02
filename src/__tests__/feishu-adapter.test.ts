@@ -2744,7 +2744,11 @@ describe('FeishuAdapter', () => {
     assert.deepEqual(patchParams, { message_id_type: 'open_message_id' });
     assert.equal(store.getChannelBinding('feishu', 'group-claude-plan')?.mode, 'code');
     assert.equal(store.getChannelBinding('feishu', 'group-claude-plan')?.claudePermissionMode, 'default');
-    assert.equal(store.getPlanWorkflow('wf-claude-manual'), null);
+    assert.equal((adapter as any).queue.length, 0);
+    assert.equal(store.getPlanWorkflow('wf-claude-manual')?.status, 'planning');
+    assert.equal(store.getPlanWorkflow('wf-claude-manual')?.approvalRequestId, '');
+    assert.equal(store.getPlanWorkflow('wf-claude-manual')?.actionCardMessageId, '');
+    assert.equal(store.getPlanWorkflow('wf-claude-manual')?.actionCardOpenMessageId, '');
     assert.equal(patchedBeforeResolve, true);
     assert.deepEqual(resolutions[0], {
       behavior: 'allow',

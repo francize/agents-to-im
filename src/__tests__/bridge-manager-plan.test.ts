@@ -585,6 +585,106 @@ describe('bridge-manager plan workflow', () => {
     ]);
   });
 
+  it('keeps Claude execution output flowing after ExitPlanMode approval until the current attempt finishes', async () => {
+    const store = new JsonFileStore(makeSettings());
+    let releaseExecution: (() => void) | null = null;
+    const executionReleased = new Promise<void>((resolve) => {
+      releaseExecution = resolve;
+    });
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'permission_request',
+              data: JSON.stringify({
+                permissionRequestId: 'perm-exit-continue',
+                toolName: 'ExitPlanMode',
+                toolInput: {
+                  plan: '# 计划\\n\\n1. 创建 HTML\\n2. 截图验证',
+                  allowedPrompts: [],
+                },
+              }),
+            })}\n`);
+            executionReleased.then(() => {
+              controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '好的，开始执行。' })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-exit-continue' }) })}\n`);
+              controller.close();
+            });
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    const binding = store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-exit-continue',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+    store.upsertPlanWorkflow({
+      workflowId: 'wf-exit-continue',
+      bindingId: binding.id,
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-exit-continue',
+      codepilotSessionId: session.id,
+      status: 'planning',
+      previousMode: 'code',
+      requestText: '生成单文件页面',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-exit-continue', threadId: 'thread-1' },
+      routeKey: 'chat-exit-continue:thread:thread-1',
+      requestMessageId: 'msg-exit-continue',
+      activeAttemptId: 'attempt-exit-continue',
+      resolved: true,
+    });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-exit-continue',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-exit-continue', threadId: 'thread-1' },
+      text: '生成单文件页面',
+      timestamp: Date.now(),
+      bridgeMeta: {
+        planWorkflow: {
+          kind: 'plan_request',
+          workflowId: 'wf-exit-continue',
+          attemptId: 'attempt-exit-continue',
+          promptText: 'PLAN PROMPT',
+          storedUserText: '生成单文件页面',
+          permissionMode: 'plan',
+        },
+      },
+    });
+
+    await waitFor(() => adapter.sent.length === 1);
+    assert.equal(store.getPlanWorkflow('wf-exit-continue')?.status, 'awaiting_confirmation');
+
+    store.updatePlanWorkflow('wf-exit-continue', {
+      status: 'planning',
+      approvalRequestId: '',
+      actionCardMessageId: '',
+      actionCardOpenMessageId: '',
+      resolved: true,
+    });
+    releaseExecution?.();
+
+    await waitFor(() => adapter.sent.length === 2);
+
+    assert.equal(adapter.sent[1].text, '好的，开始执行。');
+    await waitFor(() => store.getPlanWorkflow('wf-exit-continue') === null);
+  });
+
   it('turns a native_plan_request synthetic message into a native plan reply plus a confirmation card', async () => {
     const store = new JsonFileStore(makeSettings());
     const llmCalls: Array<Record<string, unknown>> = [];

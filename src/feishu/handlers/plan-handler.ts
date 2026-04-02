@@ -505,7 +505,6 @@ export async function handleClaudePlanExitCardAction(
       mode: 'code',
       claudePermissionMode: variant === 'bypass' ? 'bypassPermissions' : 'default',
     });
-    store.deletePlanWorkflow(workflowId);
     await ctx.syncChatName(workflow.chatId);
     const resolved = resolvePermission({
       behavior: 'allow',
@@ -514,7 +513,16 @@ export async function handleClaudePlanExitCardAction(
         allowedPrompts,
       ),
     });
-    if (!resolved) {
+    if (resolved) {
+      store.updatePlanWorkflow(workflowId, {
+        status: 'planning',
+        approvalRequestId: '',
+        actionCardMessageId: '',
+        actionCardOpenMessageId: '',
+        resolved: true,
+      });
+    } else {
+      store.deletePlanWorkflow(workflowId);
       ctx.enqueue(ctx.buildPlanExecutionInbound(
         workflow.address,
         workflow.requestMessageId || workflow.planMessageId || workflow.actionCardMessageId || workflow.workflowId,
