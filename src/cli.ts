@@ -9,18 +9,27 @@
  *   agents-to-im stop    → Stop the bridge
  *   agents-to-im status  → Show bridge status
  *   agents-to-im doctor  → Run diagnostics
+ *   agents-to-im upgrade → Upgrade the local installation
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
-import { execSync, spawn } from 'node:child_process';
+import { execSync, spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+import {
+  buildUpgradePlan,
+  findAgentsToImPackageRoot,
+  readAgentsToImVersion,
+} from './cli-upgrade.js';
 
 const CTI_HOME = process.env.CTI_HOME || path.join(os.homedir(), '.agents-to-im');
 const CONFIG_PATH = path.join(CTI_HOME, 'config.env');
 const PID_FILE = path.join(CTI_HOME, 'runtime', 'bridge.pid');
 const STATUS_FILE = path.join(CTI_HOME, 'runtime', 'status.json');
+const CLI_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 // ── Colors ──
 
@@ -116,6 +125,64 @@ function showBanner() {
   console.log(`  ${c.bold}${c.magenta}│${c.reset}  ${c.dim}Feishu/Lark bridge for AI coding agents${c.reset}  ${c.bold}${c.magenta}│${c.reset}`);
   console.log(`  ${c.bold}${c.magenta}└─────────────────────────────────────────┘${c.reset}`);
   console.log('');
+}
+
+function getBridgeStatusSnapshot(): { running: boolean; pid: string; statusJson: Record<string, unknown> } {
+  let pid = '';
+  try { pid = fs.readFileSync(PID_FILE, 'utf-8').trim(); } catch { /* */ }
+
+  let statusJson: Record<string, unknown> = {};
+  try { statusJson = JSON.parse(fs.readFileSync(STATUS_FILE, 'utf-8')); } catch { /* */ }
+
+  if (statusJson.running !== true || !pid) {
+    return { running: false, pid, statusJson };
+  }
+
+  try {
+    process.kill(parseInt(pid, 10), 0);
+    return { running: true, pid, statusJson };
+  } catch {
+    return { running: false, pid, statusJson };
+  }
+}
+
+function resolveExecutable(command: string): string {
+  if (process.platform === 'win32' && command === 'npm') {
+    return 'npm.cmd';
+  }
+  return command;
+}
+
+function ensureCommandAvailable(command: string) {
+  const result = spawnSync(resolveExecutable(command), ['--version'], {
+    stdio: 'ignore',
+    env: process.env,
+  });
+  if (result.status === 0) return;
+  const detail = result.error instanceof Error ? `: ${result.error.message}` : '';
+  throw new Error(`Required command not found or not working: ${command}${detail}`);
+}
+
+function runChild(
+  command: string,
+  args: string[],
+  options?: { cwd?: string; env?: NodeJS.ProcessEnv },
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(resolveExecutable(command), args, {
+      stdio: 'inherit',
+      cwd: options?.cwd,
+      env: options?.env || process.env,
+    });
+    child.once('error', reject);
+    child.once('exit', (code) => {
+      if ((code || 0) === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`${command} ${args.join(' ')} exited with code ${code ?? 'unknown'}`));
+    });
+  });
 }
 
 // ── Setup wizard ──
@@ -389,8 +456,8 @@ function runDoctor() {
 function findDaemonScript(): string | null {
   // Look relative to this script's location
   const candidates = [
-    path.join(__dirname, '..', 'scripts', 'daemon.sh'),
-    path.join(__dirname, 'scripts', 'daemon.sh'),
+    path.join(CLI_DIR, '..', 'scripts', 'daemon.sh'),
+    path.join(CLI_DIR, 'scripts', 'daemon.sh'),
     path.join(process.cwd(), 'scripts', 'daemon.sh'),
   ];
   for (const p of candidates) {
@@ -399,18 +466,107 @@ function findDaemonScript(): string | null {
   return null;
 }
 
-function delegateToDaemon(command: string) {
+async function runDaemonCommand(command: string): Promise<void> {
   const script = findDaemonScript();
   if (!script) {
-    fail('Cannot find daemon.sh script');
-    info('If running from source, make sure you are in the project directory');
-    process.exit(1);
+    throw new Error('Cannot find daemon.sh script');
   }
-  const child = spawn('bash', [script, command], {
-    stdio: 'inherit',
+  await runChild('bash', [script, command], {
     env: { ...process.env, CTI_HOME },
   });
-  child.on('exit', (code) => process.exit(code || 0));
+}
+
+function delegateToDaemon(command: string) {
+  runDaemonCommand(command).then(() => {
+    process.exit(0);
+  }).catch((error) => {
+    fail(error instanceof Error ? error.message : String(error));
+    info('If running from source, make sure you are in the project directory');
+    process.exit(1);
+  });
+}
+
+async function runUpgrade() {
+  showBanner();
+  heading('⬆️ Upgrade agents-to-im');
+
+  const packageRoot = findAgentsToImPackageRoot(CLI_DIR) || findAgentsToImPackageRoot(process.cwd());
+  if (!packageRoot) {
+    fail('Cannot determine the agents-to-im package root from the current installation.');
+    process.exit(1);
+  }
+
+  const currentVersion = readAgentsToImVersion(packageRoot);
+  const isSourceCheckout = fs.existsSync(path.join(packageRoot, '.git'));
+  const bridge = getBridgeStatusSnapshot();
+
+  let gitStatusOutput = '';
+  if (isSourceCheckout) {
+    ensureCommandAvailable('git');
+    try {
+      gitStatusOutput = execSync('git status --porcelain', {
+        cwd: packageRoot,
+        encoding: 'utf-8',
+        timeout: 5000,
+      });
+    } catch (error) {
+      fail(`Cannot inspect git worktree: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    }
+  }
+
+  ensureCommandAvailable('npm');
+
+  const result = buildUpgradePlan({
+    packageRoot,
+    currentVersion,
+    isSourceCheckout,
+    bridgeRunning: bridge.running,
+    gitStatusOutput,
+  });
+
+  if (!result.ok) {
+    fail(result.reason);
+    if (isSourceCheckout) {
+      info('Commit or stash local changes, then rerun `agents-to-im upgrade`.');
+    }
+    process.exit(1);
+  }
+
+  const { plan } = result;
+  info(`Current version: ${plan.currentVersion}`);
+  info(`Install mode: ${plan.mode === 'source' ? 'source checkout' : 'global npm package'}`);
+  info(`Package root: ${plan.packageRoot}`);
+  info(`Bridge running: ${bridge.running ? `yes${bridge.pid ? ` (PID: ${bridge.pid})` : ''}` : 'no'}`);
+  console.log('');
+  info('Upgrade steps:');
+  for (const step of plan.steps) {
+    const location = step.cwd ? ` ${c.dim}(cwd: ${step.cwd})${c.reset}` : '';
+    console.log(`    ${c.cyan}$ ${step.command} ${step.args.join(' ')}${c.reset}${location}`);
+  }
+  if (plan.restartBridge) {
+    info('Bridge will be restarted after the upgrade completes.');
+  }
+  console.log('');
+
+  for (const step of plan.steps) {
+    info(`${step.description}...`);
+    await runChild(step.command, step.args, {
+      cwd: step.cwd,
+      env: { ...process.env, CTI_HOME },
+    });
+    ok(step.description);
+  }
+
+  if (plan.restartBridge) {
+    info('Restarting bridge...');
+    await runDaemonCommand('restart');
+    ok('Bridge restarted');
+  } else {
+    info(`Upgrade complete. Start the bridge with ${c.cyan}agents-to-im start${c.reset} when ready.`);
+  }
+
+  console.log('');
 }
 
 // ── Main ──
@@ -433,6 +589,12 @@ switch (command) {
     break;
   case 'doctor':
     runDoctor();
+    break;
+  case 'upgrade':
+    runUpgrade().catch((error) => {
+      fail(error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    });
     break;
   case 'logs': {
     const n = parseInt(args[1] || '50', 10);
@@ -458,6 +620,7 @@ switch (command) {
     console.log(`    ${c.cyan}stop${c.reset}      Stop the bridge daemon`);
     console.log(`    ${c.cyan}status${c.reset}    Show bridge status`);
     console.log(`    ${c.cyan}doctor${c.reset}    Run diagnostics`);
+    console.log(`    ${c.cyan}upgrade${c.reset}   Upgrade the local installation`);
     console.log(`    ${c.cyan}logs${c.reset} [n]  Show last n log lines (default 50)`);
     console.log(`    ${c.cyan}help${c.reset}      Show this help`);
     console.log('');

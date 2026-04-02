@@ -84,6 +84,7 @@ agents-to-im stop         # 停止 daemon
 agents-to-im restart      # 配置变更后重启
 agents-to-im status       # 检查运行状态
 agents-to-im doctor       # 诊断常见问题
+agents-to-im upgrade      # 升级本地安装并在运行中时重启 bridge
 agents-to-im logs 200     # 查看最近日志
 ```
 

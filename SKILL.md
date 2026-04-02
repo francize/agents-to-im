@@ -5,7 +5,7 @@ description: |
   Use for: CLI install guidance, setup guidance, start/stop/status/logs/doctor,
   checking bridge health, or explaining how to configure the Feishu bot.
   This skill is Feishu/Lark-only.
-argument-hint: "install-cli | setup | start | stop | status | logs [N] | doctor"
+argument-hint: "install-cli | setup | start | stop | status | logs [N] | doctor | upgrade"
 allowed-tools:
   - Bash
   - Read
@@ -34,6 +34,7 @@ Map `$ARGUMENTS` to one of:
 - `status`
 - `logs`
 - `doctor`
+- `upgrade`
 
 If no configuration exists at `~/.agents-to-im/config.env`, show `config.env.example` and explain the required Feishu fields. Do not try to start the daemon without config.
 
@@ -52,6 +53,7 @@ After that, daily maintenance should use:
 - `agents-to-im restart`
 - `agents-to-im status`
 - `agents-to-im doctor`
+- `agents-to-im upgrade`
 - `agents-to-im logs 100`
 
 Keep `npx github:francize/agents-to-im` only as a fallback for temporary use or one-shot trials.

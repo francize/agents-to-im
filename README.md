@@ -84,6 +84,7 @@ agents-to-im stop         # stop the daemon
 agents-to-im restart      # restart after config changes
 agents-to-im status       # check if running
 agents-to-im doctor       # diagnose common issues
+agents-to-im upgrade      # upgrade the local install and restart the bridge if it is running
 agents-to-im logs 200     # view recent logs
 ```
 
