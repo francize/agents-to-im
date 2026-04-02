@@ -5,7 +5,7 @@ description: |
   Use for: CLI install guidance, setup guidance, start/stop/status/logs/doctor,
   checking bridge health, or explaining how to configure the Feishu bot.
   This skill is Feishu/Lark-only.
-argument-hint: "install-cli | setup | start | stop | status | logs [N] | doctor | upgrade"
+argument-hint: "onboard | setup | start | stop | status | logs [N] | doctor | upgrade"
 allowed-tools:
   - Bash
   - Read
@@ -27,7 +27,7 @@ If that path does not exist, find `SKILL.md` via glob and derive the root direct
 
 Map `$ARGUMENTS` to one of:
 
-- `install-cli`
+- `onboard`
 - `setup`
 - `start`
 - `stop`
@@ -38,25 +38,19 @@ Map `$ARGUMENTS` to one of:
 
 If no configuration exists at `~/.agents-to-im/config.env`, show `config.env.example` and explain the required Feishu fields. Do not try to start the daemon without config.
 
-## CLI install
+## CLI usage
 
-If the user wants a persistent local command instead of `npx`, guide them to install the CLI once:
+Prefer `npx` as the primary entrypoint:
 
-```bash
-npm install -g github:francize/agents-to-im
-```
+- `npx github:francize/agents-to-im onboard`
+- `npx github:francize/agents-to-im start`
+- `npx github:francize/agents-to-im restart`
+- `npx github:francize/agents-to-im status`
+- `npx github:francize/agents-to-im doctor`
+- `npx github:francize/agents-to-im upgrade`
+- `npx github:francize/agents-to-im logs 100`
 
-After that, daily maintenance should use:
-
-- `agents-to-im`
-- `agents-to-im start`
-- `agents-to-im restart`
-- `agents-to-im status`
-- `agents-to-im doctor`
-- `agents-to-im upgrade`
-- `agents-to-im logs 100`
-
-Keep `npx github:francize/agents-to-im` only as a fallback for temporary use or one-shot trials.
+Use source checkout commands only for development/debugging.
 
 ## Setup
 
@@ -88,7 +82,7 @@ This project no longer has a multi-platform setup wizard. Setup means:
 
 Use:
 
-- `agents-to-im`
+- `npx github:francize/agents-to-im onboard`
 - `bash "SKILL_DIR/scripts/daemon.sh" start`
 - `bash "SKILL_DIR/scripts/daemon.sh" stop`
 - `bash "SKILL_DIR/scripts/daemon.sh" status`

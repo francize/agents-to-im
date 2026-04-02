@@ -11,7 +11,7 @@ export interface UpgradeStep {
 }
 
 export interface UpgradePlan {
-  mode: 'source' | 'global';
+  mode: 'source' | 'npx';
   packageRoot: string;
   currentVersion: string;
   restartBridge: boolean;
@@ -121,15 +121,19 @@ export function buildUpgradePlan(options: {
   return {
     ok: true,
     plan: {
-      mode: 'global',
+      mode: 'npx',
       packageRoot: options.packageRoot,
       currentVersion: options.currentVersion,
-      restartBridge: options.bridgeRunning,
+      restartBridge: false,
       steps: [
         {
-          command: 'npm',
-          args: ['install', '-g', packageSpec],
-          description: 'Install latest global release',
+          command: 'npx',
+          args: options.bridgeRunning
+            ? ['--yes', packageSpec, 'restart']
+            : ['--yes', packageSpec, 'help'],
+          description: options.bridgeRunning
+            ? 'Fetch latest package via npx and restart bridge'
+            : 'Fetch latest package via npx',
         },
       ],
     },

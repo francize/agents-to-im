@@ -22,12 +22,12 @@
 >
 > **Credentials:** Stored in `~/.agents-to-im/config.env` with `600` permissions. Secrets are masked in all log output.
 >
-> **Disable:** `agents-to-im stop`
+> **Disable:** `npx github:francize/agents-to-im stop`
 >
-> **Uninstall:** `npm uninstall -g agents-to-im && rm -rf ~/.agents-to-im`
+> **Uninstall:** `rm -rf ~/.agents-to-im`
 
 ```bash
-npm install -g github:francize/agents-to-im
+npx github:francize/agents-to-im onboard
 ```
 
 ---
@@ -70,22 +70,23 @@ You → /mode                    # switch Claude mode
 
 ## Install
 
-### Recommended: Global CLI
+### Recommended: Use npx directly
 
 ```bash
-npm install -g github:francize/agents-to-im
+npx github:francize/agents-to-im onboard
 ```
 
-After installation, use the `agents-to-im` command for daily operation:
+Use `npx github:francize/agents-to-im ...` for daily operation:
 
 ```bash
-agents-to-im start        # start the daemon
-agents-to-im stop         # stop the daemon
-agents-to-im restart      # restart after config changes
-agents-to-im status       # check if running
-agents-to-im doctor       # diagnose common issues
-agents-to-im upgrade      # upgrade the local install and restart the bridge if it is running
-agents-to-im logs 200     # view recent logs
+npx github:francize/agents-to-im onboard      # run onboarding explicitly
+npx github:francize/agents-to-im start        # start the daemon
+npx github:francize/agents-to-im stop         # stop the daemon
+npx github:francize/agents-to-im restart      # restart after config changes
+npx github:francize/agents-to-im status       # check if running
+npx github:francize/agents-to-im doctor       # diagnose common issues
+npx github:francize/agents-to-im upgrade      # upgrade the local service and restart if it is running
+npx github:francize/agents-to-im logs 200     # view recent logs
 ```
 
 <details>
@@ -103,17 +104,6 @@ $EDITOR ~/.agents-to-im/config.env
 
 bash scripts/daemon.sh restart
 ```
-
-</details>
-
-<details>
-<summary><b>Alternative: One-shot via npx</b></summary>
-
-```bash
-npx github:francize/agents-to-im
-```
-
-Not recommended for daily use — prefer the global install.
 
 </details>
 
@@ -170,9 +160,9 @@ Claude and Codex both use the local CLI defaults on the host machine for model s
 ### 3. Start and verify
 
 ```bash
-agents-to-im start
-agents-to-im doctor        # check for common issues
-agents-to-im status        # confirm the bridge is running
+npx github:francize/agents-to-im start
+npx github:francize/agents-to-im doctor        # check for common issues
+npx github:francize/agents-to-im status        # confirm the bridge is running
 ```
 
 Open `http://127.0.0.1:13578` to access the local dashboard, then DM the bot with `/new:claude` or `/new:codex`.
@@ -279,7 +269,7 @@ This project was inspired by that work, and this repository is a Feishu/Lark-foc
 
 | Symptom | First step |
 |---------|------------|
-| Bridge won't start | `agents-to-im doctor` |
+| Bridge won't start | `npx github:francize/agents-to-im doctor` |
 | Bot doesn't reply to DM | Check app is published, Bot enabled, Long Connection configured |
 | `/new:*` creates group but fails to bind | Check app scopes and local runtime availability |
 | Cards fall back to plain text | Verify CardKit and message update permissions |

@@ -3,13 +3,13 @@
  * Interactive CLI for agents-to-im.
  *
  * Daily usage:
- *   agents-to-im         → Interactive setup wizard
- *   agents-to-im start   → Start the bridge
- *   agents-to-im restart → Restart the bridge
- *   agents-to-im stop    → Stop the bridge
- *   agents-to-im status  → Show bridge status
- *   agents-to-im doctor  → Run diagnostics
- *   agents-to-im upgrade → Upgrade the local installation
+ *   npx github:francize/agents-to-im onboard → Interactive onboarding wizard
+ *   npx github:francize/agents-to-im start   → Start the bridge
+ *   npx github:francize/agents-to-im restart → Restart the bridge
+ *   npx github:francize/agents-to-im stop    → Stop the bridge
+ *   npx github:francize/agents-to-im status  → Show bridge status
+ *   npx github:francize/agents-to-im doctor  → Run diagnostics
+ *   npx github:francize/agents-to-im upgrade → Upgrade the local installation
  */
 
 import fs from 'node:fs';
@@ -30,6 +30,13 @@ const CONFIG_PATH = path.join(CTI_HOME, 'config.env');
 const PID_FILE = path.join(CTI_HOME, 'runtime', 'bridge.pid');
 const STATUS_FILE = path.join(CTI_HOME, 'runtime', 'status.json');
 const CLI_DIR = path.dirname(fileURLToPath(import.meta.url));
+const NPX_PACKAGE_SPEC = 'github:francize/agents-to-im';
+
+function npxCommand(command?: string): string {
+  return command
+    ? `npx ${NPX_PACKAGE_SPEC} ${command}`
+    : `npx ${NPX_PACKAGE_SPEC}`;
+}
 
 // ── Colors ──
 
@@ -300,11 +307,11 @@ async function setupWizard() {
   console.log(`  ${c.dim}Work dir:${c.reset}   ${workDir}`);
   console.log(`  ${c.dim}Config:${c.reset}     ${CONFIG_PATH}`);
   console.log('');
-  info(`Install CLI once: ${c.cyan}npm install -g github:francize/agents-to-im${c.reset}`);
-  info(`Start the bridge: ${c.cyan}agents-to-im start${c.reset}`);
-  info(`Quick restart:    ${c.cyan}agents-to-im restart${c.reset}`);
-  info(`Check status:     ${c.cyan}agents-to-im status${c.reset}`);
-  info(`Run diagnostics:  ${c.cyan}agents-to-im doctor${c.reset}`);
+  info(`Onboard again:    ${c.cyan}${npxCommand('onboard')}${c.reset}`);
+  info(`Start the bridge: ${c.cyan}${npxCommand('start')}${c.reset}`);
+  info(`Quick restart:    ${c.cyan}${npxCommand('restart')}${c.reset}`);
+  info(`Check status:     ${c.cyan}${npxCommand('status')}${c.reset}`);
+  info(`Run diagnostics:  ${c.cyan}${npxCommand('doctor')}${c.reset}`);
   console.log('');
 }
 
@@ -348,8 +355,7 @@ function showStatus() {
     ok(`Config: ${CONFIG_PATH}`);
   } else {
     fail(`Config not found: ${CONFIG_PATH}`);
-    info(`Install CLI once: ${c.cyan}npm install -g github:francize/agents-to-im${c.reset}`);
-    info(`Run setup: ${c.cyan}agents-to-im${c.reset}`);
+    info(`Run onboarding: ${c.cyan}${npxCommand('onboard')}${c.reset}`);
   }
 
   // Dashboard URL
@@ -404,8 +410,7 @@ function runDoctor() {
     } catch { fail('Cannot read config file'); }
   } else {
     fail(`Config not found: ${CONFIG_PATH}`);
-    info(`Install CLI once: ${c.cyan}npm install -g github:francize/agents-to-im${c.reset}`);
-    info(`Run: ${c.cyan}agents-to-im${c.reset}`);
+    info(`Run onboarding: ${c.cyan}${npxCommand('onboard')}${c.reset}`);
   }
 
   // 4. Data directory
@@ -515,8 +520,6 @@ async function runUpgrade() {
     }
   }
 
-  ensureCommandAvailable('npm');
-
   const result = buildUpgradePlan({
     packageRoot,
     currentVersion,
@@ -528,14 +531,17 @@ async function runUpgrade() {
   if (!result.ok) {
     fail(result.reason);
     if (isSourceCheckout) {
-      info('Commit or stash local changes, then rerun `agents-to-im upgrade`.');
+      info('Commit or stash local changes, then rerun the upgrade command.');
     }
     process.exit(1);
   }
 
   const { plan } = result;
+  for (const command of new Set(plan.steps.map((step) => step.command))) {
+    ensureCommandAvailable(command);
+  }
   info(`Current version: ${plan.currentVersion}`);
-  info(`Install mode: ${plan.mode === 'source' ? 'source checkout' : 'global npm package'}`);
+  info(`Install mode: ${plan.mode === 'source' ? 'source checkout' : 'npx package'}`);
   info(`Package root: ${plan.packageRoot}`);
   info(`Bridge running: ${bridge.running ? `yes${bridge.pid ? ` (PID: ${bridge.pid})` : ''}` : 'no'}`);
   console.log('');
@@ -563,7 +569,7 @@ async function runUpgrade() {
     await runDaemonCommand('restart');
     ok('Bridge restarted');
   } else {
-    info(`Upgrade complete. Start the bridge with ${c.cyan}agents-to-im start${c.reset} when ready.`);
+    info(`Upgrade complete. Use ${c.cyan}${npxCommand('start')}${c.reset} when you want to run the bridge.`);
   }
 
   console.log('');
@@ -575,6 +581,13 @@ const args = process.argv.slice(2);
 const command = args[0] || '';
 
 switch (command) {
+  case 'onboard':
+  case 'setup':
+    setupWizard().catch((err) => {
+      console.error('Setup error:', err);
+      process.exit(1);
+    });
+    break;
   case 'start':
     delegateToDaemon('start');
     break;
@@ -611,10 +624,11 @@ switch (command) {
   case '--help':
   case '-h':
     showBanner();
-    console.log('  Usage: agents-to-im [command]');
+    console.log(`  Usage: ${npxCommand()} [command]`);
     console.log('');
     console.log('  Commands:');
-    console.log(`    ${c.cyan}(none)${c.reset}    Interactive setup wizard`);
+    console.log(`    ${c.cyan}(none)${c.reset}    Interactive onboarding wizard`);
+    console.log(`    ${c.cyan}onboard${c.reset}   Run the onboarding wizard explicitly`);
     console.log(`    ${c.cyan}start${c.reset}     Start the bridge daemon`);
     console.log(`    ${c.cyan}restart${c.reset}   Restart the bridge daemon`);
     console.log(`    ${c.cyan}stop${c.reset}      Stop the bridge daemon`);
@@ -631,7 +645,7 @@ switch (command) {
       info('Run with --help for usage');
       process.exit(1);
     }
-    // No command = interactive setup
+    // No command = interactive onboarding
     setupWizard().catch((err) => {
       console.error('Setup error:', err);
       process.exit(1);
