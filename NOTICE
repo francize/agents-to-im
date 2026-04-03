@@ -1,0 +1,12 @@
+agents-to-im
+
+This repository originally started from the open source project
+"Claude-to-IM-skill":
+https://github.com/op7418/Claude-to-IM-skill
+
+It has since been renamed to "agents-to-im" and substantially reworked.
+
+For provenance, the pre-rewrite history is preserved on the
+"legacy/upstream-history" branch.
+
+See LICENSE for the current repository license.

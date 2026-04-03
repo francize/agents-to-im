@@ -33,6 +33,10 @@ agents-to-im onboard   # choose language first, then follow the guided platform 
 
 ---
 
+> [!NOTE]
+> **Project origin:** `agents-to-im` started from [Claude-to-IM-skill](https://github.com/op7418/Claude-to-IM-skill) and has since been renamed and substantially reworked.
+> A backup of the pre-rewrite history is kept on the `legacy/upstream-history` branch for provenance.
+
 ## The Problem
 
 Claude Code and Codex are excellent coding agents — but they only talk to you in the terminal. If your team lives in Feishu/Lark, there's no clean way to bring that capability into your IM workspace without mixing sessions into a noisy shared thread.

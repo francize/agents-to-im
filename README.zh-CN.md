@@ -33,6 +33,10 @@ agents-to-im onboard   # 先选中文/英文，再按步骤引导权限、事件
 
 ---
 
+> [!NOTE]
+> **项目来源：** `agents-to-im` 最初基于 [Claude-to-IM-skill](https://github.com/op7418/Claude-to-IM-skill) 演进而来，之后经历了重命名和较大规模重构。
+> 为了保留来源证据，历史重写前的完整提交链会保存在 `legacy/upstream-history` 分支。
+
 ## 解决什么问题
 
 Claude Code 和 Codex 是优秀的编码代理 — 但它们只在终端里和你对话。如果你的团队在飞书/Lark 上协作，没有一种干净的方式把这种能力带进 IM 工作空间，而不是把所有会话混进一个嘈杂的群聊线程里。
