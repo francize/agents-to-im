@@ -162,6 +162,30 @@ function sanitizeTitle(text: string, fallback: string): string {
   return normalized || fallback;
 }
 
+function appendJsonlRecord(filePath: string, record: Record<string, unknown>): boolean {
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    let prefix = '';
+    if (fs.existsSync(filePath)) {
+      const stats = fs.statSync(filePath);
+      if (stats.size > 0) {
+        const fd = fs.openSync(filePath, 'r');
+        try {
+          const lastByte = Buffer.alloc(1);
+          fs.readSync(fd, lastByte, 0, 1, stats.size - 1);
+          if (lastByte.toString('utf8') !== '\n') prefix = '\n';
+        } finally {
+          fs.closeSync(fd);
+        }
+      }
+    }
+    fs.appendFileSync(filePath, `${prefix}${JSON.stringify(record)}\n`, 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function isCodexMetaUserText(text: string): boolean {
   const trimmed = text.trim();
   return (
@@ -171,6 +195,8 @@ function isCodexMetaUserText(text: string): boolean {
   );
 }
 
+const CLAUDE_SKIP_FIRST_PROMPT_PATTERN = /^(?:\s*<[a-z][\w-]*[\s>]|\[Request interrupted by user[^\]]*\])/;
+
 function isClaudeMetaUserText(text: string): boolean {
   const trimmed = text.trim();
   return (
@@ -178,7 +204,7 @@ function isClaudeMetaUserText(text: string): boolean {
     trimmed.startsWith('<command-message>') ||
     trimmed.startsWith('Base directory for this skill:') ||
     trimmed.startsWith('Caveat: The messages below') ||
-    trimmed === '[Request interrupted by user]'
+    CLAUDE_SKIP_FIRST_PROMPT_PATTERN.test(trimmed)
   );
 }
 
@@ -363,36 +389,75 @@ function normalizeClaudeProjectDir(workingDirectory: string): string {
   return `-${parts.join('-')}`;
 }
 
-function extractClaudeSummaryTitle(records: JsonRecord[]): string {
-  for (const record of records) {
-    if (record.type !== 'summary') continue;
-    const candidates = [
-      coerceText(record.summary),
-      coerceText(record.text),
-      coerceText(record.title),
-    ].filter(Boolean);
-    if (candidates.length > 0) {
-      return sanitizeTitle(candidates[0]!, 'Claude 会话');
-    }
+function resolveClaudeSessionPath(nativeSessionId: string, workingDirectory: string): string {
+  return path.join(
+    resolveClaudeProjectsRoot(),
+    normalizeClaudeProjectDir(workingDirectory),
+    `${nativeSessionId}.jsonl`,
+  );
+}
+
+function extractClaudeMetadataTitle(records: JsonRecord[], type: 'custom-title' | 'ai-title'): string {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index]!;
+    if (record.type !== type) continue;
+    const title = type === 'custom-title'
+      ? coerceText(record.customTitle ?? record.title ?? record.text)
+      : coerceText(record.aiTitle ?? record.title ?? record.text);
+    if (title) return sanitizeTitle(title, '');
   }
   return '';
 }
 
-function extractClaudeFallbackTitle(records: JsonRecord[], fallback: string): string {
-  const summaryTitle = extractClaudeSummaryTitle(records);
-  if (summaryTitle) return summaryTitle;
+function extractClaudeFirstPromptTitle(records: JsonRecord[]): string {
   for (const record of records) {
     if (record.type !== 'user') continue;
     const text = extractClaudeMessageText(record, 'user');
     if (!text) continue;
-    return sanitizeTitle(text, fallback);
+    return sanitizeTitle(text, '');
   }
+  return '';
+}
+
+function extractClaudeDisplayTitle(records: JsonRecord[], fallback: string): string {
+  const customTitle = extractClaudeMetadataTitle(records, 'custom-title');
+  if (customTitle) return customTitle;
+  const aiTitle = extractClaudeMetadataTitle(records, 'ai-title');
+  if (aiTitle) return aiTitle;
+  const firstPromptTitle = extractClaudeFirstPromptTitle(records);
+  if (firstPromptTitle) return sanitizeTitle(firstPromptTitle, fallback);
   for (const record of records) {
     if (typeof record.slug === 'string' && record.slug.trim()) {
       return sanitizeTitle(record.slug, fallback);
     }
   }
   return fallback;
+}
+
+export function readClaudeSessionTitle(
+  nativeSessionId: string,
+  workingDirectory: string,
+): string | null {
+  const rawPath = resolveClaudeSessionPath(nativeSessionId, workingDirectory);
+  if (!fs.existsSync(rawPath)) return null;
+  const title = extractClaudeDisplayTitle(readJsonlRecords(rawPath), '');
+  return title || null;
+}
+
+export function writeClaudeSessionTitle(
+  nativeSessionId: string,
+  workingDirectory: string,
+  title: string,
+): boolean {
+  const rawPath = resolveClaudeSessionPath(nativeSessionId, workingDirectory);
+  if (!fs.existsSync(rawPath)) return false;
+  const normalizedTitle = sanitizeTitle(title, '');
+  if (!normalizedTitle) return false;
+  return appendJsonlRecord(rawPath, {
+    type: 'custom-title',
+    customTitle: normalizedTitle,
+    sessionId: nativeSessionId,
+  });
 }
 
 function extractClaudeReplayItems(rawPath: string): NativeReplayItem[] {
@@ -464,7 +529,7 @@ export function listRecentNativeSessions(
       return {
         runtime,
         nativeSessionId,
-        title: extractClaudeFallbackTitle(records, nativeSessionId),
+        title: extractClaudeDisplayTitle(records, nativeSessionId),
         updatedAt: stats.mtime.toISOString(),
         cwd: normalizedWorkingDirectory,
         rawPath,

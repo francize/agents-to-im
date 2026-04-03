@@ -74,6 +74,37 @@ describe('JsonFileStore', () => {
     });
   });
 
+  it('normalizes legacy running and failed title states back to pending', () => {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(
+      path.join(DATA_DIR, 'sessions.json'),
+      JSON.stringify({
+        legacy_running: {
+          id: 'legacy_running',
+          working_directory: '/tmp',
+          model: 'claude-sonnet-4-6',
+          ext: {
+            runtime: 'claude',
+            titleStatus: 'running',
+          },
+        },
+        legacy_failed: {
+          id: 'legacy_failed',
+          working_directory: '/tmp',
+          model: 'gpt-5-codex',
+          ext: {
+            runtime: 'codex',
+            titleStatus: 'failed',
+          },
+        },
+      }),
+    );
+
+    const store = new JsonFileStore(makeSettings());
+    assert.equal(store.getSessionExt('legacy_running')?.titleStatus, 'pending');
+    assert.equal(store.getSessionExt('legacy_failed')?.titleStatus, 'pending');
+  });
+
   it('getSession returns null for unknown id', () => {
     const store = new JsonFileStore(makeSettings());
     assert.equal(store.getSession('nonexistent'), null);

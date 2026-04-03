@@ -28,6 +28,8 @@ describe('claude-plan-exit cards', () => {
       typeof element?.content === 'string' && element.content.includes('超时提示'));
 
     assert.ok(pendingTimeout);
+    assert.match(pendingTimeout.content, /StatusFlashOfInspiration/);
+    assert.match(pendingTimeout.content, /<font color=orange>/);
     assert.match(pendingTimeout.content, /15 分钟/);
     assert.match(pendingTimeout.content, /自动拒绝/);
     assert.equal(handledTimeout, undefined);

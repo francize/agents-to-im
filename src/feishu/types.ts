@@ -50,6 +50,16 @@ export interface FeishuMessageEventData {
   };
 }
 
+export interface FeishuChatUpdatedEventData {
+  chat_id: string;
+  before_change?: {
+    name?: string;
+  };
+  after_change?: {
+    name?: string;
+  };
+}
+
 export interface PreviewArtifact {
   key: string;
   routeKey: string;

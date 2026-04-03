@@ -16,5 +16,5 @@ export function buildInteractionTimeoutText(timeoutMs: number, expiredOutcome: s
 }
 
 export function buildInteractionTimeoutMarkdown(timeoutMs: number, expiredOutcome: string): string {
-  return `**超时提示**：${buildInteractionTimeoutSentence(timeoutMs, expiredOutcome)}。`;
+  return `:StatusFlashOfInspiration: <font color=orange>超时提示：${buildInteractionTimeoutSentence(timeoutMs, expiredOutcome)}。</font>`;
 }

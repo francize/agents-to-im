@@ -74,7 +74,7 @@ describe('MultiplexLLMProvider', () => {
     assert.ok(chunks.join('').includes('"hello"'));
   });
 
-  it('generateTitle normalizes plain text output', async () => {
+  it('delegates readSessionTitle and writeSessionTitle to the runtime driver', async () => {
     const store = new JsonFileStore(makeSettings());
     const session = store.createRuntimeSession({
       runtime: 'claude',
@@ -82,17 +82,25 @@ describe('MultiplexLLMProvider', () => {
     });
     const provider = new MultiplexLLMProvider(store, new PendingPermissions(), makeConfig());
 
-    (provider as any).getProvider = async () => ({
-      streamChat: () => new ReadableStream<string>({
-        start(controller) {
-          controller.enqueue('data: {"type":"text","data":"\\"Refactor Plan\\""}\n');
-          controller.close();
-        },
-      }),
+    let wrote: { sessionId: string; title: string } | null = null;
+    (provider as any).getDriver = () => ({
+      readSessionTitle: async (sessionId: string) => {
+        assert.equal(sessionId, session.id);
+        return 'Refactor Plan';
+      },
+      writeSessionTitle: async (sessionId: string, title: string) => {
+        wrote = { sessionId, title };
+      },
     });
 
-    const title = await provider.generateTitle(session.id, '帮我改一下 provider', '我会先做 runtime 路由');
+    const title = await provider.readSessionTitle(session.id);
     assert.equal(title, 'Refactor Plan');
+
+    await provider.writeSessionTitle(session.id, '群聊标题');
+    assert.deepEqual(wrote, {
+      sessionId: session.id,
+      title: '群聊标题',
+    });
   });
 
   it('exposes runtime capability matrix without changing streamChat interface', () => {

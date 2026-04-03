@@ -157,9 +157,14 @@ export class MultiplexLLMProvider implements LLMProvider {
     return this.streamWithRuntime(this.getSessionRuntime(params.sessionId), params);
   }
 
-  async generateTitle(sessionId: string, userText: string, assistantText: string): Promise<string | null> {
+  async readSessionTitle(sessionId: string): Promise<string | null> {
     const runtime = this.getSessionRuntime(sessionId);
-    return this.getDriver(runtime).generateTitle(sessionId, userText, assistantText);
+    return this.getDriver(runtime).readSessionTitle(sessionId);
+  }
+
+  async writeSessionTitle(sessionId: string, title: string): Promise<void> {
+    const runtime = this.getSessionRuntime(sessionId);
+    await this.getDriver(runtime).writeSessionTitle(sessionId, title);
   }
 
   async dispose(): Promise<void> {

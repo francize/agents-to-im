@@ -31,7 +31,13 @@ import {
 } from '../bridge/types.js';
 import { normalizeClaudePermissionMode } from '../runtime/claude-mode.js';
 import { CTI_HOME } from '../config/config.js';
-import type { RuntimeName, SessionExt, SessionRecord, TitleStatus } from '../runtime/types.js';
+import type {
+  DisplayNameMode,
+  RuntimeName,
+  SessionExt,
+  SessionRecord,
+  TitleStatus,
+} from '../runtime/types.js';
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
 const MESSAGES_DIR = path.join(DATA_DIR, 'messages');
@@ -71,6 +77,20 @@ function now(): string {
 
 function bindingKey(channelType: string, chatId: string, channelInstanceId?: string): string {
   return `${channelType}:${resolveChannelInstanceId({ channelInstanceId })}:${chatId}`;
+}
+
+function normalizeTitleStatus(value: unknown): TitleStatus | undefined {
+  return value === 'done' ? 'done' : value === 'pending' ? 'pending' : undefined;
+}
+
+function normalizeLegacyTitleStatus(value: unknown): TitleStatus {
+  return normalizeTitleStatus(value) || 'pending';
+}
+
+function normalizeDisplayNameMode(value: unknown): DisplayNameMode | undefined {
+  return value === 'default' || value === 'native_locked' || value === 'manual_locked'
+    ? value
+    : undefined;
 }
 
 // ── Lock entry ──
@@ -283,11 +303,13 @@ export class JsonFileStore implements BridgeStore {
         || 'claude';
     }
     if (!extPartial.title && legacyTitle) extPartial.title = legacyTitle;
-    if (!extPartial.titleStatus && legacyTitleStatus) extPartial.titleStatus = legacyTitleStatus as TitleStatus;
+    extPartial.titleStatus = normalizeTitleStatus(extPartial.titleStatus)
+      || normalizeTitleStatus(legacyTitleStatus)
+      || 'pending';
     if (!extPartial.codexThreadId && typeof record.sdk_session_id === 'string' && extPartial.runtime === 'codex') {
       extPartial.codexThreadId = record.sdk_session_id;
     }
-    if (!extPartial.titleStatus) extPartial.titleStatus = 'pending';
+    extPartial.displayNameMode = normalizeDisplayNameMode(extPartial.displayNameMode);
     const ext: SessionExt = {
       runtime: extPartial.runtime || 'claude',
       ...(extPartial.title ? { title: extPartial.title } : {}),
@@ -615,16 +637,17 @@ export class JsonFileStore implements BridgeStore {
         session.ext = {
           ...(session.ext || {}),
           runtime: defaultRuntime,
-          titleStatus: session.ext?.titleStatus || 'pending',
+          titleStatus: normalizeLegacyTitleStatus(session.ext?.titleStatus),
           ...(session.sdk_session_id && defaultRuntime === 'codex' ? { codexThreadId: session.sdk_session_id } : {}),
         };
         changed = true;
       }
-      if (!session.ext?.titleStatus) {
+      const normalizedTitleStatus = normalizeLegacyTitleStatus(session.ext?.titleStatus);
+      if (session.ext?.titleStatus !== normalizedTitleStatus) {
         session.ext = {
           ...(session.ext || {}),
           runtime: session.ext?.runtime || defaultRuntime,
-          titleStatus: 'pending',
+          titleStatus: normalizedTitleStatus,
         };
         changed = true;
       }

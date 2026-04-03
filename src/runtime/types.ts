@@ -2,8 +2,8 @@ import type { BridgeSession } from '../bridge/host.js';
 
 export type RuntimeName = 'claude' | 'codex';
 
-export type TitleStatus = 'pending' | 'running' | 'done' | 'failed';
-export type DisplayNameMode = 'default' | 'native_locked';
+export type TitleStatus = 'pending' | 'done';
+export type DisplayNameMode = 'default' | 'native_locked' | 'manual_locked';
 
 export interface SessionExt {
   runtime: RuntimeName;

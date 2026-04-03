@@ -20,6 +20,7 @@ describe('CLI onboarding checklist', () => {
     assert.ok(checklist.some((item) => item.includes('Start the bridge before saving Long Connection events')));
     assert.ok(checklist.some((item) => item.includes('Add event: im.message.receive_v1')));
     assert.ok(checklist.some((item) => item.includes('Add event: im.message.message_read_v1')));
+    assert.ok(checklist.some((item) => item.includes('Add event: im.chat.updated_v1')));
     assert.ok(checklist.some((item) => item.includes('Add event: im.chat.member.bot.added_v1')));
     assert.ok(checklist.some((item) => item.includes('Open Events page: https://open.feishu.cn/app/cli_test_app/event?tab=event')));
     assert.ok(checklist.some((item) => item.includes('Open Callback page: https://open.feishu.cn/app/cli_test_app/event?tab=callback')));

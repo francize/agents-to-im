@@ -45,6 +45,21 @@ Most terminal-to-chat relays treat the chat window as the session container. Tha
 
 ## See It Work
 
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <b>Feishu to Claude</b><br>
+      <video src="references/feishu-to-claude.mp4" controls muted playsinline width="100%"></video><br>
+      <sub><a href="references/feishu-to-claude.mp4">Open video directly</a></sub>
+    </td>
+    <td width="50%" valign="top">
+      <b>Feishu to Codex</b><br>
+      <video src="references/feishu-to-codex.mp4" controls muted playsinline width="100%"></video><br>
+      <sub><a href="references/feishu-to-codex.mp4">Open video directly</a></sub>
+    </td>
+  </tr>
+</table>
+
 ```
 You → DM bot: /new:claude
 
@@ -128,7 +143,8 @@ bash scripts/daemon.sh restart
 3. Import the full scopes JSON from [references/setup-guides.md](references/setup-guides.md) in one shot
 4. Publish one app version first
 5. After the local bridge is running, switch `Events & Callbacks` to **Long Connection**
-6. Add `im.message.receive_v1`, `im.message.message_read_v1`, and `im.chat.member.bot.added_v1`
+6. Add `im.message.receive_v1`, `im.message.message_read_v1`, `im.chat.updated_v1`, and `im.chat.member.bot.added_v1`
+   `im.chat.updated_v1` is required if you want manual group-name edits to sync back into Codex threads or Claude sessions.
 7. Add the `card.action.trigger` callback
 8. Publish again so events and callbacks go live
 9. Optional: add `/new:claude` and `/new:codex` to the Bot floating menu

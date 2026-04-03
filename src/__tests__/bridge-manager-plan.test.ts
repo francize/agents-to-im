@@ -1993,6 +1993,69 @@ describe('bridge-manager plan workflow', () => {
     assert.equal(adapter.sent[0].text, '截图已经生成。');
   });
 
+  it('auto-sends screenshot files referenced by Codex MCP tool_result text payloads', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const imagePath = path.resolve('/tmp/test-cwd/.artifacts/codex-intro.png');
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            fs.mkdirSync(path.dirname(imagePath), { recursive: true });
+            fs.writeFileSync(imagePath, 'fake-png-data');
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'tool_result',
+              data: JSON.stringify({
+                tool_use_id: 'tool-image-path-codex-1',
+                content: JSON.stringify([
+                  {
+                    type: 'text',
+                    text: `Took a screenshot of the full current page.\nSaved screenshot to ${imagePath}.`,
+                  },
+                ]),
+                is_error: false,
+              }),
+            })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '截图已重新生成。' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-inline-image-path-codex-1' }) })}\n`);
+            controller.close();
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5.4',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-inline-image-path-codex',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5.4',
+    });
+
+    await start();
+    adapter.push({
+      messageId: 'msg-inline-image-path-codex',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-inline-image-path-codex', threadId: 'thread-1' },
+      text: '发我截图文件',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sentImages.length === 1 && adapter.sent.length === 1);
+
+    assert.equal(adapter.sentImages[0].filePath, imagePath);
+    assert.equal(adapter.sentImages[0].replyToMessageId, 'msg-inline-image-path-codex');
+    assert.equal(adapter.sent[0].text, '截图已重新生成。');
+  });
+
   it('auto-sends a completed file_change image by resolving relative paths against the binding cwd', async () => {
     const store = new JsonFileStore(makeSettings());
     const imagePath = path.resolve('/tmp/test-cwd/shot.png');

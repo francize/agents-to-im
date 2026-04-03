@@ -467,6 +467,7 @@ export function buildPlatformSetupChecklist(domain: string, nextCommand: 'start'
     'Switch Events & Callbacks to Long Connection',
     'Add event: im.message.receive_v1',
     'Add event: im.message.message_read_v1',
+    'Add event: im.chat.updated_v1',
     'Add event: im.chat.member.bot.added_v1',
     `Open Callback page: ${buildPlatformEventUrl(domain, appId, 'callback')}`,
     'Add callback: card.action.trigger',
@@ -864,9 +865,10 @@ async function setupWizard() {
       const eventUrl = buildPlatformEventUrl(domain, appId, 'event');
       showSetupStep(`3/6 ${platformName} ${t(locale, '长连接事件', 'Long Connection Events')}`, [
         t(locale, '把 Events & Callbacks 切到 Long Connection', 'Switch Events & Callbacks to Long Connection'),
-        t(locale, '把下面 3 个事件一起加上：', 'Add these 3 events together:'),
+        t(locale, '把下面 4 个事件一起加上：', 'Add these 4 events together:'),
         'im.message.receive_v1',
         'im.message.message_read_v1',
+        'im.chat.updated_v1',
         'im.chat.member.bot.added_v1',
         `${t(locale, '事件页：', 'Events page:')} ${c.cyan}${eventUrl}${c.reset}`,
       ]);

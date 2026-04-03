@@ -101,6 +101,26 @@ describe('sseEvent', () => {
 });
 
 describe('CodexProvider', () => {
+  it('reads and writes native thread titles via thread/read and thread/name/set', async () => {
+    const { CodexProvider } = await import('../providers/codex/codex-provider.js');
+    const fake = new FakeCodexClient({
+      'thread/read': async (params) => {
+        assert.deepEqual(params, { threadId: 'thread-title-1' });
+        return { thread: { id: 'thread-title-1', name: 'Native Thread Title' } };
+      },
+      'thread/name/set': async (params) => {
+        assert.deepEqual(params, { threadId: 'thread-title-1', name: '人工改名' });
+        return { ok: true };
+      },
+    });
+
+    const provider = new CodexProvider();
+    (provider as any).client = fake;
+
+    assert.equal(await provider.readSessionTitle('thread-title-1'), 'Native Thread Title');
+    await provider.writeSessionTitle('thread-title-1', '人工改名');
+  });
+
   it('emits native plan events and forwards collaborationMode=plan', async () => {
     const { CodexProvider } = await import('../providers/codex/codex-provider.js');
     const fake = new FakeCodexClient({

@@ -45,6 +45,21 @@ Claude Code 和 Codex 是优秀的编码代理 — 但它们只在终端里和�
 
 ## 看看效果
 
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <b>飞书到 Claude</b><br>
+      <video src="references/feishu-to-claude.mp4" controls muted playsinline width="100%"></video><br>
+      <sub><a href="references/feishu-to-claude.mp4">直接打开视频</a></sub>
+    </td>
+    <td width="50%" valign="top">
+      <b>飞书到 Codex</b><br>
+      <video src="references/feishu-to-codex.mp4" controls muted playsinline width="100%"></video><br>
+      <sub><a href="references/feishu-to-codex.mp4">直接打开视频</a></sub>
+    </td>
+  </tr>
+</table>
+
 ```
 你 → 私聊 Bot: /new:claude
 
@@ -128,7 +143,8 @@ bash scripts/daemon.sh restart
 3. 使用 [references/setup-guides.md](references/setup-guides.md) 中的完整 scopes JSON 一次性导入权限
 4. 先发布一次应用版本
 5. 本地启动 bridge 后，再去 `Events & Callbacks` 切到**长连接**
-6. 添加事件 `im.message.receive_v1`、`im.message.message_read_v1`、`im.chat.member.bot.added_v1`
+6. 添加事件 `im.message.receive_v1`、`im.message.message_read_v1`、`im.chat.updated_v1`、`im.chat.member.bot.added_v1`
+   `im.chat.updated_v1` 用于把用户手动修改的群名回写到 Codex thread 或 Claude session。
 7. 添加回调 `card.action.trigger`
 8. 再发布一次应用版本
 9. 可选：在 Bot 菜单里添加 `/new:claude` 和 `/new:codex` 悬浮菜单

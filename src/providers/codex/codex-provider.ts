@@ -313,6 +313,12 @@ function extractInFlightTurnIdFromThreadRead(response: unknown): string {
   return '';
 }
 
+function extractThreadNameFromThreadRead(response: unknown): string {
+  const root = typeof response === 'object' && response ? response as JsonRecord : {};
+  const thread = typeof root.thread === 'object' && root.thread ? root.thread as JsonRecord : root;
+  return firstString(thread.name, root.name);
+}
+
 function firstString(...values: unknown[]): string {
   for (const value of values) {
     if (typeof value === 'string' && value.trim()) return value.trim();
@@ -603,6 +609,26 @@ export class CodexProvider implements LLMProvider {
   async supportsNativePlan(): Promise<boolean> {
     const client = await this.ensureClient();
     return client.supportsCollaborationMode('plan');
+  }
+
+  async readSessionTitle(threadId: string): Promise<string | null> {
+    const normalizedThreadId = threadId.trim();
+    if (!normalizedThreadId) return null;
+    const client = await this.ensureClient();
+    const response = await client.call('thread/read', { threadId: normalizedThreadId });
+    const name = extractThreadNameFromThreadRead(response);
+    return name || null;
+  }
+
+  async writeSessionTitle(threadId: string, title: string): Promise<void> {
+    const normalizedThreadId = threadId.trim();
+    const normalizedTitle = normalizeLine(title);
+    if (!normalizedThreadId || !normalizedTitle) return;
+    const client = await this.ensureClient();
+    await client.call('thread/name/set', {
+      threadId: normalizedThreadId,
+      name: normalizedTitle,
+    });
   }
 
   streamChat(params: StreamChatParams): ReadableStream<string> {

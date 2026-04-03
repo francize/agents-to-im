@@ -77,21 +77,30 @@ export interface ProcessMessageOptions {
 }
 
 interface PlanStepState {
+  label?: string;
   title?: string;
   text?: string;
+  description?: string;
   status?: string;
 }
 
+function normalizePlanField(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 function normalizePlanStep(step: unknown): PlanStepState {
+  if (typeof step === 'string') {
+    return { text: normalizePlanField(step) };
+  }
   const record = step as Record<string, unknown>;
   return {
-    title: typeof record.title === 'string'
-      ? record.title
-      : typeof record.step === 'string'
-        ? record.step
-        : undefined,
-    text: typeof record.text === 'string' ? record.text : undefined,
-    status: typeof record.status === 'string' ? record.status : undefined,
+    label: normalizePlanField(record.label),
+    title: normalizePlanField(record.title) ?? normalizePlanField(record.step),
+    text: normalizePlanField(record.text),
+    description: normalizePlanField(record.description),
+    status: normalizePlanField(record.status),
   };
 }
 
@@ -100,12 +109,21 @@ function renderPlanMarkdown(explanation: string, steps: unknown[], body: string)
   if (explanation.trim()) {
     lines.push(explanation.trim(), '');
   }
-  const normalizedSteps = steps.map(normalizePlanStep).filter((step) => step.title || step.text);
+  const normalizedSteps = steps
+    .map(normalizePlanStep)
+    .filter((step) => step.label || step.title || step.text || step.description);
   if (normalizedSteps.length > 0) {
     lines.push('计划步骤');
     normalizedSteps.forEach((step, index) => {
+      const summary = step.label || step.title || step.text || step.description || '未命名步骤';
+      const detail = step.description
+        || (step.text && step.text !== summary ? step.text : undefined)
+        || (step.title && step.label && step.title !== summary ? step.title : undefined);
       const status = step.status ? ` [${step.status}]` : '';
-      lines.push(`${index + 1}. ${step.title || step.text || '未命名步骤'}${status}`);
+      lines.push(`${index + 1}. ${summary}${status}`);
+      if (detail) {
+        lines.push(`    ${detail}`);
+      }
     });
     lines.push('');
   }

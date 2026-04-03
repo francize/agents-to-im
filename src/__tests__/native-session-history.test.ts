@@ -4,7 +4,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { listRecentNativeSessions, loadNativeSessionTranscript } from '../infra/native-session-history.js';
+import {
+  listRecentNativeSessions,
+  loadNativeSessionTranscript,
+  readClaudeSessionTitle,
+  writeClaudeSessionTitle,
+} from '../infra/native-session-history.js';
 
 function writeJsonl(filePath: string, records: Array<Record<string, unknown>>): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -126,7 +131,7 @@ describe('native-session-history', () => {
     }
   });
 
-  it('lists and replays claude sessions from the project bucket while filtering thinking and tool_use noise', () => {
+  it('lists and replays claude sessions using custom-title > ai-title > first prompt precedence', () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-claude-'));
     const previousClaudeHome = process.env.CLAUDE_HOME;
     process.env.CLAUDE_HOME = tempDir;
@@ -138,8 +143,12 @@ describe('native-session-history', () => {
       writeJsonl(sessionFile, [
         { type: 'queue-operation', operation: 'enqueue' },
         {
-          type: 'summary',
-          summary: '恢复 Lark 历史回放',
+          type: 'ai-title',
+          aiTitle: 'AI 生成标题',
+        },
+        {
+          type: 'custom-title',
+          customTitle: '手动改名后的标题',
         },
         {
           type: 'user',
@@ -181,7 +190,8 @@ describe('native-session-history', () => {
 
       const sessions = listRecentNativeSessions('claude', workdir, 5);
       assert.equal(sessions.length, 1);
-      assert.equal(sessions[0]!.title, '恢复 Lark 历史回放');
+      assert.equal(sessions[0]!.title, '手动改名后的标题');
+      assert.equal(readClaudeSessionTitle('session-claude-1', workdir), '手动改名后的标题');
 
       const transcript = loadNativeSessionTranscript('claude', 'session-claude-1', workdir);
       assert.ok(transcript);
@@ -193,6 +203,37 @@ describe('native-session-history', () => {
           ['tool_result', '/tmp/claude-project'],
         ],
       );
+    } finally {
+      process.env.CLAUDE_HOME = previousClaudeHome;
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('appends claude custom-title entries for manual renames', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-claude-write-'));
+    const previousClaudeHome = process.env.CLAUDE_HOME;
+    process.env.CLAUDE_HOME = tempDir;
+
+    try {
+      const workdir = '/tmp/claude-project-write';
+      const sessionFile = path.join(tempDir, 'projects', '-tmp-claude-project-write', 'session-claude-write.jsonl');
+      writeJsonl(sessionFile, [
+        {
+          type: 'user',
+          message: {
+            role: 'user',
+            content: [{ type: 'text', text: '请同步这个标题' }],
+          },
+        },
+      ]);
+
+      assert.equal(readClaudeSessionTitle('session-claude-write', workdir), '请同步这个标题');
+      assert.equal(writeClaudeSessionTitle('session-claude-write', workdir, '群聊手动改名'), true);
+      assert.equal(readClaudeSessionTitle('session-claude-write', workdir), '群聊手动改名');
+
+      const raw = fs.readFileSync(sessionFile, 'utf8');
+      assert.match(raw, /"type":"custom-title"/);
+      assert.match(raw, /"customTitle":"群聊手动改名"/);
     } finally {
       process.env.CLAUDE_HOME = previousClaudeHome;
       fs.rmSync(tempDir, { recursive: true, force: true });

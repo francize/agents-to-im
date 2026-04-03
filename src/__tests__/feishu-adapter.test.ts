@@ -13,8 +13,11 @@ import {
 } from '../runtime/claude-plan-exit.js';
 
 import { CTI_HOME } from '../config/config.js';
+import type { Config } from '../config/config.js';
 import { FeishuAdapter, findMissingAppScopes } from '../feishu/adapter.js';
 import { JsonFileStore } from '../infra/store.js';
+import { MultiplexLLMProvider } from '../providers/multiplex.js';
+import { PendingPermissions } from '../providers/claude/permission-gateway.js';
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
 
@@ -28,7 +31,16 @@ function makeSettings(): Map<string, string> {
   ]);
 }
 
-function installContext(store: JsonFileStore, llm: Record<string, unknown> = {}): void {
+function makeConfig(): Config {
+  return {
+    defaultWorkDir: '/tmp',
+    feishu: {
+      id: 'default',
+    },
+  };
+}
+
+function installContext(store: JsonFileStore, llm: unknown = {}): void {
   initBridgeContext({
     store,
     llm: llm as any,
@@ -546,6 +558,290 @@ describe('FeishuAdapter', () => {
       runtime: 'codex',
       titleStatus: 'pending',
     });
+  });
+
+  it('syncs the group name from the native codex thread title', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+      cwd: '/tmp/test-cwd',
+    });
+    store.updateCodexThreadId(session.id, 'thread-title-sync');
+    store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-title-sync',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5-codex',
+    });
+
+    const readCalls: string[] = [];
+    installContext(store, {
+      readSessionTitle: async (sessionId: string) => {
+        readCalls.push(sessionId);
+        return 'Codex 原生标题';
+      },
+    });
+
+    const chatUpdates: Array<{ data: { name: string } }> = [];
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        chat: {
+          update: async (payload: { data: { name: string } }) => {
+            chatUpdates.push(payload);
+            return { code: 0, data: {} };
+          },
+        },
+      },
+    };
+
+    await adapter.maybeSyncSessionTitle('group-title-sync');
+
+    assert.deepEqual(readCalls, [session.id]);
+    assert.equal(chatUpdates.length, 1);
+    assert.equal(chatUpdates[0].data.name, 'Codex 原生标题');
+    assert.deepEqual(store.getSessionExt(session.id), {
+      runtime: 'codex',
+      codexThreadId: 'thread-title-sync',
+      title: 'Codex 原生标题',
+      titleStatus: 'done',
+      displayNameMode: 'default',
+    });
+  });
+
+  it('leaves the default group name unchanged when the codex thread has no native title', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+      cwd: '/tmp/test-cwd',
+    });
+    store.updateCodexThreadId(session.id, 'thread-empty-title');
+    store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-empty-native-title',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5-codex',
+    });
+    installContext(store, {
+      readSessionTitle: async () => null,
+    });
+
+    let chatUpdateCalls = 0;
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        chat: {
+          update: async () => {
+            chatUpdateCalls += 1;
+            return { code: 0, data: {} };
+          },
+        },
+      },
+    };
+
+    await adapter.maybeSyncSessionTitle('group-empty-native-title');
+
+    assert.equal(chatUpdateCalls, 0);
+    assert.deepEqual(store.getSessionExt(session.id), {
+      runtime: 'codex',
+      codexThreadId: 'thread-empty-title',
+      titleStatus: 'pending',
+    });
+  });
+
+  it('treats a manual Feishu rename as authoritative and syncs it back to codex', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+      cwd: '/tmp/test-cwd',
+    });
+    store.updateCodexThreadId(session.id, 'thread-manual-codex');
+    store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-manual-codex',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5-codex',
+    });
+
+    const writes: Array<{ sessionId: string; title: string }> = [];
+    installContext(store, {
+      writeSessionTitle: async (sessionId: string, title: string) => {
+        writes.push({ sessionId, title });
+      },
+    });
+
+    const adapter = new FeishuAdapter() as any;
+    await adapter.handleChatUpdatedEvent({
+      chat_id: 'group-manual-codex',
+      before_change: { name: 'Codex 新会话' },
+      after_change: { name: '人工改名' },
+    });
+
+    assert.deepEqual(writes, [{ sessionId: session.id, title: '人工改名' }]);
+    assert.deepEqual(store.getSessionExt(session.id), {
+      runtime: 'codex',
+      codexThreadId: 'thread-manual-codex',
+      title: '人工改名',
+      titleStatus: 'done',
+      displayNameMode: 'manual_locked',
+    });
+  });
+
+  it('appends a custom-title entry when a manual Feishu rename targets a claude session', async () => {
+    const tempClaudeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-feishu-claude-title-'));
+    const previousClaudeHome = process.env.CLAUDE_HOME;
+    process.env.CLAUDE_HOME = tempClaudeHome;
+
+    try {
+      const workdir = '/tmp/claude-manual-title';
+      const sessionFile = path.join(
+        tempClaudeHome,
+        'projects',
+        '-tmp-claude-manual-title',
+        'claude-session-manual.jsonl',
+      );
+      writeJsonlFile(sessionFile, [
+        {
+          type: 'user',
+          message: {
+            role: 'user',
+            content: [{ type: 'text', text: '请同步 Claude 标题' }],
+          },
+        },
+      ]);
+
+      const store = new JsonFileStore(makeSettings());
+      const session = store.createRuntimeSession({
+        runtime: 'claude',
+        model: 'claude-sonnet-4-6',
+        cwd: workdir,
+      });
+      store.updateSdkSessionId(session.id, 'claude-session-manual');
+      store.upsertChannelBinding({
+        channelType: 'feishu',
+        chatId: 'group-manual-claude',
+        codepilotSessionId: session.id,
+        workingDirectory: workdir,
+        model: 'claude-sonnet-4-6',
+      });
+      installContext(
+        store,
+        new MultiplexLLMProvider(store, new PendingPermissions(), makeConfig()),
+      );
+
+      const adapter = new FeishuAdapter() as any;
+      await adapter.handleChatUpdatedEvent({
+        chat_id: 'group-manual-claude',
+        before_change: { name: 'Claude 新会话' },
+        after_change: { name: '用户手动改名' },
+      });
+
+      const raw = fs.readFileSync(sessionFile, 'utf8');
+      assert.match(raw, /"type":"custom-title"/);
+      assert.match(raw, /"customTitle":"用户手动改名"/);
+      assert.equal(store.getSessionExt(session.id)?.displayNameMode, 'manual_locked');
+    } finally {
+      process.env.CLAUDE_HOME = previousClaudeHome;
+      fs.rmSync(tempClaudeHome, { recursive: true, force: true });
+    }
+  });
+
+  it('defers manual title propagation until the runtime thread id is available', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-deferred-title',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5-codex',
+    });
+
+    const writes: Array<{ sessionId: string; title: string; threadId: string }> = [];
+    installContext(store, {
+      readSessionTitle: async () => null,
+      writeSessionTitle: async (sessionId: string, title: string) => {
+        const threadId = store.getSessionExt(sessionId)?.codexThreadId || store.getSessionSdkSessionId(sessionId);
+        if (!threadId) return;
+        writes.push({ sessionId, title, threadId });
+      },
+    });
+
+    const adapter = new FeishuAdapter() as any;
+    await adapter.handleChatUpdatedEvent({
+      chat_id: 'group-deferred-title',
+      before_change: { name: 'Codex 新会话' },
+      after_change: { name: '延后同步标题' },
+    });
+    assert.equal(writes.length, 0);
+
+    store.updateCodexThreadId(session.id, 'thread-deferred-1');
+    await adapter.maybeSyncSessionTitle('group-deferred-title');
+
+    assert.deepEqual(writes, [{
+      sessionId: session.id,
+      title: '延后同步标题',
+      threadId: 'thread-deferred-1',
+    }]);
+  });
+
+  it('ignores im.chat.updated_v1 echoes generated by bridge-driven renames', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'group-rename-echo',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5-codex',
+    });
+    store.updateSessionExt(session.id, {
+      title: '桥接同步标题',
+      titleStatus: 'done',
+      displayNameMode: 'default',
+    });
+    installContext(store, {
+      writeSessionTitle: async () => {
+        throw new Error('manual rename sync should be suppressed for self echoes');
+      },
+    });
+
+    let chatUpdateCalls = 0;
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        chat: {
+          update: async () => {
+            chatUpdateCalls += 1;
+            return { code: 0, data: {} };
+          },
+        },
+      },
+    };
+
+    await adapter.syncChatName('group-rename-echo');
+    await adapter.handleChatUpdatedEvent({
+      chat_id: 'group-rename-echo',
+      before_change: { name: 'Codex 新会话' },
+      after_change: { name: '桥接同步标题' },
+    });
+
+    assert.equal(chatUpdateCalls, 1);
+    assert.equal(store.getSessionExt(session.id)?.displayNameMode, 'default');
   });
 
   it('reuses the preview message when finalizing a patch-based stream', async () => {
@@ -1957,6 +2253,8 @@ describe('FeishuAdapter', () => {
     assert.equal(card.body.elements[0].elements[4].tag, 'markdown');
     assert.match(card.body.elements[0].elements[4].content, /可填写上面的自定义输入框/);
     assert.equal(card.body.elements[0].elements.at(-2).tag, 'markdown');
+    assert.match(card.body.elements[0].elements.at(-2).content, /StatusFlashOfInspiration/);
+    assert.match(card.body.elements[0].elements.at(-2).content, /<font color=orange>/);
     assert.match(card.body.elements[0].elements.at(-2).content, /10 分钟/);
     assert.match(card.body.elements[0].elements.at(-2).content, /未补充处理/);
     assert.equal(card.body.elements[0].elements.at(-1).tag, 'column_set');

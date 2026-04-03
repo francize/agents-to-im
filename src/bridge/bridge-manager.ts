@@ -335,6 +335,7 @@ function buildStructuredInputPreface(request: StructuredInputRequestInfo): strin
 
 const AUTO_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
 const ABSOLUTE_IMAGE_PATH_RE = /((?:\/|[A-Za-z]:[\\/])[^\s"'`<>|]+?\.(?:png|jpe?g|gif|webp))/gi;
+const TOOL_RESULT_PATH_KEYS = new Set(['path', 'file', 'filePath', 'file_path']);
 
 function isSupportedAutoImagePath(filePath: string): boolean {
   return AUTO_IMAGE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
@@ -394,6 +395,58 @@ function imageExtensionForMediaType(mediaType: string): string {
     default:
       return '.png';
   }
+}
+
+function resolveToolResultImagePath(rawPath: string, cwd?: string): string | null {
+  const trimmed = rawPath.trim();
+  if (!trimmed) return null;
+  const resolved = path.isAbsolute(trimmed)
+    ? trimmed
+    : (cwd ? path.resolve(cwd, trimmed) : null);
+  if (!resolved || !isSupportedAutoImagePath(resolved)) return null;
+  return resolved;
+}
+
+function collectToolResultImagePaths(
+  value: unknown,
+  cwd: string | undefined,
+  currentKey: string | undefined,
+  found: string[],
+): void {
+  if (typeof value === 'string') {
+    found.push(...extractAbsoluteImagePaths(value));
+    if (currentKey && TOOL_RESULT_PATH_KEYS.has(currentKey)) {
+      const resolved = resolveToolResultImagePath(value, cwd);
+      if (resolved) found.push(resolved);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectToolResultImagePaths(item, cwd, undefined, found));
+    return;
+  }
+  if (!value || typeof value !== 'object') return;
+
+  Object.entries(value as Record<string, unknown>).forEach(([key, child]) => {
+    collectToolResultImagePaths(child, cwd, key, found);
+  });
+}
+
+function extractToolResultImagePaths(blocks: MessageContentBlock[], cwd?: string): string[] {
+  const found: string[] = [];
+
+  for (const block of blocks) {
+    if (block.type !== 'tool_result' || block.is_error) continue;
+    found.push(...extractAbsoluteImagePaths(block.content));
+    try {
+      const parsed = JSON.parse(block.content);
+      collectToolResultImagePaths(parsed, cwd, undefined, found);
+    } catch {
+      // Plain-text tool results are already covered by the raw content scan.
+    }
+  }
+
+  return uniquePaths(found);
 }
 
 function extractInlineToolResultImagePayload(item: Record<string, unknown>): {
@@ -1587,9 +1640,32 @@ async function handleMessage(
     }
   };
 
-  const maybeSendInlineToolResultImages = async (blocks: MessageContentBlock[]): Promise<void> => {
+  const maybeSendToolResultImages = async (blocks: MessageContentBlock[]): Promise<void> => {
     if (!planAttemptIsCurrent()) return;
     if (!autoImageSendEnabled || !adapter.sendImage) return;
+
+    const pathCandidates = extractToolResultImagePaths(blocks, binding.workingDirectory);
+    for (const candidate of pathCandidates) {
+      const normalizedPath = path.resolve(candidate);
+      if (sentAutoImagePaths.has(normalizedPath)) continue;
+      if (!isFreshNonEmptyFile(normalizedPath, turnStartedAtMs)) continue;
+      try {
+        const result = await adapter.sendImage({
+          address: msg.address,
+          filePath: normalizedPath,
+          replyToMessageId: msg.messageId,
+        });
+        if (result.ok) {
+          sentAutoImagePaths.add(normalizedPath);
+        } else {
+          console.warn(
+            `[bridge-manager] Failed to auto-send tool-result image ${normalizedPath}: ${result.error || 'unknown error'}`,
+          );
+        }
+      } catch (error) {
+        console.warn(`[bridge-manager] Failed to auto-send tool-result image ${normalizedPath}:`, error);
+      }
+    }
 
     const images = extractInlineToolResultImages(blocks);
     for (const image of images) {
@@ -1956,7 +2032,7 @@ async function handleMessage(
     if (!planAttemptIsCurrent()) {
       return;
     }
-    await maybeSendInlineToolResultImages(result.contentBlocks);
+    await maybeSendToolResultImages(result.contentBlocks);
     const remainingSegments = result.responseSegments
       .filter((segment) => segment.trim())
       .slice(streamedSegmentCount);

@@ -24,7 +24,7 @@ describe('conversation-engine', () => {
     fs.rmSync(DATA_DIR, { recursive: true, force: true });
   });
 
-  it('splits codex native output into response segments without duplicating the intro text', async () => {
+  it('renders codex native plan steps with label/description details without duplicating the intro text', async () => {
     const store = new JsonFileStore(makeSettings());
     initBridgeContext({
       store,
@@ -35,7 +35,10 @@ describe('conversation-engine', () => {
             controller.enqueue(sseEvent('text_segment', '我会先查看项目约束。'));
             controller.enqueue(sseEvent('plan_state', {
               explanation: '先做一个可以直接执行的计划。',
-              plan: [{ title: '查看约束', status: 'completed' }],
+              plan: [
+                { label: '查看约束', description: '检查仓库约束与入口', status: 'completed' },
+                { title: '生成 HTML', text: '输出单文件 HTML', status: 'pending' },
+              ],
             }));
             controller.enqueue(sseEvent('plan_result', '1. 读取 CLAUDE.md\n2. 生成单文件 HTML'));
             controller.enqueue(sseEvent('result', { session_id: 'thread-1' }));
@@ -74,11 +77,11 @@ describe('conversation-engine', () => {
 
     assert.deepEqual(result.responseSegments, [
       '我会先查看项目约束。',
-      '先做一个可以直接执行的计划。\n\n计划步骤\n1. 查看约束 [completed]\n\n1. 读取 CLAUDE.md\n2. 生成单文件 HTML',
+      '先做一个可以直接执行的计划。\n\n计划步骤\n1. 查看约束 [completed]\n    检查仓库约束与入口\n2. 生成 HTML [pending]\n    输出单文件 HTML\n\n1. 读取 CLAUDE.md\n2. 生成单文件 HTML',
     ]);
     assert.equal(
       result.responseText,
-      '我会先查看项目约束。\n\n先做一个可以直接执行的计划。\n\n计划步骤\n1. 查看约束 [completed]\n\n1. 读取 CLAUDE.md\n2. 生成单文件 HTML',
+      '我会先查看项目约束。\n\n先做一个可以直接执行的计划。\n\n计划步骤\n1. 查看约束 [completed]\n    检查仓库约束与入口\n2. 生成 HTML [pending]\n    输出单文件 HTML\n\n1. 读取 CLAUDE.md\n2. 生成单文件 HTML',
     );
   });
 

@@ -214,7 +214,9 @@ agents-to-im start
 3. 添加事件：
    - `im.message.receive_v1`
    - `im.message.message_read_v1`
+   - `im.chat.updated_v1`
    - `im.chat.member.bot.added_v1`
+   其中 `im.chat.updated_v1` 用于把用户手动修改的群名同步回 Codex/Claude 原生会话标题。
 4. 打开 `https://open.feishu.cn/app/{app_id}/event?tab=callback`
 5. 添加回调：
    - `card.action.trigger`

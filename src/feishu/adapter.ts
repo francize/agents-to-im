@@ -42,7 +42,6 @@ import {
 import type { ClaudePermissionMode } from '../runtime/claude-mode.js';
 import {
   listRecentNativeSessions,
-  loadNativeSessionTranscript,
   type NativeReplayItem,
 } from '../infra/native-session-history.js';
 
@@ -105,6 +104,7 @@ import {
 import type {
   ActivityArtifact,
   FeishuAdapterOptions,
+  FeishuChatUpdatedEventData,
   FeishuMessageEventData,
   PendingActivitySend,
   PendingInboundImage,
@@ -135,7 +135,6 @@ import {
   resolveActionOpenMessageId,
   resolveClaudeBindingMode,
   routeKeyForAddress,
-  sanitizeTitleFallback,
   stableMessageUuid,
   stripClaudeModeSuffix,
 } from './utils.js';
@@ -147,6 +146,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
   readonly channelType: ChannelType = 'feishu';
   private readonly instanceAdapterId: string;
   private readonly instanceProfileId: string;
+  private static readonly SELF_RENAME_ECHO_TTL_MS = 30_000;
 
   private running = false;
   private queue: InboundMessage[] = [];
@@ -156,7 +156,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private seenMessageIds = new Map<string, number>();
   private lastIncomingMessageId = new Map<string, string>();
   private typingReactions = new Map<string, string>();
-  private pendingTitles = new Set<string>();
+  private pendingTitleSyncs = new Set<string>();
+  private knownChatNames = new Map<string, string>();
+  private selfRenameEchoes = new Map<string, number>();
   private readonly larkClient = new LarkClient();
   private readonly previewService = new PreviewService(
     this.larkClient,
@@ -345,6 +347,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
         await this.handleIncomingEvent(data as FeishuMessageEventData);
       },
       'im.message.message_read_v1': async () => {},
+      'im.chat.updated_v1': async (data: unknown) => {
+        await this.handleChatUpdatedEvent(data as FeishuChatUpdatedEventData);
+      },
       'card.action.trigger': async (data: unknown) => {
         try {
           return await this.handleCardAction(data as StructuredActionEvent);
@@ -405,7 +410,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
     this.waiters = [];
     this.queue = [];
     this.chatQueues.clear();
-    this.pendingTitles.clear();
+    this.pendingTitleSyncs.clear();
+    this.knownChatNames.clear();
+    this.selfRenameEchoes.clear();
     this.previewService.reset();
     this.activityService.reset();
     this.inboundImageService.reset();
@@ -606,7 +613,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     const finalPreview = await this.previewService.finalizePreview(address, normalizeMarkdown(message));
     if (finalPreview?.ok) {
-      void this.maybeRenameChat(address.chatId);
+      void this.maybeSyncSessionTitle(address.chatId);
       return finalPreview;
     }
 
@@ -615,7 +622,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       ? await this.sendAsInteractiveCard(address, text, message.replyToMessageId)
       : await this.sendAsPost(address, text, message.replyToMessageId);
     if (result.ok) {
-      void this.maybeRenameChat(address.chatId);
+      void this.maybeSyncSessionTitle(address.chatId);
     }
     return result;
   }
@@ -1092,13 +1099,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
     claudePermissionMode?: ClaudePermissionMode,
   ): Promise<string> {
     if (!this.restClient) throw new Error('Feishu client not initialized');
+    const initialName = defaultChatName(runtime, claudePermissionMode);
     const response = await this.restClient.im.chat.create({
       params: {
         user_id_type: sender.type,
         set_bot_manager: true,
       },
       data: {
-        name: defaultChatName(runtime, claudePermissionMode),
+        name: initialName,
         chat_mode: 'group',
         chat_type: 'private',
         group_message_type: 'chat',
@@ -1108,46 +1116,112 @@ export class FeishuAdapter extends BaseChannelAdapter {
     assertLarkOk(response, 'im.chat.create');
     const chatId = response.data?.chat_id;
     if (!chatId) throw new Error('Create group succeeded without chat_id');
+    this.knownChatNames.set(chatId, initialName);
     return chatId;
   }
 
-  private async maybeRenameChat(chatId: string): Promise<void> {
-    if (!this.restClient || this.pendingTitles.has(chatId)) return;
+  private chatNameKey(chatId: string, name: string): string {
+    return `${chatId}\u0000${name}`;
+  }
+
+  private pruneSelfRenameEchoes(now = Date.now()): void {
+    for (const [key, expiresAt] of this.selfRenameEchoes) {
+      if (expiresAt <= now) this.selfRenameEchoes.delete(key);
+    }
+  }
+
+  private rememberObservedChatName(chatId: string, name: string): void {
+    this.knownChatNames.set(chatId, name);
+  }
+
+  private rememberSelfRename(chatId: string, name: string): void {
+    this.pruneSelfRenameEchoes();
+    this.selfRenameEchoes.set(
+      this.chatNameKey(chatId, name),
+      Date.now() + FeishuAdapter.SELF_RENAME_ECHO_TTL_MS,
+    );
+  }
+
+  private consumeSelfRenameEcho(chatId: string, name: string): boolean {
+    this.pruneSelfRenameEchoes();
+    const key = this.chatNameKey(chatId, name);
+    const expiresAt = this.selfRenameEchoes.get(key);
+    if (!expiresAt || expiresAt <= Date.now()) {
+      this.selfRenameEchoes.delete(key);
+      return false;
+    }
+    this.selfRenameEchoes.delete(key);
+    return true;
+  }
+
+  private async handleChatUpdatedEvent(data: FeishuChatUpdatedEventData): Promise<void> {
+    const chatId = data.chat_id?.trim();
+    const beforeName = data.before_change?.name?.trim() || '';
+    const afterName = data.after_change?.name?.trim() || '';
+    if (!chatId || !afterName) return;
+
+    this.rememberObservedChatName(chatId, afterName);
+    if (beforeName === afterName || this.consumeSelfRenameEcho(chatId, afterName)) return;
+
     const store = this.getStore();
     const binding = store.getChannelBinding(this.channelType, chatId, this.profileId);
     if (!binding) return;
-    const ext = store.getSessionExt(binding.codepilotSessionId);
-    if (!ext || ext.titleStatus === 'done' || ext.titleStatus === 'running') return;
-    const { messages } = store.getMessages(binding.codepilotSessionId);
-    const firstUser = messages.find((message) => message.role === 'user');
-    const firstAssistant = messages.find((message) => message.role === 'assistant');
-    if (!firstUser || !firstAssistant) return;
 
-    this.pendingTitles.add(chatId);
-    store.updateSessionExt(binding.codepilotSessionId, { titleStatus: 'running' });
+    store.updateSessionExt(binding.codepilotSessionId, {
+      title: afterName,
+      titleStatus: 'done',
+      displayNameMode: 'manual_locked',
+    });
 
     const llm = getBridgeContext().llm as MultiplexLLMProvider & {
-      generateTitle?: (sessionId: string, userText: string, assistantText: string) => Promise<string | null>;
+      writeSessionTitle?: (sessionId: string, title: string) => Promise<void>;
     };
-    const fallbackTitle = sanitizeTitleFallback(firstUser.content);
-
     try {
-      const generated = await llm.generateTitle?.(binding.codepilotSessionId, firstUser.content, firstAssistant.content);
-      const title = generated || fallbackTitle;
+      await llm.writeSessionTitle?.(binding.codepilotSessionId, afterName);
+    } catch (error) {
+      console.warn('[feishu-adapter] Failed to push manual title to runtime:', error);
+    }
+  }
+
+  private async maybeSyncSessionTitle(chatId: string): Promise<void> {
+    if (this.pendingTitleSyncs.has(chatId)) return;
+    const store = this.getStore();
+    const binding = store.getChannelBinding(this.channelType, chatId, this.profileId);
+    if (!binding) return;
+
+    const llm = getBridgeContext().llm as MultiplexLLMProvider & {
+      readSessionTitle?: (sessionId: string) => Promise<string | null>;
+      writeSessionTitle?: (sessionId: string, title: string) => Promise<void>;
+    };
+
+    this.pendingTitleSyncs.add(chatId);
+    try {
+      const ext = store.getSessionExt(binding.codepilotSessionId);
+      if (!ext || ext.displayNameMode === 'native_locked') return;
+
+      if (ext.displayNameMode === 'manual_locked') {
+        const manualTitle = ext.title?.trim();
+        if (!manualTitle) return;
+        const runtimeTitle = (await llm.readSessionTitle?.(binding.codepilotSessionId))?.trim() || '';
+        if (runtimeTitle === manualTitle) return;
+        await llm.writeSessionTitle?.(binding.codepilotSessionId, manualTitle);
+        return;
+      }
+
+      const runtimeTitle = (await llm.readSessionTitle?.(binding.codepilotSessionId))?.trim();
+      if (!runtimeTitle) return;
+      if (runtimeTitle === (ext.title || '').trim() && ext.titleStatus === 'done') return;
+
       store.updateSessionExt(binding.codepilotSessionId, {
-        title,
+        title: runtimeTitle,
         titleStatus: 'done',
+        displayNameMode: 'default',
       });
       await this.syncChatName(chatId);
     } catch (error) {
-      console.warn('[feishu-adapter] Failed to rename chat:', error);
-      store.updateSessionExt(binding.codepilotSessionId, {
-        title: fallbackTitle,
-        titleStatus: 'failed',
-      });
-      await this.syncChatName(chatId);
+      console.warn('[feishu-adapter] Failed to sync session title:', error);
     } finally {
-      this.pendingTitles.delete(chatId);
+      this.pendingTitleSyncs.delete(chatId);
     }
   }
 
@@ -1161,7 +1235,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const binding = store.getChannelBinding(this.channelType, chatId, this.profileId);
     if (!binding) return null;
     const ext = store.getSessionExt(binding.codepilotSessionId);
-    if (ext?.displayNameMode === 'native_locked' && ext.title) {
+    if ((ext?.displayNameMode === 'native_locked' || ext?.displayNameMode === 'manual_locked') && ext.title) {
       return ext.title;
     }
     const runtime = ext?.runtime || 'claude';
@@ -1181,12 +1255,15 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!chatApi?.update) return;
     const name = this.computeChatDisplayName(chatId);
     if (!name) return;
+    if (this.knownChatNames.get(chatId) === name) return;
     try {
       const response = await chatApi.update({
         path: { chat_id: chatId },
         data: { name },
       });
       assertLarkOk(response, 'im.chat.update');
+      this.rememberObservedChatName(chatId, name);
+      this.rememberSelfRename(chatId, name);
     } catch (error) {
       console.warn('[feishu-adapter] Failed to sync chat name:', error);
     }
