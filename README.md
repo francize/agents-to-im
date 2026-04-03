@@ -45,21 +45,6 @@ Most terminal-to-chat relays treat the chat window as the session container. Tha
 
 ## See It Work
 
-<table>
-  <tr>
-    <td width="50%" valign="top">
-      <b>Feishu to Claude</b><br>
-      <video src="references/feishu-to-claude.mp4" controls muted playsinline width="100%"></video><br>
-      <sub><a href="references/feishu-to-claude.mp4">Open video directly</a></sub>
-    </td>
-    <td width="50%" valign="top">
-      <b>Feishu to Codex</b><br>
-      <video src="references/feishu-to-codex.mp4" controls muted playsinline width="100%"></video><br>
-      <sub><a href="references/feishu-to-codex.mp4">Open video directly</a></sub>
-    </td>
-  </tr>
-</table>
-
 ```
 You → DM bot: /new:claude
 

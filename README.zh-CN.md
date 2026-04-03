@@ -45,21 +45,6 @@ Claude Code 和 Codex 是优秀的编码代理 — 但它们只在终端里和�
 
 ## 看看效果
 
-<table>
-  <tr>
-    <td width="50%" valign="top">
-      <b>飞书到 Claude</b><br>
-      <video src="references/feishu-to-claude.mp4" controls muted playsinline width="100%"></video><br>
-      <sub><a href="references/feishu-to-claude.mp4">直接打开视频</a></sub>
-    </td>
-    <td width="50%" valign="top">
-      <b>飞书到 Codex</b><br>
-      <video src="references/feishu-to-codex.mp4" controls muted playsinline width="100%"></video><br>
-      <sub><a href="references/feishu-to-codex.mp4">直接打开视频</a></sub>
-    </td>
-  </tr>
-</table>
-
 ```
 你 → 私聊 Bot: /new:claude
 
