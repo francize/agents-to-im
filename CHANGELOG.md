@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.4] - 2026-04-14
+
+### Fixed
+- Add `CTI_FEISHU_SHOW_TOOL_CALL_CARDS` so Feishu/Lark sessions can hide noisy tool-call cards while keeping normal assistant cards.
+- Apply the tool-card toggle consistently to Claude tool activity, Codex command-execution, and file-change cards.
+- Make `onboard` step skips advance directly to the next step instead of asking follow-up prompts and extra Enter confirmations.
+
+### Changed
+- Guide the tool-card toggle during `agents-to-im onboard` and persist the chosen value into `config.env`.
+- Clarify in config/docs that the toggle covers MCP/tool, command execution, and file-change cards.
+- Trim the example config by removing the platform-specific Claude CLI path sample line.
+- Extend regression coverage for config parsing, onboarding flow, Feishu activity-card projection, and bridge-side suppression handling.
+
 ## [0.0.4-beta.1] - 2026-04-14
 
 ### Fixed
