@@ -24,6 +24,7 @@ import {
   findAgentsToImPackageRoot,
   readAgentsToImVersion,
 } from './cli-upgrade.js';
+import { normalizeConfiguredClaudeCliPath } from './providers/claude/cli-support.js';
 import { FEISHU_SCOPES_IMPORT_JSON } from './feishu-scopes.js';
 
 const CTI_HOME = process.env.CTI_HOME || path.join(os.homedir(), '.agents-to-im');
@@ -684,7 +685,7 @@ async function setupWizard() {
     const defaultWorkDir = existing.CTI_DEFAULT_WORKDIR || process.cwd();
     const workDir = await ask(rl, t(locale, '默认工作目录', 'Default working directory'), defaultWorkDir);
     const detectedClaudeCliPath = agents.find((agent) => agent.name === 'Claude Code')?.path || '';
-    const existingClaudeCliPath = existing.CTI_CLAUDE_CODE_EXECUTABLE || '';
+    const existingClaudeCliPath = normalizeConfiguredClaudeCliPath(existing.CTI_CLAUDE_CODE_EXECUTABLE || '');
     const claudeCliPath = await ask(
       rl,
       t(locale, 'Claude CLI 路径（可选）', 'Claude CLI path (optional)'),

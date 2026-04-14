@@ -176,6 +176,24 @@ export function resolveWindowsNpmClaudeCliShim(
   return pathExists(cliJs) ? cliJs : cliPath;
 }
 
+function isWindowsStylePath(cliPath: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(cliPath) || /^\\\\/.test(cliPath);
+}
+
+export function normalizeConfiguredClaudeCliPath(
+  cliPath: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  const trimmed = cliPath?.trim();
+  if (!trimmed) return undefined;
+  if (platform === 'win32') {
+    if (trimmed.startsWith('/')) return undefined;
+    return resolveWindowsNpmClaudeCliShim(trimmed);
+  }
+  if (isWindowsStylePath(trimmed)) return undefined;
+  return trimmed;
+}
+
 export function parseWindowsWhereClaudeOutput(
   output: string,
   pathExists: (path: string) => boolean = fs.existsSync,
@@ -212,11 +230,14 @@ function findAllInPath(): string[] {
 }
 
 export function resolveClaudeCliPath(config?: Pick<Config, 'claudeCliExecutable'>): string | undefined {
-  const configuredPath = config?.claudeCliExecutable?.trim();
+  const rawConfiguredPath = config?.claudeCliExecutable?.trim();
+  const configuredPath = normalizeConfiguredClaudeCliPath(rawConfiguredPath);
+  if (rawConfiguredPath && !configuredPath) {
+    console.warn(
+      `[llm-provider] Ignoring configured Claude CLI path "${rawConfiguredPath}" because it does not match the current ${process.platform} host`,
+    );
+  }
   if (configuredPath) {
-    if (process.platform === 'win32') {
-      return resolveWindowsNpmClaudeCliShim(configuredPath);
-    }
     return configuredPath;
   }
 

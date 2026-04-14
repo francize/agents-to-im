@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.3] - 2026-04-14
+
+### Fixed
+- Ignore stale `CTI_CLAUDE_CODE_EXECUTABLE` values that do not match the current host platform.
+- Fall back to local Claude CLI discovery when an explicit Claude CLI override is cross-platform and unusable.
+- Stop `onboard` from pre-filling Windows Claude paths on macOS/Linux hosts, or POSIX paths on Windows hosts.
+
+### Changed
+- Extend regression coverage for cross-platform Claude CLI override normalization and fallback discovery.
+
+### References
+- Issue: #5
+
 ## [0.0.2] - 2026-04-14
 
 ### Fixed

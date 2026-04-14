@@ -19,6 +19,7 @@ import {
   buildSubprocessEnv,
   checkCliCompatibility,
   isExecutable,
+  normalizeConfiguredClaudeCliPath,
   parseCliMajorVersion,
   parseWindowsWhereClaudeOutput,
   preflightCheck,
@@ -371,6 +372,36 @@ describe('resolveWindowsNpmClaudeCliShim', () => {
   });
 });
 
+describe('normalizeConfiguredClaudeCliPath', () => {
+  it('ignores Windows-style configured paths on non-Windows hosts', () => {
+    assert.equal(
+      normalizeConfiguredClaudeCliPath(' C:\\Users\\fres\\AppData\\Roaming\\npm\\claude.cmd ', 'darwin'),
+      undefined,
+    );
+  });
+
+  it('ignores POSIX-style configured paths on Windows hosts', () => {
+    assert.equal(
+      normalizeConfiguredClaudeCliPath('/usr/local/bin/claude', 'win32'),
+      undefined,
+    );
+  });
+
+  it('normalizes Windows npm shim paths on Windows hosts', () => {
+    assert.equal(
+      normalizeConfiguredClaudeCliPath('C:\\Users\\fres\\AppData\\Roaming\\npm\\claude.cmd', 'win32'),
+      'C:\\Users\\fres\\AppData\\Roaming\\npm\\claude.cmd',
+    );
+  });
+
+  it('keeps compatible configured paths on the current host', () => {
+    assert.equal(
+      normalizeConfiguredClaudeCliPath(' /tmp/custom-claude ', 'darwin'),
+      '/tmp/custom-claude',
+    );
+  });
+});
+
 describe('parseWindowsWhereClaudeOutput', () => {
   it('handles CRLF output and normalizes npm shim candidates', () => {
     const shimPath = 'C:\\Users\\fres\\AppData\\Roaming\\npm\\claude.cmd';
@@ -529,6 +560,24 @@ describe('resolveClaudeCliPath', () => {
 
     fs.rmSync(tempRoot, { recursive: true, force: true });
     assert.equal(resolved, newCli);
+  });
+
+  it('ignores Windows-style configured paths on non-Windows hosts and falls back to PATH discovery', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-claude-path-fallback-'));
+    const binDir = path.join(tempRoot, 'bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    const localCli = path.join(binDir, 'claude');
+    writeFakeClaudeCli(localCli, '2.1.104');
+
+    const resolved = withPatchedEnv({
+      PATH: `${binDir}:${process.env.PATH || ''}`,
+      HOME: tempRoot,
+    }, () => resolveClaudeCliPath({
+      claudeCliExecutable: 'C:\\Users\\fres\\AppData\\Roaming\\npm\\claude.cmd',
+    }));
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+    assert.equal(resolved, localCli);
   });
 
   it('walks the Windows where-claude discovery branch without crashing', () => {

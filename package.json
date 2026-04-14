@@ -1,6 +1,6 @@
 {
   "name": "agents-to-im",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Bridge Claude Code and Codex into Feishu/Lark with isolated group sessions, local state recovery, and streamed CardKit interactions",
   "license": "MIT",
   "keywords": [
