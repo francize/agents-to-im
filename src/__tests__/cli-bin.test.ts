@@ -25,4 +25,21 @@ describe('CLI bin entrypoint', () => {
     assert.match(result.stdout, /Usage: agents-to-im \[command\]/);
     assert.match(result.stdout, /Commands:/);
   });
+
+  it('keeps dist/cli.mjs executable as a compatibility wrapper', () => {
+    const build = spawnSync('node', ['scripts/build-cli.js'], {
+      cwd: repoRoot,
+      encoding: 'utf-8',
+    });
+    assert.equal(build.status, 0, build.stderr || build.stdout);
+
+    const result = spawnSync('node', ['dist/cli.mjs', 'help'], {
+      cwd: repoRoot,
+      encoding: 'utf-8',
+    });
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /Usage: agents-to-im \[command\]/);
+    assert.match(result.stdout, /Commands:/);
+  });
 });

@@ -683,6 +683,13 @@ async function setupWizard() {
 
     const defaultWorkDir = existing.CTI_DEFAULT_WORKDIR || process.cwd();
     const workDir = await ask(rl, t(locale, '默认工作目录', 'Default working directory'), defaultWorkDir);
+    const detectedClaudeCliPath = agents.find((agent) => agent.name === 'Claude Code')?.path || '';
+    const existingClaudeCliPath = existing.CTI_CLAUDE_CODE_EXECUTABLE || '';
+    const claudeCliPath = await ask(
+      rl,
+      t(locale, 'Claude CLI 路径（可选）', 'Claude CLI path (optional)'),
+      existingClaudeCliPath || detectedClaudeCliPath || undefined,
+    );
 
     console.log('');
     const restrictUsers = await confirm(
@@ -720,6 +727,9 @@ async function setupWizard() {
 
     if (domain) lines.push(`CTI_FEISHU_DOMAIN=${domain}`);
     if (allowedUsers) lines.push(`CTI_FEISHU_ALLOWED_USERS=${allowedUsers}`);
+    if (claudeCliPath) {
+      lines.push('', '# Claude runtime', `CTI_CLAUDE_CODE_EXECUTABLE=${claudeCliPath}`);
+    }
 
     lines.push('');
 

@@ -14,10 +14,12 @@
    - Claude：`claude --version`
    - Codex：检查 `codex --version`、`codex app-server --help` 与 `~/.codex/config.toml`
 5. 查看日志：`agents-to-im logs 200`
+6. Windows 上如果 `claude --version` 只命中 npm shim，给 `~/.agents-to-im/config.env` 增加 `CTI_CLAUDE_CODE_EXECUTABLE=...\\claude.cmd`，然后执行 `agents-to-im restart`
 
 常见原因：
 - Feishu 凭据缺失或填错
 - Claude CLI 不存在，但你尝试创建 Claude 会话
+- Claude Code 是在 bridge 启动后才安装或更新的，daemon 还在使用旧环境
 - Codex 鉴权缺失，但你尝试创建 Codex 会话
 
 ## Feishu 私聊没有响应

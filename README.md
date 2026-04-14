@@ -164,8 +164,10 @@ CTI_DEFAULT_WORKDIR=/path/to/your/project
 | `CTI_FEISHU_APP_SECRET` | Yes | Feishu app secret |
 | `CTI_FEISHU_DOMAIN` | No | `lark` for Lark international |
 | `CTI_FEISHU_ALLOWED_USERS` | No | Comma-separated allowed user IDs |
+| `CTI_CLAUDE_CODE_EXECUTABLE` | No | Explicit Claude CLI path override. On Windows, npm-installed `claude.cmd` is accepted and mapped to the real CLI entry automatically. |
 
 Claude and Codex both use the local CLI defaults on the host machine for model selection and approvals. Codex sessions reuse your local `~/.codex/config.toml` for auth, trusted directories, sandbox, and approval policy.
+If you install or update Claude Code after the bridge has already started, restart the bridge so the daemon picks up the new CLI path and environment.
 
 </details>
 

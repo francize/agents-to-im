@@ -2,7 +2,8 @@ import type { LLMProvider, StreamChatParams } from '../bridge/host.js';
 
 import type { Config } from '../config/config.js';
 import { CodexProvider } from './codex/codex-provider.js';
-import { SDKLLMProvider, preflightCheck, resolveClaudeCliPath } from './claude/sdk-provider.js';
+import { SDKLLMProvider } from './claude/sdk-provider.js';
+import { preflightCheck, resolveClaudeCliPath } from './claude/cli-support.js';
 import { PendingApprovals, type PendingPermissions, PendingStructuredInputs } from './claude/permission-gateway.js';
 import {
   ClaudeRuntimeDriver,
@@ -60,7 +61,7 @@ export class MultiplexLLMProvider implements LLMProvider {
 
   private async getClaudeProvider(): Promise<SDKLLMProvider> {
     if (this.claudeProvider) return this.claudeProvider;
-    const cliPath = resolveClaudeCliPath();
+    const cliPath = resolveClaudeCliPath(this.config);
     if (!cliPath) {
       throw new Error(
         'Cannot find the `claude` CLI executable. Install Claude Code CLI and ensure it is available in PATH.',

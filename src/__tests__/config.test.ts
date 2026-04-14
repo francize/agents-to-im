@@ -1,7 +1,27 @@
-import { describe, it } from 'node:test';
+import { beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 
-import { maskSecret, configToSettings, type Config } from '../config/config.js';
+import {
+  CONFIG_PATH,
+  CTI_HOME,
+  configToSettings,
+  loadConfig,
+  maskSecret,
+  saveConfig,
+  type Config,
+} from '../config/config.js';
+
+const base: Config = {
+  defaultWorkDir: '/tmp/test',
+  feishu: {
+    id: 'default',
+  },
+};
+
+beforeEach(() => {
+  fs.rmSync(CTI_HOME, { recursive: true, force: true });
+});
 
 describe('maskSecret', () => {
   it('masks short values entirely', () => {
@@ -17,13 +37,6 @@ describe('maskSecret', () => {
 });
 
 describe('configToSettings', () => {
-  const base: Config = {
-    defaultWorkDir: '/tmp/test',
-    feishu: {
-      id: 'default',
-    },
-  };
-
   it('always enables remote bridge and feishu channel', () => {
     const settings = configToSettings(base);
     assert.equal(settings.get('remote_bridge_enabled'), 'true');
@@ -71,5 +84,55 @@ describe('configToSettings', () => {
     assert.equal(settings.has('bridge_default_model'), false);
     assert.equal(settings.has('bridge_claude_default_model'), false);
     assert.equal(settings.has('bridge_codex_default_model'), false);
+  });
+});
+
+describe('loadConfig/saveConfig', () => {
+  it('round-trips claudeCliExecutable when configured', () => {
+    saveConfig({
+      ...base,
+      claudeCliExecutable: 'C:\\Users\\fres\\AppData\\Roaming\\npm\\claude.cmd',
+    });
+
+    const loaded = loadConfig();
+    const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
+
+    assert.equal(loaded.claudeCliExecutable, 'C:\\Users\\fres\\AppData\\Roaming\\npm\\claude.cmd');
+    assert.match(content, /CTI_CLAUDE_CODE_EXECUTABLE=C:\\Users\\fres\\AppData\\Roaming\\npm\\claude\.cmd/);
+  });
+
+  it('omits claudeCliExecutable when unset', () => {
+    saveConfig(base);
+
+    const loaded = loadConfig();
+    const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
+
+    assert.equal(loaded.claudeCliExecutable, undefined);
+    assert.doesNotMatch(content, /CTI_CLAUDE_CODE_EXECUTABLE=/);
+  });
+
+  it('parses quoted values, lark domain, and allowlists from config.env', () => {
+    fs.mkdirSync(CTI_HOME, { recursive: true });
+    fs.writeFileSync(
+      CONFIG_PATH,
+      [
+        '# comment',
+        'CTI_DEFAULT_WORKDIR="/tmp/workspace"',
+        "CTI_FEISHU_APP_ID='cli_app'",
+        'CTI_FEISHU_APP_SECRET=secret',
+        'CTI_FEISHU_DOMAIN=lark',
+        'CTI_FEISHU_ALLOWED_USERS=ou_1, ou_2',
+        'CTI_CLAUDE_CODE_EXECUTABLE="C:\\Users\\fres\\AppData\\Roaming\\npm\\claude.cmd"',
+      ].join('\n'),
+    );
+
+    const loaded = loadConfig();
+
+    assert.equal(loaded.defaultWorkDir, '/tmp/workspace');
+    assert.equal(loaded.feishu.appId, 'cli_app');
+    assert.equal(loaded.feishu.appSecret, 'secret');
+    assert.equal(loaded.feishu.domain, 'lark');
+    assert.deepEqual(loaded.feishu.allowedUsers, ['ou_1', 'ou_2']);
+    assert.equal(loaded.claudeCliExecutable, 'C:\\Users\\fres\\AppData\\Roaming\\npm\\claude.cmd');
   });
 });

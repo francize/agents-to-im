@@ -34,5 +34,7 @@ runCli(process.argv.slice(2));
 `;
 fs.writeFileSync('dist/cli-bin.mjs', wrapperContent);
 fs.chmodSync('dist/cli-bin.mjs', 0o755);
+fs.writeFileSync('dist/cli.mjs', wrapperContent);
+fs.chmodSync('dist/cli.mjs', 0o755);
 
-console.log('Built dist/cli.js + dist/cli-bin.mjs');
+console.log('Built dist/cli.js + dist/cli-bin.mjs + dist/cli.mjs');

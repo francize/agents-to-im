@@ -1,6 +1,7 @@
 import { beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { CTI_HOME } from '../config/config.js';
@@ -133,5 +134,32 @@ describe('MultiplexLLMProvider', () => {
       resumeKinds: ['sdkSessionId', 'runtimeThreadId'],
       elicitation: false,
     });
+  });
+
+  it('uses the configured Claude CLI path when creating the Claude provider', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-claude-provider-'));
+    const cliPath = path.join(tempRoot, 'claude.mjs');
+    fs.writeFileSync(
+      cliPath,
+      [
+        'const arg = process.argv[2];',
+        "if (arg === '--version') { console.log('2.1.104'); process.exit(0); }",
+        "if (arg === '--help') { console.log('output-format input-format permission-mode setting-sources'); process.exit(0); }",
+        'process.exit(0);',
+      ].join('\n'),
+    );
+
+    const store = new JsonFileStore(makeSettings());
+    const provider = new MultiplexLLMProvider(store, new PendingPermissions(), {
+      ...makeConfig(),
+      claudeCliExecutable: cliPath,
+    });
+
+    const claudeProvider = await (provider as any).getClaudeProvider();
+
+    assert.equal((provider as any).claudeCliPath, cliPath);
+    assert.equal((claudeProvider as any).cliPath, cliPath);
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 });

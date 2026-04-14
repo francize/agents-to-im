@@ -15,6 +15,7 @@ export interface FeishuProfileConfig {
 export interface Config {
   defaultWorkDir: string;
   feishu: FeishuProfileConfig;
+  claudeCliExecutable?: string;
 }
 
 export const DEFAULT_CTI_HOME = path.join(os.homedir(), '.agents-to-im');
@@ -71,6 +72,7 @@ export function loadConfig(): Config {
   return {
     defaultWorkDir: env.get('CTI_DEFAULT_WORKDIR') || process.cwd(),
     feishu: loadFeishuConfig(env),
+    claudeCliExecutable: env.get('CTI_CLAUDE_CODE_EXECUTABLE') || undefined,
   };
 }
 
@@ -92,6 +94,7 @@ export function saveConfig(config: Config): void {
   let out = '';
   out += formatEnvLine('CTI_DEFAULT_WORKDIR', config.defaultWorkDir);
   out += formatFeishuLines(config.feishu);
+  out += formatEnvLine('CTI_CLAUDE_CODE_EXECUTABLE', config.claudeCliExecutable);
 
   fs.mkdirSync(CTI_HOME, { recursive: true });
   const tmpPath = CONFIG_PATH + '.tmp';

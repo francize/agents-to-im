@@ -1,5 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import {
   CLAUDE_SETTING_SOURCES,
@@ -8,10 +11,20 @@ import {
   classifyAuthError,
   isNonClaudeModel,
   mapSdkMessageToActivityEvent,
-  parseCliMajorVersion,
   parseAskUserQuestionRequest,
   handleMessage,
 } from '../providers/claude/sdk-provider.js';
+import {
+  buildCliExecCommand,
+  buildSubprocessEnv,
+  checkCliCompatibility,
+  isExecutable,
+  parseCliMajorVersion,
+  parseWindowsWhereClaudeOutput,
+  preflightCheck,
+  resolveClaudeCliPath,
+  resolveWindowsNpmClaudeCliShim,
+} from '../providers/claude/cli-support.js';
 import type { StreamState } from '../providers/claude/sdk-provider.js';
 import { sseEvent } from '../infra/sse-utils.js';
 
@@ -40,6 +53,87 @@ function freshState(): StreamState {
 
 function parseChunk(chunk: string): { type: string; data: string } {
   return JSON.parse(chunk.replace(/^data:\s*/, ''));
+}
+
+function withPatchedEnv<T>(
+  updates: Record<string, string | undefined>,
+  run: () => T,
+): T {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(updates)) {
+    previous.set(key, process.env[key]);
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+  try {
+    return run();
+  } finally {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
+function withPatchedPlatform<T>(
+  platform: NodeJS.Platform,
+  run: () => T,
+): T {
+  const previous = process.platform;
+  Object.defineProperty(process, 'platform', {
+    value: platform,
+    configurable: true,
+  });
+  try {
+    return run();
+  } finally {
+    Object.defineProperty(process, 'platform', {
+      value: previous,
+      configurable: true,
+    });
+  }
+}
+
+function writeFakeClaudeCli(filePath: string, version = '2.1.104', help = 'output-format input-format permission-mode setting-sources') {
+  fs.writeFileSync(
+    filePath,
+    [
+      '#!/bin/sh',
+      'arg="$1"',
+      `if [ "$arg" = "--version" ]; then echo "${version}"; exit 0; fi`,
+      `if [ "$arg" = "--help" ]; then echo "${help}"; exit 0; fi`,
+      'exit 0',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+}
+
+function writeFailingClaudeCli(
+  filePath: string,
+  options?: { versionFails?: boolean; helpFails?: boolean; version?: string },
+) {
+  const version = options?.version || '2.1.104';
+  fs.writeFileSync(
+    filePath,
+    [
+      '#!/bin/sh',
+      'arg="$1"',
+      options?.versionFails
+        ? `if [ "$arg" = "--version" ]; then exit 1; fi`
+        : `if [ "$arg" = "--version" ]; then echo "${version}"; exit 0; fi`,
+      options?.helpFails
+        ? `if [ "$arg" = "--help" ]; then exit 1; fi`
+        : 'if [ "$arg" = "--help" ]; then echo "output-format input-format permission-mode setting-sources"; exit 0; fi',
+      'exit 0',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
 }
 
 // ── classifyAuthError ──
@@ -80,6 +174,40 @@ describe('classifyAuthError', () => {
 describe('CLAUDE_SETTING_SOURCES', () => {
   it('includes local config so CLI-managed MCP servers remain visible to the SDK', () => {
     assert.deepEqual(CLAUDE_SETTING_SOURCES, ['local', 'user', 'project']);
+  });
+});
+
+describe('buildSubprocessEnv', () => {
+  it('keeps the parent environment in inherit mode except always-stripped keys', () => {
+    const env = withPatchedEnv({
+      CTI_ENV_ISOLATION: 'inherit',
+      PATH: '/tmp/bin',
+      CLAUDECODE: 'strip-me',
+      CUSTOM_KEEP: 'yes',
+    }, () => buildSubprocessEnv());
+
+    assert.equal(env.PATH, '/tmp/bin');
+    assert.equal(env.CUSTOM_KEEP, 'yes');
+    assert.equal(env.CLAUDECODE, undefined);
+  });
+
+  it('keeps only whitelisted and prefixed variables in strict mode', () => {
+    const env = withPatchedEnv({
+      CTI_ENV_ISOLATION: 'strict',
+      PATH: '/tmp/bin',
+      CTI_SAMPLE: 'sample',
+      ANTHROPIC_API_KEY: 'anthropic-key',
+      OPENAI_API_KEY: 'openai-key',
+      CODEX_HOME: '/tmp/codex-home',
+      CUSTOM_DROP: 'drop-me',
+    }, () => buildSubprocessEnv());
+
+    assert.equal(env.PATH, '/tmp/bin');
+    assert.equal(env.CTI_SAMPLE, 'sample');
+    assert.equal(env.ANTHROPIC_API_KEY, 'anthropic-key');
+    assert.equal(env.OPENAI_API_KEY, 'openai-key');
+    assert.equal(env.CODEX_HOME, '/tmp/codex-home');
+    assert.equal(env.CUSTOM_DROP, undefined);
   });
 });
 
@@ -192,6 +320,247 @@ describe('parseCliMajorVersion', () => {
   it('returns undefined for non-version strings', () => {
     assert.equal(parseCliMajorVersion('unknown'), undefined);
     assert.equal(parseCliMajorVersion(''), undefined);
+  });
+});
+
+describe('buildCliExecCommand', () => {
+  it('runs script entrypoints through node and binaries directly', () => {
+    for (const ext of ['js', 'mjs', 'cjs']) {
+      assert.equal(
+        buildCliExecCommand(`/tmp/claude.${ext}`, ['--version']),
+        `"${process.execPath}" "/tmp/claude.${ext}" "--version"`,
+      );
+    }
+    assert.equal(
+      buildCliExecCommand('/tmp/claude', ['--help']),
+      '"/tmp/claude" "--help"',
+    );
+  });
+});
+
+describe('isExecutable', () => {
+  it('detects executable and non-executable files', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-is-executable-'));
+    const executablePath = path.join(tempDir, 'claude-ok.sh');
+    const plainFilePath = path.join(tempDir, 'claude-no.sh');
+
+    writeFakeClaudeCli(executablePath);
+    fs.writeFileSync(plainFilePath, 'echo nope\n', { mode: 0o644 });
+
+    assert.equal(isExecutable(executablePath), true);
+    assert.equal(isExecutable(plainFilePath), false);
+
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+});
+
+describe('resolveWindowsNpmClaudeCliShim', () => {
+  it('maps npm shim paths to the real cli.js when present', () => {
+    const shimPath = 'C:\\Users\\fres\\AppData\\Roaming\\npm\\claude.cmd';
+    const cliJsPath = 'C:\\Users\\fres\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js';
+
+    assert.equal(
+      resolveWindowsNpmClaudeCliShim(shimPath, (candidate) => candidate === cliJsPath),
+      cliJsPath,
+    );
+  });
+
+  it('leaves the original path unchanged when the real cli.js is absent', () => {
+    const shimPath = 'C:\\Users\\fres\\AppData\\Roaming\\npm\\claude.cmd';
+    assert.equal(resolveWindowsNpmClaudeCliShim(shimPath, () => false), shimPath);
+  });
+});
+
+describe('parseWindowsWhereClaudeOutput', () => {
+  it('handles CRLF output and normalizes npm shim candidates', () => {
+    const shimPath = 'C:\\Users\\fres\\AppData\\Roaming\\npm\\claude.cmd';
+    const cliJsPath = 'C:\\Users\\fres\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js';
+    const nativePath = 'C:\\Program Files\\claude\\claude.exe';
+
+    assert.deepEqual(
+      parseWindowsWhereClaudeOutput(`${shimPath}\r\n${nativePath}\r\n`, (candidate) => candidate === cliJsPath),
+      [cliJsPath, nativePath],
+    );
+  });
+});
+
+describe('preflightCheck', () => {
+  it('executes js-based Claude CLI entrypoints via node', () => {
+    for (const ext of ['js', 'mjs', 'cjs']) {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `agents-to-im-claude-cli-${ext}-`));
+      const cliPath = path.join(tempDir, `cli.${ext}`);
+      fs.writeFileSync(
+        cliPath,
+        [
+          'const arg = process.argv[2];',
+          "if (arg === '--version') { console.log('2.1.104'); process.exit(0); }",
+          "if (arg === '--help') { console.log('output-format input-format permission-mode setting-sources'); process.exit(0); }",
+          'process.exit(0);',
+        ].join('\n'),
+      );
+
+      const result = preflightCheck(cliPath);
+      fs.rmSync(tempDir, { recursive: true, force: true });
+
+      assert.deepEqual(result, { ok: true, version: '2.1.104' });
+    }
+  });
+
+  it('surfaces old CLI versions as user-facing preflight failures', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-claude-preflight-old-'));
+    const cliPath = path.join(tempDir, 'claude-old.sh');
+    writeFakeClaudeCli(cliPath, '1.9.0');
+
+    const result = preflightCheck(cliPath);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.version, '1.9.0');
+    assert.match(result.error || '', /too old/);
+  });
+
+  it('surfaces missing required flags as preflight failures', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-claude-preflight-flags-'));
+    const cliPath = path.join(tempDir, 'claude-flags.sh');
+    writeFakeClaudeCli(cliPath, '2.1.104', 'output-format');
+
+    const result = preflightCheck(cliPath);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.version, '2.1.104');
+    assert.match(result.error || '', /missing required flags/);
+  });
+
+  it('surfaces version probe failures as execution errors', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-claude-preflight-fail-'));
+    const cliPath = path.join(tempDir, 'claude-fail.sh');
+    writeFailingClaudeCli(cliPath, { versionFails: true });
+
+    const result = preflightCheck(cliPath);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+
+    assert.deepEqual(result, {
+      ok: false,
+      error: `claude CLI at "${cliPath}" failed to execute`,
+    });
+  });
+});
+
+describe('checkCliCompatibility', () => {
+  it('marks old CLI builds as incompatible', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-claude-old-'));
+    const cliPath = path.join(tempDir, 'claude-old.sh');
+    writeFakeClaudeCli(cliPath, '1.9.0');
+
+    const result = checkCliCompatibility(cliPath, buildSubprocessEnv());
+    fs.rmSync(tempDir, { recursive: true, force: true });
+
+    assert.deepEqual(result, {
+      compatible: false,
+      version: '1.9.0',
+      major: 1,
+    });
+  });
+
+  it('flags missing SDK-required help switches', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-claude-flags-'));
+    const cliPath = path.join(tempDir, 'claude-help.sh');
+    writeFakeClaudeCli(cliPath, '2.1.104', 'output-format');
+
+    const result = checkCliCompatibility(cliPath, buildSubprocessEnv());
+    fs.rmSync(tempDir, { recursive: true, force: true });
+
+    assert.equal(result?.compatible, false);
+    assert.deepEqual(result?.missingFlags, ['input-format', 'permission-mode', 'setting-sources']);
+  });
+
+  it('treats help probe failures as non-blocking when version is otherwise valid', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-claude-help-fail-'));
+    const cliPath = path.join(tempDir, 'claude-help-fail.sh');
+    writeFailingClaudeCli(cliPath, { helpFails: true });
+
+    const result = checkCliCompatibility(cliPath, buildSubprocessEnv());
+    fs.rmSync(tempDir, { recursive: true, force: true });
+
+    assert.deepEqual(result, {
+      compatible: true,
+      version: '2.1.104',
+      major: 2,
+      missingFlags: undefined,
+    });
+  });
+
+  it('returns undefined when the version probe cannot execute', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-claude-version-fail-'));
+    const cliPath = path.join(tempDir, 'claude-version-fail.sh');
+    writeFailingClaudeCli(cliPath, { versionFails: true });
+
+    const result = checkCliCompatibility(cliPath, buildSubprocessEnv());
+    fs.rmSync(tempDir, { recursive: true, force: true });
+
+    assert.equal(result, undefined);
+  });
+});
+
+describe('resolveClaudeCliPath', () => {
+  it('returns the configured path directly on non-Windows hosts', () => {
+    assert.equal(
+      resolveClaudeCliPath({ claudeCliExecutable: ' /tmp/custom-claude ' }),
+      '/tmp/custom-claude',
+    );
+  });
+
+  it('prefers the first compatible PATH candidate over an older one', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-claude-path-'));
+    const oldDir = path.join(tempRoot, 'old');
+    const newDir = path.join(tempRoot, 'new');
+    fs.mkdirSync(oldDir, { recursive: true });
+    fs.mkdirSync(newDir, { recursive: true });
+    const oldCli = path.join(oldDir, 'claude');
+    const newCli = path.join(newDir, 'claude');
+    writeFakeClaudeCli(oldCli, '1.9.0');
+    writeFakeClaudeCli(newCli, '2.1.104');
+
+    const resolved = withPatchedEnv({
+      PATH: `${oldDir}:${newDir}:${process.env.PATH || ''}`,
+      HOME: tempRoot,
+    }, () => resolveClaudeCliPath());
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+    assert.equal(resolved, newCli);
+  });
+
+  it('walks the Windows where-claude discovery branch without crashing', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-claude-win-path-'));
+    const binDir = path.join(tempRoot, 'bin');
+    const oldDir = path.join(tempRoot, 'old');
+    const newDir = path.join(tempRoot, 'new');
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.mkdirSync(oldDir, { recursive: true });
+    fs.mkdirSync(newDir, { recursive: true });
+
+    const oldCli = path.join(oldDir, 'claude');
+    const newCli = path.join(newDir, 'claude');
+    const whereBin = path.join(binDir, 'where');
+    writeFakeClaudeCli(oldCli, '1.9.0');
+    writeFakeClaudeCli(newCli, '2.1.104');
+    fs.writeFileSync(
+      whereBin,
+      [
+        '#!/bin/sh',
+        `printf '%s\\r\\n%s\\r\\n' '${oldCli}' '${newCli}'`,
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+
+    const resolved = withPatchedPlatform('win32', () => withPatchedEnv({
+      PATH: `${binDir}:${process.env.PATH || ''}`,
+      LOCALAPPDATA: tempRoot,
+    }, () => resolveClaudeCliPath()));
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+    assert.equal(resolved, undefined);
   });
 });
 

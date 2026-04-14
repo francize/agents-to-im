@@ -164,8 +164,10 @@ CTI_DEFAULT_WORKDIR=/path/to/your/project
 | `CTI_FEISHU_APP_SECRET` | 是 | 飞书 App Secret |
 | `CTI_FEISHU_DOMAIN` | 否 | 国际版填 `lark` |
 | `CTI_FEISHU_ALLOWED_USERS` | 否 | 逗号分隔的允许用户 ID |
+| `CTI_CLAUDE_CODE_EXECUTABLE` | 否 | 显式指定 Claude CLI 路径。Windows 下接受 npm 安装出来的 `claude.cmd`，bridge 会自动映射到真实 CLI 入口。 |
 
 Claude 和 Codex 的默认模型、审批策略都直接由本机 CLI 自己决定。Codex 会话直接复用本地 `~/.codex/config.toml` 中的认证、trusted 目录、sandbox 和审批策略。
+如果 bridge 启动之后你才安装或更新 Claude Code，需要重启 bridge，让 daemon 重新读取新的 CLI 路径和环境。
 
 </details>
 

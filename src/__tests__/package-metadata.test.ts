@@ -18,7 +18,7 @@ describe('package metadata', () => {
       version?: string;
     };
 
-    assert.match(packageJson.version || '', /^0\.0\.1(?:-beta(?:\.\d+)?)?$/);
+    assert.match(packageJson.version || '', /^0\.0\.2(?:-beta(?:\.\d+)?)?$/);
     assert.equal(packageJson.bin?.['agents-to-im'], 'dist/cli-bin.mjs');
     assert.deepEqual(packageJson.files, [
       'dist',
