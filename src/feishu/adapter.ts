@@ -573,11 +573,19 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
   }
 
+  shouldProjectActivityEvent(event: ActivityEvent): boolean {
+    if (event.kind !== 'tool_activity') return true;
+    return this.options.profile.showToolCallCards === true;
+  }
+
   async upsertActivityEvent(
     address: ChannelAddress,
     event: ActivityEvent,
     replyToMessageId?: string,
   ): Promise<SendResult> {
+    if (!this.shouldProjectActivityEvent(event)) {
+      return { ok: true };
+    }
     return this.activityService.upsertActivityEvent(
       this.withInstance(address),
       event,

@@ -91,6 +91,10 @@ describe('loadConfig/saveConfig', () => {
   it('round-trips claudeCliExecutable when configured', () => {
     saveConfig({
       ...base,
+      feishu: {
+        ...base.feishu,
+        showToolCallCards: true,
+      },
       claudeCliExecutable: 'C:\\Users\\fres\\AppData\\Roaming\\npm\\claude.cmd',
     });
 
@@ -98,7 +102,9 @@ describe('loadConfig/saveConfig', () => {
     const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
 
     assert.equal(loaded.claudeCliExecutable, 'C:\\Users\\fres\\AppData\\Roaming\\npm\\claude.cmd');
+    assert.equal(loaded.feishu.showToolCallCards, true);
     assert.match(content, /CTI_CLAUDE_CODE_EXECUTABLE=C:\\Users\\fres\\AppData\\Roaming\\npm\\claude\.cmd/);
+    assert.match(content, /CTI_FEISHU_SHOW_TOOL_CALL_CARDS=true/);
   });
 
   it('omits claudeCliExecutable when unset', () => {
@@ -122,6 +128,7 @@ describe('loadConfig/saveConfig', () => {
         'CTI_FEISHU_APP_SECRET=secret',
         'CTI_FEISHU_DOMAIN=lark',
         'CTI_FEISHU_ALLOWED_USERS=ou_1, ou_2',
+        'CTI_FEISHU_SHOW_TOOL_CALL_CARDS=off',
         'CTI_CLAUDE_CODE_EXECUTABLE="C:\\Users\\fres\\AppData\\Roaming\\npm\\claude.cmd"',
       ].join('\n'),
     );
@@ -133,6 +140,7 @@ describe('loadConfig/saveConfig', () => {
     assert.equal(loaded.feishu.appSecret, 'secret');
     assert.equal(loaded.feishu.domain, 'lark');
     assert.deepEqual(loaded.feishu.allowedUsers, ['ou_1', 'ou_2']);
+    assert.equal(loaded.feishu.showToolCallCards, false);
     assert.equal(loaded.claudeCliExecutable, 'C:\\Users\\fres\\AppData\\Roaming\\npm\\claude.cmd');
   });
 });

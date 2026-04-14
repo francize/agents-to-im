@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.4-beta.0] - 2026-04-14
+
+### Fixed
+- Add `CTI_FEISHU_SHOW_TOOL_CALL_CARDS` so Feishu/Lark sessions can hide tool-call activity cards while keeping normal assistant cards.
+- Default tool-call activity cards to off to reduce group-session noise.
+- Make `onboard` step skips advance directly to the next step instead of asking follow-up prompts and extra Enter confirmations.
+
+### Changed
+- Guide the tool-card toggle during `agents-to-im onboard` and persist the chosen value into `config.env`.
+- Extend regression coverage for config parsing, onboarding flow, Feishu activity-card projection, and bridge-side suppression handling.
+
+### References
+- Issue: #7
+
 ## [0.0.3] - 2026-04-14
 
 ### Fixed

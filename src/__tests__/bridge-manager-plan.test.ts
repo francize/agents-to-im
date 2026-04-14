@@ -1630,6 +1630,78 @@ describe('bridge-manager plan workflow', () => {
     assert.equal(adapter.sent[0].text, '截图执行中，我会把结果直接发回群里。');
   });
 
+  it('skips suppressed tool activity projections while still delivering assistant text', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const activityEvents: Array<Record<string, unknown>> = [];
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'activity_event',
+              data: JSON.stringify({
+                kind: 'tool_activity',
+                toolUseId: 'tool-suppressed-1',
+                toolName: 'MCP: chrome-devtools take_screenshot',
+                status: 'running',
+                inputPreview: 'file:///tmp/test-cwd/index.html',
+                taskId: 'task-suppressed-1',
+                source: 'tool_progress',
+              }),
+            })}\n`);
+            setTimeout(() => {
+              controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: 'tool 卡片关闭后，正文预览应该照常工作。' })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-tool-preview-suppressed' }) })}\n`);
+              controller.close();
+            }, 60);
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'claude',
+      model: 'claude-sonnet-4-6',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-tool-preview-suppressed',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'claude-sonnet-4-6',
+    });
+
+    (adapter as any).getPreviewCapabilities = () => ({
+      supported: true,
+      privateOnly: false,
+      finalDelivery: 'segment_replace_preview',
+    });
+    (adapter as any).shouldProjectActivityEvent = () => false;
+    (adapter as any).upsertActivityEvent = async (_address: unknown, event: Record<string, unknown>) => {
+      activityEvents.push(event);
+      return { ok: true, messageId: `activity-${activityEvents.length}` };
+    };
+
+    await start();
+    adapter.push({
+      messageId: 'msg-tool-preview-suppressed',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-tool-preview-suppressed', threadId: 'thread-1' },
+      text: '继续',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length === 1);
+
+    assert.equal(activityEvents.length, 0);
+    assert.equal(adapter.sent[0].text, 'tool 卡片关闭后，正文预览应该照常工作。');
+  });
+
   it('projects lightweight, command, and file activities without mixing them into assistant text delivery', async () => {
     const store = new JsonFileStore(makeSettings());
     const activityEvents: Array<Record<string, unknown>> = [];

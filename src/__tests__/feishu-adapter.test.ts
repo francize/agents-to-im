@@ -1366,13 +1366,94 @@ describe('FeishuAdapter', () => {
     assert.match(fileCard.body.elements[0].elements[0].content, /已完成/);
   });
 
-  it('renders reasoning and tool activity cards and patches a tool lifecycle in place', async () => {
+  it('suppresses tool activity cards by default while keeping other activity cards', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});
 
     const sentPayloads: string[] = [];
     const patchedPayloads: string[] = [];
     const adapter = new FeishuAdapter() as any;
+    adapter.lastIncomingMessageId.set('group-activity-reasoning:main', 'incoming-1');
+    adapter.restClient = {
+      im: {
+        message: {
+          reply: async (payload: { data: { content: string } }) => {
+            sentPayloads.push(payload.data.content);
+            return {
+              code: 0,
+              data: {
+                message_id: `activity-msg-${sentPayloads.length}`,
+                open_message_id: `open-activity-${sentPayloads.length}`,
+              },
+            };
+          },
+          patch: async (payload: { data: { content: string } }) => {
+            patchedPayloads.push(payload.data.content);
+            return { code: 0, data: {} };
+          },
+        },
+      },
+    };
+
+    await adapter.upsertActivityEvent(
+      { channelType: 'feishu', chatId: 'group-activity-reasoning' },
+      {
+        kind: 'reasoning_activity',
+        turnId: 'turn-reasoning-1',
+        status: 'running',
+        text: '正在分析页面结构与截图步骤',
+        source: 'task_progress',
+      },
+    );
+    await adapter.upsertActivityEvent(
+      { channelType: 'feishu', chatId: 'group-activity-reasoning' },
+      {
+        kind: 'tool_activity',
+        turnId: 'turn-reasoning-1',
+        toolUseId: 'tool-use-1',
+        toolName: 'MCP: chrome-devtools take_screenshot',
+        status: 'running',
+        inputPreview: 'file:///tmp/test-cwd/index.html',
+        taskId: 'task-1',
+        source: 'tool_progress',
+      },
+    );
+    await adapter.upsertActivityEvent(
+      { channelType: 'feishu', chatId: 'group-activity-reasoning' },
+      {
+        kind: 'tool_activity',
+        turnId: 'turn-reasoning-1',
+        toolUseId: 'tool-use-1',
+        toolName: 'MCP: chrome-devtools take_screenshot',
+        status: 'completed',
+        inputPreview: 'file:///tmp/test-cwd/index.html',
+        resultPreview: '返回了 1 张图片',
+        elapsedSeconds: 1.2,
+        taskId: 'task-1',
+        source: 'tool_progress',
+      },
+    );
+
+    assert.equal(sentPayloads.length, 1);
+    assert.equal(patchedPayloads.length, 0);
+
+    const reasoningCard = JSON.parse(sentPayloads[0]);
+    assert.equal(reasoningCard.header.title.content, '思考过程');
+    assert.match(reasoningCard.body.elements[0].content, /正在分析页面结构与截图步骤/);
+  });
+
+  it('renders tool activity cards when explicitly enabled and patches a tool lifecycle in place', async () => {
+    const store = new JsonFileStore(makeSettings());
+    installContext(store, {});
+
+    const sentPayloads: string[] = [];
+    const patchedPayloads: string[] = [];
+    const adapter = new FeishuAdapter({
+      profile: {
+        id: 'default',
+        showToolCallCards: true,
+      },
+    }) as any;
     adapter.lastIncomingMessageId.set('group-activity-reasoning:main', 'incoming-1');
     adapter.restClient = {
       im: {

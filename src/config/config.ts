@@ -10,6 +10,7 @@ export interface FeishuProfileConfig {
   appSecret?: string;
   domain?: 'lark';
   allowedUsers?: string[];
+  showToolCallCards?: boolean;
 }
 
 export interface Config {
@@ -50,6 +51,14 @@ function splitCsv(value: string | undefined): string[] | undefined {
     .filter(Boolean);
 }
 
+function parseBoolean(value: string | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return undefined;
+}
+
 function loadFeishuConfig(env: Map<string, string>): FeishuProfileConfig {
   return {
     id: DEFAULT_FEISHU_PROFILE_ID,
@@ -57,6 +66,7 @@ function loadFeishuConfig(env: Map<string, string>): FeishuProfileConfig {
     appSecret: env.get('CTI_FEISHU_APP_SECRET') || undefined,
     domain: env.get('CTI_FEISHU_DOMAIN') === 'lark' ? 'lark' : undefined,
     allowedUsers: splitCsv(env.get('CTI_FEISHU_ALLOWED_USERS') || undefined),
+    showToolCallCards: parseBoolean(env.get('CTI_FEISHU_SHOW_TOOL_CALL_CARDS')) ?? false,
   };
 }
 
@@ -81,12 +91,18 @@ function formatEnvLine(key: string, value: string | undefined): string {
   return `${key}=${value}\n`;
 }
 
+function formatBooleanEnvLine(key: string, value: boolean | undefined): string {
+  if (value === undefined) return '';
+  return `${key}=${value ? 'true' : 'false'}\n`;
+}
+
 function formatFeishuLines(profile: FeishuProfileConfig): string {
   let out = '';
   out += formatEnvLine('CTI_FEISHU_APP_ID', profile.appId);
   out += formatEnvLine('CTI_FEISHU_APP_SECRET', profile.appSecret);
   out += formatEnvLine('CTI_FEISHU_DOMAIN', profile.domain);
   out += formatEnvLine('CTI_FEISHU_ALLOWED_USERS', profile.allowedUsers?.join(','));
+  out += formatBooleanEnvLine('CTI_FEISHU_SHOW_TOOL_CALL_CARDS', profile.showToolCallCards);
   return out;
 }
 

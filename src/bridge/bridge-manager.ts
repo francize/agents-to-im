@@ -1708,6 +1708,8 @@ async function handleMessage(
     if (!adapter.upsertActivityEvent) return;
     if (event.kind === 'context_usage') return;
     const normalized = normalizeActivityEvent(event);
+    const shouldProjectActivity = adapter.shouldProjectActivityEvent?.(normalized) ?? true;
+    if (!shouldProjectActivity) return;
     await markProgressCardVisible();
     if (normalized.kind === 'lightweight_activity') {
       if (

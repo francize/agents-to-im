@@ -159,6 +159,13 @@ export abstract class BaseChannelAdapter {
     _replyToMessageId?: string,
   ): Promise<SendResult>;
 
+  /**
+   * Decide whether a given activity event should be projected into the channel.
+   * Adapters can use this to suppress noisy activity surfaces before the bridge
+   * marks progress cards as visible.
+   */
+  shouldProjectActivityEvent?(_event: ActivityEvent): boolean;
+
 }
 
 // ── Adapter Registry ────────────────────────────────────────────

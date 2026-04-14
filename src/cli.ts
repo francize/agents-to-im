@@ -45,6 +45,14 @@ function cliCommand(command?: string): string {
     : CLI_COMMAND;
 }
 
+function parseBooleanFlag(value: string | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return undefined;
+}
+
 function npmInstallCommand(): string {
   return `npm install -g ${NPM_INSTALL_SPEC}`;
 }
@@ -658,6 +666,7 @@ async function setupWizard() {
     const existingAppSecret = existing.CTI_FEISHU_APP_SECRET || '';
     const existingDomain = existing.CTI_FEISHU_DOMAIN || '';
     const existingAllowedUsers = existing.CTI_FEISHU_ALLOWED_USERS || '';
+    const existingShowToolCallCards = parseBooleanFlag(existing.CTI_FEISHU_SHOW_TOOL_CALL_CARDS) ?? false;
 
     const appId = await ask(rl, t(locale, 'App ID', 'App ID'), existingAppId);
     const appSecret = await ask(
@@ -712,6 +721,23 @@ async function setupWizard() {
       );
     }
 
+    console.log('');
+    info(t(
+      locale,
+      'tool 调用卡片会把命令、文件和工具过程单独发成卡片，噪声通常比较大；普通消息卡片不受影响。',
+      'Tool-call cards send command, file, and tool progress as separate cards. They are usually noisy; normal message cards are unaffected.',
+    ));
+    const showToolCallCards = await confirm(
+      rl,
+      t(locale, '在会话里展示 tool 调用卡片？', 'Show tool-call cards in sessions?'),
+      existingShowToolCallCards,
+      {
+        yes: t(locale, '展示', 'Show them'),
+        no: t(locale, '保持关闭', 'Keep them off'),
+        hint: menuHint,
+      },
+    );
+
     heading(t(locale, '📝 写入配置...', '📝 Writing configuration...'));
 
     const lines: string[] = [
@@ -724,6 +750,7 @@ async function setupWizard() {
       '# Feishu / Lark bot',
       `CTI_FEISHU_APP_ID=${appId}`,
       `CTI_FEISHU_APP_SECRET=${actualSecret || ''}`,
+      `CTI_FEISHU_SHOW_TOOL_CALL_CARDS=${showToolCallCards ? 'true' : 'false'}`,
     ];
 
     if (domain) lines.push(`CTI_FEISHU_DOMAIN=${domain}`);
@@ -775,6 +802,8 @@ async function setupWizard() {
         fallbackQuestion: 'Choose',
         hint: menuHint,
       });
+
+      let skipPlatformStepOne = copyAction === 'skip';
       if (copyAction === 'copy') {
         if (tryCopyToClipboard(FEISHU_SCOPES_IMPORT_JSON)) {
           ok(t(locale, 'Scopes JSON 已复制到剪贴板', 'Scopes JSON copied to clipboard'));
@@ -789,38 +818,40 @@ async function setupWizard() {
         info(t(
           locale,
           `这一步先跳过，稍后可从 ${SETUP_GUIDE_URL} 手动复制`,
-          `Skipping clipboard copy for now. You can copy it later from ${SETUP_GUIDE_URL}`,
+          `Skipping this step for now. You can copy the scopes JSON later from ${SETUP_GUIDE_URL}`,
         ));
       }
 
-      const openAuthAction = await chooseOption(rl, t(locale, '现在打开权限页？', 'Open the auth page now?'), [
-        { label: t(locale, '打开权限页', 'Open auth page'), value: 'open' as const },
-        { label: t(locale, '暂时跳过（Skip Now）', 'Skip Now'), value: 'skip' as const },
-      ], {
-        defaultIndex: 0,
-        fallbackQuestion: 'Choose',
-        hint: menuHint,
-      });
-      if (openAuthAction === 'open') {
-        if (tryOpenExternalUrl(authUrl)) {
-          ok(t(locale, `已打开权限页：${c.cyan}${authUrl}${c.reset}`, `Opened auth page: ${c.cyan}${authUrl}${c.reset}`));
+      if (!skipPlatformStepOne) {
+        const openAuthAction = await chooseOption(rl, t(locale, '现在打开权限页？', 'Open the auth page now?'), [
+          { label: t(locale, '打开权限页', 'Open auth page'), value: 'open' as const },
+          { label: t(locale, '暂时跳过（Skip Now）', 'Skip Now'), value: 'skip' as const },
+        ], {
+          defaultIndex: 0,
+          fallbackQuestion: 'Choose',
+          hint: menuHint,
+        });
+        if (openAuthAction === 'open') {
+          if (tryOpenExternalUrl(authUrl)) {
+            ok(t(locale, `已打开权限页：${c.cyan}${authUrl}${c.reset}`, `Opened auth page: ${c.cyan}${authUrl}${c.reset}`));
+          } else {
+            warn(t(locale, `无法自动打开，请手动访问：${c.cyan}${authUrl}${c.reset}`, `Could not open the auth page automatically. Open this URL manually: ${c.cyan}${authUrl}${c.reset}`));
+          }
+          console.log('');
+          if (!(await maybePauseOnboarding(
+            rl,
+            t(locale, '完成 Bot、权限导入和首次发布后按回车继续', 'Press Enter after Bot, scopes, and the first publish are done'),
+            {
+              hint: continueHint,
+              finishLaterMessage,
+            },
+          ))) {
+            return;
+          }
         } else {
-          warn(t(locale, `无法自动打开，请手动访问：${c.cyan}${authUrl}${c.reset}`, `Could not open the auth page automatically. Open this URL manually: ${c.cyan}${authUrl}${c.reset}`));
+          skipPlatformStepOne = true;
+          info(t(locale, '这一步先跳过，需要时按上面的链接手动进入即可', 'Skipping this step for now. Open the URL above later when you are ready.'));
         }
-      } else {
-        info(t(locale, '先跳过自动打开，按上面的链接手动进入即可', 'Skipping auto-open for now. Open the URL above when you are ready.'));
-      }
-
-      console.log('');
-      if (!(await maybePauseOnboarding(
-        rl,
-        t(locale, '完成 Bot、权限导入和首次发布后按回车继续', 'Press Enter after Bot, scopes, and the first publish are done'),
-        {
-          hint: continueHint,
-          finishLaterMessage,
-        },
-      ))) {
-        return;
       }
     }
 
@@ -898,20 +929,19 @@ async function setupWizard() {
         } else {
           warn(t(locale, `无法自动打开，请手动访问：${c.cyan}${eventUrl}${c.reset}`, `Could not open the Events page automatically. Open this URL manually: ${c.cyan}${eventUrl}${c.reset}`));
         }
+        console.log('');
+        if (!(await maybePauseOnboarding(
+          rl,
+          t(locale, '完成 Long Connection 和 3 个事件配置后按回车继续', 'Press Enter after Long Connection and the 3 events are saved'),
+          {
+            hint: continueHint,
+            finishLaterMessage,
+          },
+        ))) {
+          return;
+        }
       } else {
-        info(t(locale, '先跳过自动打开，稍后手动进入事件页即可', 'Skipping auto-open for now. Open the Events page when you are ready.'));
-      }
-
-      console.log('');
-      if (!(await maybePauseOnboarding(
-        rl,
-        t(locale, '完成 Long Connection 和 3 个事件配置后按回车继续', 'Press Enter after Long Connection and the 3 events are saved'),
-        {
-          hint: continueHint,
-          finishLaterMessage,
-        },
-      ))) {
-        return;
+        info(t(locale, '这一步先跳过，需要时再手动进入事件页配置', 'Skipping this step for now. Open the Events page later when you are ready.'));
       }
 
       const callbackUrl = buildPlatformEventUrl(domain, appId, 'callback');
@@ -935,20 +965,19 @@ async function setupWizard() {
         } else {
           warn(t(locale, `无法自动打开，请手动访问：${c.cyan}${callbackUrl}${c.reset}`, `Could not open the Callback page automatically. Open this URL manually: ${c.cyan}${callbackUrl}${c.reset}`));
         }
+        console.log('');
+        if (!(await maybePauseOnboarding(
+          rl,
+          t(locale, '完成回调配置并保存后按回车继续', 'Press Enter after the callback has been added and saved'),
+          {
+            hint: continueHint,
+            finishLaterMessage,
+          },
+        ))) {
+          return;
+        }
       } else {
-        info(t(locale, '先跳过自动打开，稍后手动进入回调页即可', 'Skipping auto-open for now. Open the Callback page when you are ready.'));
-      }
-
-      console.log('');
-      if (!(await maybePauseOnboarding(
-        rl,
-        t(locale, '完成回调配置并保存后按回车继续', 'Press Enter after the callback has been added and saved'),
-        {
-          hint: continueHint,
-          finishLaterMessage,
-        },
-      ))) {
-        return;
+        info(t(locale, '这一步先跳过，需要时再手动进入回调页配置', 'Skipping this step for now. Open the Callback page later when you are ready.'));
       }
 
       const botUrl = buildPlatformBotUrl(domain, appId);
