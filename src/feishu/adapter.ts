@@ -142,6 +142,12 @@ import {
 export { FEISHU_REQUIRED_APP_SCOPES, findMissingAppScopes } from './constants.js';
 export type { FeishuAdapterOptions } from './types.js';
 
+function isToolCallActivityEvent(event: ActivityEvent): boolean {
+  return event.kind === 'tool_activity'
+    || event.kind === 'command_execution'
+    || event.kind === 'file_change';
+}
+
 export class FeishuAdapter extends BaseChannelAdapter {
   readonly channelType: ChannelType = 'feishu';
   private readonly instanceAdapterId: string;
@@ -574,7 +580,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
   }
 
   shouldProjectActivityEvent(event: ActivityEvent): boolean {
-    if (event.kind !== 'tool_activity') return true;
+    if (!isToolCallActivityEvent(event)) return true;
     return this.options.profile.showToolCallCards === true;
   }
 

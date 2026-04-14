@@ -84,7 +84,12 @@ describe('FeishuAdapter', () => {
 
     let chatCreateCalls = 0;
     const replies: Array<{ msgType: string; content: string }> = [];
-    const adapter = new FeishuAdapter() as any;
+    const adapter = new FeishuAdapter({
+      profile: {
+        id: 'default',
+        showToolCallCards: true,
+      },
+    }) as any;
     adapter.restClient = {
       im: {
         chat: {
@@ -142,7 +147,12 @@ describe('FeishuAdapter', () => {
 
     let chatCreateCalls = 0;
     const replies: Array<{ msgType: string; content: string }> = [];
-    const adapter = new FeishuAdapter() as any;
+    const adapter = new FeishuAdapter({
+      profile: {
+        id: 'default',
+        showToolCallCards: true,
+      },
+    }) as any;
     adapter.restClient = {
       im: {
         chat: {
@@ -1155,7 +1165,12 @@ describe('FeishuAdapter', () => {
     const replyPayloads: string[] = [];
     const patchedPayloads: string[] = [];
     let firstAttempt = true;
-    const adapter = new FeishuAdapter() as any;
+    const adapter = new FeishuAdapter({
+      profile: {
+        id: 'default',
+        showToolCallCards: true,
+      },
+    }) as any;
     adapter.lastIncomingMessageId.set('group-activity-timeout:main', 'incoming-timeout-1');
     adapter.restClient = {
       im: {
@@ -1305,12 +1320,17 @@ describe('FeishuAdapter', () => {
     assert.match(result.error || '', /image_key/i);
   });
 
-  it('renders command and file activity cards with fixed titles and concise details', async () => {
+  it('renders command and file activity cards with fixed titles and concise details when explicitly enabled', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});
 
     const sentPayloads: string[] = [];
-    const adapter = new FeishuAdapter() as any;
+    const adapter = new FeishuAdapter({
+      profile: {
+        id: 'default',
+        showToolCallCards: true,
+      },
+    }) as any;
     adapter.lastIncomingMessageId.set('group-activity-cards:main', 'incoming-1');
     adapter.restClient = {
       im: {
@@ -1366,7 +1386,7 @@ describe('FeishuAdapter', () => {
     assert.match(fileCard.body.elements[0].elements[0].content, /已完成/);
   });
 
-  it('suppresses tool activity cards by default while keeping other activity cards', async () => {
+  it('suppresses tool-call activity cards by default while keeping other activity cards', async () => {
     const store = new JsonFileStore(makeSettings());
     installContext(store, {});
 
@@ -1431,6 +1451,30 @@ describe('FeishuAdapter', () => {
         elapsedSeconds: 1.2,
         taskId: 'task-1',
         source: 'tool_progress',
+      },
+    );
+    await adapter.upsertActivityEvent(
+      { channelType: 'feishu', chatId: 'group-activity-reasoning' },
+      {
+        kind: 'command_execution',
+        id: 'command-1',
+        turnId: 'turn-reasoning-1',
+        status: 'completed',
+        command: '/bin/zsh -lc "ls -1"',
+        cwd: '/tmp/test-cwd',
+        output: 'README.md',
+        exitCode: 0,
+      },
+    );
+    await adapter.upsertActivityEvent(
+      { channelType: 'feishu', chatId: 'group-activity-reasoning' },
+      {
+        kind: 'file_change',
+        id: 'file-change-1',
+        turnId: 'turn-reasoning-1',
+        status: 'completed',
+        summary: '更新 landing page',
+        changes: [{ kind: 'update', path: 'landingpage/index.html' }],
       },
     );
 

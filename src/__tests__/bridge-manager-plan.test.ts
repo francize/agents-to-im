@@ -1702,6 +1702,79 @@ describe('bridge-manager plan workflow', () => {
     assert.equal(adapter.sent[0].text, 'tool 卡片关闭后，正文预览应该照常工作。');
   });
 
+  it('skips suppressed command-execution projections while still delivering assistant text', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const activityEvents: Array<Record<string, unknown>> = [];
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(`data: ${JSON.stringify({
+              type: 'activity_event',
+              data: JSON.stringify({
+                kind: 'command_execution',
+                id: 'command-suppressed-1',
+                turnId: 'turn-command-suppressed-1',
+                status: 'completed',
+                command: '/bin/zsh -lc "ls -1"',
+                cwd: '/tmp/test-cwd',
+                output: 'README.md',
+                exitCode: 0,
+              }),
+            })}\n`);
+            setTimeout(() => {
+              controller.enqueue(`data: ${JSON.stringify({ type: 'text_segment', data: '命令卡片关闭后，正文预览应该照常工作。' })}\n`);
+              controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ session_id: 'sdk-command-preview-suppressed' }) })}\n`);
+              controller.close();
+            }, 60);
+          },
+        }),
+      } as any,
+      permissions: {
+        resolvePendingPermission: () => true,
+      },
+      lifecycle: {},
+    });
+
+    const session = store.createRuntimeSession({
+      runtime: 'codex',
+      model: 'gpt-5-codex',
+      cwd: '/tmp/test-cwd',
+    });
+    store.upsertChannelBinding({
+      channelType: CHANNEL_TYPE,
+      chatId: 'chat-command-preview-suppressed',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp/test-cwd',
+      model: 'gpt-5-codex',
+    });
+
+    (adapter as any).getPreviewCapabilities = () => ({
+      supported: true,
+      privateOnly: false,
+      finalDelivery: 'segment_replace_preview',
+    });
+    (adapter as any).shouldProjectActivityEvent = (event: Record<string, unknown>) => event.kind !== 'command_execution';
+    (adapter as any).upsertActivityEvent = async (_address: unknown, event: Record<string, unknown>) => {
+      activityEvents.push(event);
+      return { ok: true, messageId: `activity-${activityEvents.length}` };
+    };
+
+    await start();
+    adapter.push({
+      messageId: 'msg-command-preview-suppressed',
+      address: { channelType: CHANNEL_TYPE, chatId: 'chat-command-preview-suppressed', threadId: 'thread-1' },
+      text: '继续',
+      timestamp: Date.now(),
+    });
+
+    await waitFor(() => adapter.sent.length === 1);
+
+    assert.equal(activityEvents.length, 0);
+    assert.equal(adapter.sent[0].text, '命令卡片关闭后，正文预览应该照常工作。');
+  });
+
   it('projects lightweight, command, and file activities without mixing them into assistant text delivery', async () => {
     const store = new JsonFileStore(makeSettings());
     const activityEvents: Array<Record<string, unknown>> = [];

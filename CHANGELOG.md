@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.4-beta.1] - 2026-04-14
+
+### Fixed
+- Apply `CTI_FEISHU_SHOW_TOOL_CALL_CARDS=false` to Codex command-execution and file-change cards as well, not just generic MCP/tool activity cards.
+
+### Changed
+- Clarify in docs that the tool-card toggle covers MCP/tool, command execution, and file-change activity cards.
+- Extend regression coverage for suppressed Codex command activity projections.
+
 ## [0.0.4-beta.0] - 2026-04-14
 
 ### Fixed
