@@ -41,6 +41,8 @@ import {
 } from '../runtime/claude-mode.js';
 import type { ClaudePermissionMode } from '../runtime/claude-mode.js';
 import {
+  listClaudeNativeWorkspaces,
+  listCodexNativeWorkspaces,
   listRecentNativeSessions,
   type NativeReplayItem,
 } from '../infra/native-session-history.js';
@@ -733,6 +735,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
     return listRecentWorkspaces(
       store.listChannelBindings(this.channelType),
       store.getSetting('bridge_default_work_dir') || process.cwd(),
+      10,
+      [...listClaudeNativeWorkspaces(), ...listCodexNativeWorkspaces()],
     );
   }
 

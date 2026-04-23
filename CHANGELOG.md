@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.5] - 2026-04-23
+
+### Fixed
+- Surface recently used Claude Code and Codex projects in the `/new:claude` and `/new:codex` workspace dropdowns by scanning `~/.claude/projects/*/*.jsonl` and `~/.codex/sessions/**/*.jsonl` (plus `archived_sessions/`).
+- Recover the authoritative `cwd` from jsonl records instead of trying to reverse the lossy `~/.claude/projects/<dir>` name, which otherwise drops paths containing `-`, `.`, or non-ASCII characters.
+- Aggregate native sessions by normalized `cwd` with the newest jsonl mtime as `updatedAt`, then merge with existing channel bindings in `listRecentWorkspaces`.
+
+### Changed
+- Raise the workspace dropdown limit from 5 to 10 so recovered native projects have room to show.
+- Extend `listRecentWorkspaces` to accept an `extraSources` argument and dedupe while keeping the newer timestamp per path.
+- Extend regression coverage for Claude native workspace parsing (non-ASCII cwds, missing-cwd files) and Codex native workspace parsing across `sessions/` and `archived_sessions/`.
+
+### References
+- Issue: #11
+
 ## [0.0.4] - 2026-04-14
 
 ### Fixed

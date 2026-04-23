@@ -50,4 +50,33 @@ describe('listRecentWorkspaces', () => {
       ],
     );
   });
+
+  it('merges extra workspace sources alongside bindings and deduplicates by normalized path', () => {
+    const options = listRecentWorkspaces(
+      [
+        { workingDirectory: '/tmp/ws-a', updatedAt: '2026-03-28T01:00:00.000Z' },
+      ],
+      null,
+      5,
+      [
+        { workingDirectory: '/tmp/ws-a', updatedAt: '2026-03-28T09:00:00.000Z' },
+        { workingDirectory: '/tmp/ws-native-only', updatedAt: '2026-03-28T05:00:00.000Z' },
+      ],
+    );
+
+    assert.deepEqual(
+      options.map((option) => option.value),
+      [
+        path.resolve('/tmp/ws-a'),
+        path.resolve('/tmp/ws-native-only'),
+      ],
+    );
+    const merged = options.find((option) => option.value === path.resolve('/tmp/ws-a'));
+    assert.equal(merged?.updatedAt, '2026-03-28T09:00:00.000Z');
+  });
+
+  it('returns empty list when no bindings, no extra sources, and no default workdir', () => {
+    const options = listRecentWorkspaces([], null, 5, []);
+    assert.deepEqual(options, []);
+  });
 });

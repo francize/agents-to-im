@@ -33,13 +33,23 @@ export function listRecentWorkspaces(
   bindings: Array<Pick<ChannelBinding, 'workingDirectory' | 'updatedAt'>> | WorkspaceSource[],
   defaultWorkdir?: string | null,
   limit = 5,
+  extraSources: WorkspaceSource[] = [],
 ): RecentWorkspaceOption[] {
   const deduped = new Map<string, RecentWorkspaceOption>();
-  const normalizedBindings = [...bindings].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  const merged: WorkspaceSource[] = [
+    ...bindings.map((binding) => ({
+      workingDirectory: binding.workingDirectory,
+      updatedAt: binding.updatedAt,
+    })),
+    ...extraSources,
+  ];
+  const normalizedBindings = merged.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 
   for (const binding of normalizedBindings) {
     const workspacePath = normalizeWorkspacePath(binding.workingDirectory);
-    if (!workspacePath || deduped.has(workspacePath)) continue;
+    if (!workspacePath) continue;
+    const existing = deduped.get(workspacePath);
+    if (existing && existing.updatedAt >= binding.updatedAt) continue;
     const labels = buildWorkspaceLabel(workspacePath);
     deduped.set(workspacePath, {
       ...labels,

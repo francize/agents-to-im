@@ -119,6 +119,56 @@ function readFirstLine(filePath: string): string | null {
   }
 }
 
+function readFirstCwdFromJsonl(filePath: string, maxLines = 50, maxBytes = 262144): string | null {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const buffer = Buffer.alloc(8192);
+    let offset = 0;
+    let chunk = '';
+    let linesRead = 0;
+    while (offset < maxBytes && linesRead < maxLines) {
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, offset);
+      if (bytesRead <= 0) break;
+      chunk += buffer.toString('utf8', 0, bytesRead);
+      offset += bytesRead;
+      let newlineIndex = chunk.indexOf('\n');
+      while (newlineIndex >= 0 && linesRead < maxLines) {
+        const line = chunk.slice(0, newlineIndex).trim();
+        chunk = chunk.slice(newlineIndex + 1);
+        linesRead += 1;
+        if (line) {
+          const record = parseJsonLine(line);
+          const cwdValue = record?.cwd;
+          if (typeof cwdValue === 'string' && cwdValue.trim()) {
+            return cwdValue.trim();
+          }
+        }
+        newlineIndex = chunk.indexOf('\n');
+      }
+    }
+    const tail = chunk.trim();
+    if (tail) {
+      const record = parseJsonLine(tail);
+      const cwdValue = record?.cwd;
+      if (typeof cwdValue === 'string' && cwdValue.trim()) {
+        return cwdValue.trim();
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // ignore close failure
+      }
+    }
+  }
+}
+
 function parseJsonLine(line: string): JsonRecord | null {
   try {
     return JSON.parse(line) as JsonRecord;
@@ -537,6 +587,82 @@ export function listRecentNativeSessions(
     })
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
     .slice(0, limit);
+}
+
+export interface NativeWorkspace {
+  workingDirectory: string;
+  updatedAt: string;
+}
+
+export function listCodexNativeWorkspaces(): NativeWorkspace[] {
+  const deduped = new Map<string, NativeWorkspace>();
+  for (const { rawPath, cwd } of scanCodexSessions().values()) {
+    const normalized = cwd ? path.resolve(cwd) : '';
+    if (!normalized) continue;
+    let mtimeIso: string;
+    try {
+      mtimeIso = fs.statSync(rawPath).mtime.toISOString();
+    } catch {
+      continue;
+    }
+    const existing = deduped.get(normalized);
+    if (!existing || existing.updatedAt < mtimeIso) {
+      deduped.set(normalized, {
+        workingDirectory: normalized,
+        updatedAt: mtimeIso,
+      });
+    }
+  }
+  return Array.from(deduped.values());
+}
+
+export function listClaudeNativeWorkspaces(): NativeWorkspace[] {
+  const projectsRoot = resolveClaudeProjectsRoot();
+  if (!fs.existsSync(projectsRoot)) return [];
+
+  const deduped = new Map<string, NativeWorkspace>();
+  for (const entry of safeReadDir(projectsRoot)) {
+    if (!entry.isDirectory()) continue;
+    const projectDir = path.join(projectsRoot, entry.name);
+
+    const jsonlFiles = safeReadDir(projectDir)
+      .filter((child) => child.isFile() && child.name.endsWith('.jsonl'))
+      .map((child) => path.join(projectDir, child.name));
+    if (jsonlFiles.length === 0) continue;
+
+    const sortedByMtime = jsonlFiles
+      .map((filePath) => {
+        try {
+          return { filePath, mtime: fs.statSync(filePath).mtime };
+        } catch {
+          return null;
+        }
+      })
+      .filter((value): value is { filePath: string; mtime: Date } => !!value)
+      .sort((left, right) => right.mtime.getTime() - left.mtime.getTime());
+    if (sortedByMtime.length === 0) continue;
+
+    let resolvedCwd: string | null = null;
+    for (const candidate of sortedByMtime) {
+      const cwd = readFirstCwdFromJsonl(candidate.filePath);
+      if (cwd) {
+        resolvedCwd = path.resolve(cwd);
+        break;
+      }
+    }
+    if (!resolvedCwd) continue;
+
+    const latestMtimeIso = sortedByMtime[0]!.mtime.toISOString();
+    const existing = deduped.get(resolvedCwd);
+    if (!existing || existing.updatedAt < latestMtimeIso) {
+      deduped.set(resolvedCwd, {
+        workingDirectory: resolvedCwd,
+        updatedAt: latestMtimeIso,
+      });
+    }
+  }
+
+  return Array.from(deduped.values());
 }
 
 export function loadNativeSessionTranscript(

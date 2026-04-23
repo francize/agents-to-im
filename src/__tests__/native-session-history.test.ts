@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+  listClaudeNativeWorkspaces,
+  listCodexNativeWorkspaces,
   listRecentNativeSessions,
   loadNativeSessionTranscript,
   readClaudeSessionTitle,
@@ -236,6 +238,160 @@ describe('native-session-history', () => {
       assert.match(raw, /"customTitle":"群聊手动改名"/);
     } finally {
       process.env.CLAUDE_HOME = previousClaudeHome;
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('lists claude native workspaces by parsing real cwd from jsonl, not from the encoded dir name', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-claude-ws-'));
+    const previousClaudeHome = process.env.CLAUDE_HOME;
+    process.env.CLAUDE_HOME = tempDir;
+
+    try {
+      // Project A: normal path with `-` inside cwd (encoded dir name is lossy).
+      const projectA = path.join(tempDir, 'projects', '-Users-me-codes-agents-to-im');
+      writeJsonl(path.join(projectA, 'older.jsonl'), [
+        { type: 'operation', timestamp: '2026-03-28T01:00:00.000Z' },
+        { type: 'user', cwd: '/Users/me/codes/agents-to-im', message: { role: 'user', content: [{ type: 'text', text: 'hello' }] } },
+      ]);
+      writeJsonl(path.join(projectA, 'newer.jsonl'), [
+        { type: 'user', cwd: '/Users/me/codes/agents-to-im', message: { role: 'user', content: [{ type: 'text', text: 'later' }] } },
+      ]);
+      fs.utimesSync(
+        path.join(projectA, 'older.jsonl'),
+        new Date('2026-03-28T01:00:00.000Z'),
+        new Date('2026-03-28T01:00:00.000Z'),
+      );
+      fs.utimesSync(
+        path.join(projectA, 'newer.jsonl'),
+        new Date('2026-03-28T05:00:00.000Z'),
+        new Date('2026-03-28T05:00:00.000Z'),
+      );
+
+      // Project B: dir name with ambiguous dashes, real cwd contains non-ASCII.
+      const projectB = path.join(tempDir, 'projects', '-Users-me-Documents-------');
+      writeJsonl(path.join(projectB, 'session.jsonl'), [
+        { type: 'summary', leafUuid: 'x' },
+        { type: 'user', cwd: '/Users/me/Documents/小予踩打照片', message: { role: 'user', content: [{ type: 'text', text: 'hi' }] } },
+      ]);
+      fs.utimesSync(
+        path.join(projectB, 'session.jsonl'),
+        new Date('2026-03-28T03:00:00.000Z'),
+        new Date('2026-03-28T03:00:00.000Z'),
+      );
+
+      // Project C: no cwd field anywhere — should be skipped silently.
+      const projectC = path.join(tempDir, 'projects', '-tmp-legacy-without-cwd');
+      writeJsonl(path.join(projectC, 'legacy.jsonl'), [
+        { type: 'operation', timestamp: '2026-03-28T02:00:00.000Z' },
+        { type: 'operation', timestamp: '2026-03-28T02:00:01.000Z' },
+      ]);
+
+      // Project D: empty directory — should be skipped.
+      fs.mkdirSync(path.join(tempDir, 'projects', '-tmp-empty'), { recursive: true });
+
+      const workspaces = listClaudeNativeWorkspaces();
+      const values = workspaces.map((item) => item.workingDirectory).sort();
+      assert.deepEqual(values, [
+        path.resolve('/Users/me/Documents/小予踩打照片'),
+        path.resolve('/Users/me/codes/agents-to-im'),
+      ]);
+
+      const projectAEntry = workspaces.find(
+        (item) => item.workingDirectory === path.resolve('/Users/me/codes/agents-to-im'),
+      );
+      assert.equal(projectAEntry?.updatedAt, new Date('2026-03-28T05:00:00.000Z').toISOString());
+    } finally {
+      process.env.CLAUDE_HOME = previousClaudeHome;
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns empty list when claude projects root does not exist', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-claude-empty-'));
+    const previousClaudeHome = process.env.CLAUDE_HOME;
+    process.env.CLAUDE_HOME = tempDir;
+    try {
+      assert.deepEqual(listClaudeNativeWorkspaces(), []);
+    } finally {
+      process.env.CLAUDE_HOME = previousClaudeHome;
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('lists codex native workspaces from session_meta, spanning sessions and archived_sessions, picking the newest mtime per cwd', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-codex-ws-'));
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = tempDir;
+
+    try {
+      const activeDir = path.join(tempDir, 'sessions', '2026', '03', '28');
+      const archivedDir = path.join(tempDir, 'archived_sessions');
+
+      // Two sessions in active dir pointing at the same cwd — expect the newer mtime to win.
+      const olderActive = path.join(activeDir, 'rollout-older.jsonl');
+      writeJsonl(olderActive, [
+        { type: 'session_meta', payload: { id: 'codex-older', cwd: '/tmp/codex-project' } },
+      ]);
+      fs.utimesSync(
+        olderActive,
+        new Date('2026-03-28T02:00:00.000Z'),
+        new Date('2026-03-28T02:00:00.000Z'),
+      );
+
+      const newerActive = path.join(activeDir, 'rollout-newer.jsonl');
+      writeJsonl(newerActive, [
+        { type: 'session_meta', payload: { id: 'codex-newer', cwd: '/tmp/codex-project' } },
+      ]);
+      fs.utimesSync(
+        newerActive,
+        new Date('2026-03-28T07:00:00.000Z'),
+        new Date('2026-03-28T07:00:00.000Z'),
+      );
+
+      // Archived session for a different cwd — should also surface.
+      const archived = path.join(archivedDir, 'rollout-archived.jsonl');
+      writeJsonl(archived, [
+        { type: 'session_meta', payload: { id: 'codex-archived', cwd: '/tmp/codex-old-project' } },
+      ]);
+      fs.utimesSync(
+        archived,
+        new Date('2026-03-28T04:00:00.000Z'),
+        new Date('2026-03-28T04:00:00.000Z'),
+      );
+
+      // Malformed file (no session_meta) — should be ignored silently.
+      const malformed = path.join(activeDir, 'rollout-malformed.jsonl');
+      writeJsonl(malformed, [
+        { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] } },
+      ]);
+
+      const workspaces = listCodexNativeWorkspaces();
+      const sorted = [...workspaces].sort((left, right) =>
+        left.workingDirectory.localeCompare(right.workingDirectory),
+      );
+      assert.deepEqual(
+        sorted.map((item) => item.workingDirectory),
+        [path.resolve('/tmp/codex-old-project'), path.resolve('/tmp/codex-project')],
+      );
+      const active = sorted.find(
+        (item) => item.workingDirectory === path.resolve('/tmp/codex-project'),
+      );
+      assert.equal(active?.updatedAt, new Date('2026-03-28T07:00:00.000Z').toISOString());
+    } finally {
+      process.env.CODEX_HOME = previousCodexHome;
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns empty list when codex sessions roots do not exist', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-to-im-codex-empty-'));
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = tempDir;
+    try {
+      assert.deepEqual(listCodexNativeWorkspaces(), []);
+    } finally {
+      process.env.CODEX_HOME = previousCodexHome;
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
