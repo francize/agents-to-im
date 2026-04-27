@@ -16,7 +16,29 @@ is_source_checkout() {
 }
 
 load_config_env() {
-  [ -f "$CTI_HOME/config.env" ] && set -a && source "$CTI_HOME/config.env" && set +a
+  # 之所以不再用 `set -a; source config.env`：source 会把配置文件当 shell
+  # 脚本执行，被注入命令替换/反引号就会本地代码执行。
+  #
+  # 改用 Node 解析隔离：
+  #   1. `node --env-file="$cfg"` 用纯 KEY=VAL 解析器加载，不执行任何 shell；
+  #   2. dump-env.mjs 仅输出 --env-file 真正引入的新键（用 baseline diff
+  #      过滤父 shell 自带变量），按 POSIX 单引号严格转义为 export 行；
+  #   3. eval 的对象是 dump-env.mjs 生成的字符串，不是 config.env 原文。
+  local cfg="$CTI_HOME/config.env"
+  [ -f "$cfg" ] || return 0
+  if ! command -v node >/dev/null 2>&1; then
+    echo "ERROR: node is required to load $cfg safely (Node >= 20.6 with --env-file=)" >&2
+    exit 1
+  fi
+  local baseline
+  baseline=$(printenv | awk -F= '{print $1}')
+  local exports
+  if ! exports=$(CTI_DUMP_BASELINE_KEYS="$baseline" node --env-file="$cfg" "$SKILL_DIR/scripts/dump-env.mjs" 2>&1); then
+    echo "ERROR: failed to parse $cfg via node --env-file=:" >&2
+    echo "$exports" >&2
+    exit 1
+  fi
+  eval "$exports"
 }
 
 ensure_built() {

@@ -5,7 +5,7 @@
 ### AI 编码代理困在你的终端里，团队却在飞书协作。这个项目把它们桥接起来 — 每个群一个会话，本地状态，流式卡片。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-green.svg)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20.6-green.svg)](https://nodejs.org/)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-已支持-purple.svg)](https://docs.anthropic.com/en/docs/claude-code)
 [![Codex](https://img.shields.io/badge/Codex-已支持-orange.svg)](https://github.com/openai/codex)
 
@@ -121,7 +121,7 @@ bash scripts/daemon.sh restart
 
 ### 前置条件
 
-- Node.js 20+
+- Node.js 20.6+（使用内置 `--env-file=` 标志安全加载 config.env）
 - 一个开启了 Bot 能力的飞书/Lark 自建应用（[配置指南](references/setup-guides.md)）
 - 本地已安装并认证 Claude Code CLI 和/或 Codex CLI
 

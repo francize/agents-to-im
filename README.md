@@ -5,7 +5,7 @@
 ### AI coding agents are trapped in your terminal. Your team collaborates in Feishu. This bridges them — one group per session, local state, streamed cards.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-green.svg)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20.6-green.svg)](https://nodejs.org/)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-Supported-purple.svg)](https://docs.anthropic.com/en/docs/claude-code)
 [![Codex](https://img.shields.io/badge/Codex-Supported-orange.svg)](https://github.com/openai/codex)
 
@@ -121,7 +121,7 @@ bash scripts/daemon.sh restart
 
 ### Prerequisites
 
-- Node.js 20+
+- Node.js 20.6+ (uses the built-in `--env-file=` flag for safe config loading)
 - A Feishu/Lark custom app with Bot enabled ([setup guide](references/setup-guides.md))
 - Claude Code CLI and/or Codex CLI installed and authenticated locally
 

@@ -25,6 +25,7 @@ describe('package metadata', () => {
       'scripts/daemon.sh',
       'scripts/daemon.ps1',
       'scripts/doctor.sh',
+      'scripts/dump-env.mjs',
       'scripts/supervisor-linux.sh',
       'scripts/supervisor-macos.sh',
       'scripts/supervisor-windows.ps1',

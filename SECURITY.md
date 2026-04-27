@@ -41,7 +41,9 @@ This project operates as a **single-user local daemon**:
 
 ## Credential Storage
 
-All credentials are stored in `~/.agents-to-im/config.env` with file permissions set to `600` (owner read/write only). This file is never committed to version control.
+All credentials are stored in `~/.agents-to-im/config.env` with file permissions set to `600` (owner read/write only). This file is never committed to version control. The bridge is designed for **single-user local use** — it assumes the operating-system account itself is the security boundary, and does not try to defend against attackers who already have write access to your home directory.
+
+`config.env` is **never** evaluated as a shell script on any platform. Earlier versions used `set -a; source config.env` on POSIX, which would execute any embedded shell command (e.g. `EVIL=$(rm -rf ~)`). The current loader uses Node's `--env-file=` flag (a strict `KEY=VALUE` parser, no shell interpretation) to read the file, then re-exports the resulting variables to the daemon process via POSIX-escaped `export` lines (`scripts/dump-env.mjs`). Values containing `$(...)`, backticks, or quotes are preserved as literal strings. On native Windows the daemon process reads `config.env` directly through an in-process strict `KEY=VALUE` parser (`src/config/config.ts`), which likewise never invokes a shell.
 
 ## Log Redaction
 
