@@ -163,7 +163,7 @@ CTI_DEFAULT_WORKDIR=/path/to/your/project
 | `CTI_FEISHU_APP_ID` | Yes | Feishu app ID |
 | `CTI_FEISHU_APP_SECRET` | Yes | Feishu app secret |
 | `CTI_FEISHU_DOMAIN` | No | `lark` for Lark international |
-| `CTI_FEISHU_ALLOWED_USERS` | No | Comma-separated allowed user IDs |
+| `CTI_FEISHU_ALLOWED_USERS` | **Yes** | Comma-separated sender IDs (open_id / user_id / union_id). Empty value rejects everyone. Set to a single `*` to allow-all (DANGEROUS — see SECURITY.md). |
 | `CTI_FEISHU_SHOW_TOOL_CALL_CARDS` | No | Set to `true` to show tool-call activity cards in group sessions, including MCP/tool, command execution, and file-change cards. Defaults to `false`; normal assistant cards stay enabled. |
 | `CTI_CLAUDE_CODE_EXECUTABLE` | No | Explicit Claude CLI path override. On Windows, npm-installed `claude.cmd` is accepted and mapped to the real CLI entry automatically. |
 

@@ -21,14 +21,21 @@ This project operates as a **single-user local daemon**:
 - The daemon runs on your local machine under your user account
 - No network listeners are opened; it connects outbound to Feishu/Lark APIs only
 - Authentication is handled by the Feishu/Lark bot token mechanism
-- Access control is enforced via allowed user ID lists configured per profile
+- Access control is enforced via allowed sender ID lists (`CTI_FEISHU_ALLOWED_USERS`) applied to **both** inbound messages and card button callbacks
+
+### Allowlist semantics
+
+- **Empty allowlist** (the variable is unset or has no values) — **all senders are rejected**. This is the secure default.
+- **Specific IDs** (e.g. `ou_alice,ou_bob`) — only those exact open_id / user_id / union_id values are allowed.
+- **Single wildcard `*`** — allow every sender. **This is dangerous**: anyone who can DM your bot or share a group with it can create sessions, run shell commands as your user, and approve permission cards. Use it only on personal machines where the bot is privately scoped.
+- **Mixed (e.g. `*,ou_alice`)** — `*` is **not** treated as a wildcard when combined with specific IDs. Only the literal IDs match. This avoids the "I added myself but forgot to remove `*`" trap.
 
 ### Primary threats and mitigations
 
 | Threat | Mitigation |
 |--------|------------|
 | Token leakage | File permissions (`600`), log redaction, `.gitignore` exclusion |
-| Unauthorized message senders | Allowed user ID filtering per Feishu profile |
+| Unauthorized message senders | Allowlist filtering on inbound text/image messages **and** card button callbacks |
 | Local privilege escalation | Runs as unprivileged user process |
 | Sensitive data in chat | Structured input prompts redirect sensitive content to local CLI |
 

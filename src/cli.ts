@@ -702,23 +702,70 @@ async function setupWizard() {
     );
 
     console.log('');
+    info(t(
+      locale,
+      'Allowlist 是 bot 唯一的访问控制。空 allowlist 会拒绝所有发送者；',
+      'Allowlist is the only access control for this bot. An empty allowlist rejects everyone;',
+    ));
+    info(t(
+      locale,
+      `如不限制则任何能向 bot 发消息的${platformName}用户都能在你的电脑上驱动 Claude/Codex。`,
+      `if unrestricted, anyone who can DM your bot can drive Claude/Codex on this machine.`,
+    ));
     const restrictUsers = await confirm(
       rl,
-      t(locale, `限制特定${platformName}用户使用？`, `Restrict to specific ${platformName} users?`),
-      false,
+      t(locale, `限制特定${platformName}用户使用？（强烈建议）`, `Restrict to specific ${platformName} users? (strongly recommended)`),
+      true,
       {
-        yes: t(locale, '是', 'Yes'),
-        no: t(locale, '否', 'No'),
+        yes: t(locale, '是（输入 user ID）', 'Yes (enter user IDs)'),
+        no: t(locale, '否（放行所有，等同设为 *）', 'No (allow-all, equivalent to *)'),
         hint: menuHint,
       },
     );
     let allowedUsers = '';
     if (restrictUsers) {
+      const previousIds = existingAllowedUsers && existingAllowedUsers.trim() !== '*'
+        ? existingAllowedUsers
+        : '';
       allowedUsers = await ask(
         rl,
         t(locale, '允许的用户 ID（逗号分隔）', 'Allowed user IDs (comma-separated)'),
-        existingAllowedUsers,
+        previousIds,
       );
+      // 防御：用户在 ID 列表里写了 '*' 也按精确值处理（adapter 端会忽略），
+      // 但如果完全什么都没填则提示并改用 '*' 通配符（避免 daemon 启动后 100% 拒绝）。
+      if (!allowedUsers.trim()) {
+        warn(t(
+          locale,
+          '未输入任何 ID。改为放行所有（CTI_FEISHU_ALLOWED_USERS=*）；启动后请尽快编辑配置改成你的 open_id。',
+          'No IDs entered. Falling back to allow-all (CTI_FEISHU_ALLOWED_USERS=*); edit the config to your own open_id ASAP.',
+        ));
+        allowedUsers = '*';
+      }
+    } else {
+      allowedUsers = '*';
+    }
+    if (allowedUsers.trim() === '*') {
+      warn(t(
+        locale,
+        '⚠️  Allowlist 设为 "*"（allow-all）：任何能向 bot 发消息或与 bot 同群的人都能：',
+        '⚠️  Allowlist is "*" (allow-all). Anyone who can DM your bot or share a group with it can:',
+      ));
+      warn(t(
+        locale,
+        '    • 创建 Claude/Codex 会话，在你的电脑上以你的身份执行命令',
+        '    • Create Claude/Codex sessions and run commands as you on this machine',
+      ));
+      warn(t(
+        locale,
+        '    • 点击权限卡片，批准 Claude 写文件 / 执行 shell',
+        '    • Click permission cards to approve Claude file writes / shell exec',
+      ));
+      warn(t(
+        locale,
+        `生产环境强烈建议改成你自己的 open_id（编辑 ~/.agents-to-im/config.env，把 CTI_FEISHU_ALLOWED_USERS=* 改为 ou_xxx,ou_yyy）。`,
+        `For production, set CTI_FEISHU_ALLOWED_USERS to your own open_id (edit ~/.agents-to-im/config.env: replace * with ou_xxx,ou_yyy).`,
+      ));
     }
 
     console.log('');

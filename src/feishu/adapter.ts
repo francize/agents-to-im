@@ -456,9 +456,15 @@ export class FeishuAdapter extends BaseChannelAdapter {
             .map((item) => item.trim())
             .filter(Boolean)
         : undefined);
-    if (!allowed || allowed.length === 0) return true;
-    const allowSet = new Set(allowed.map((item) => item.trim()).filter(Boolean));
-    return allowSet.has(userId);
+    // 安全策略：未配置 allowlist 时拒绝所有发送者，避免任何能向 bot 发消息的人
+    // 都能驱动本机 Claude/Codex 执行命令。如果用户确实希望放行所有人（仅适用
+    // 于 1:1 私聊或仅 owner 在群中的场景），必须显式配置为 '*' 这一个通配符。
+    // 注意：'*' 必须独占整个列表才生效，混合配置如 ['*', 'ou_xxx'] 会被视作
+    // 仅匹配 'ou_xxx'，避免歧义。
+    if (!allowed || allowed.length === 0) return false;
+    const cleaned = allowed.map((item) => item.trim()).filter(Boolean);
+    if (cleaned.length === 1 && cleaned[0] === '*') return true;
+    return new Set(cleaned).has(userId);
   }
 
   onMessageStart(address: ChannelAddress): void {

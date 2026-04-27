@@ -28,6 +28,7 @@ function makeSettings(): Map<string, string> {
     ['bridge_feishu_app_id', 'app-id'],
     ['bridge_feishu_app_secret', 'app-secret'],
     ['bridge_default_work_dir', '/tmp/test-cwd'],
+    ['bridge_feishu_allowed_users', '*'],
   ]);
 }
 
@@ -71,6 +72,57 @@ describe('FeishuAdapter', () => {
     });
 
     assert.equal(adapter.validateConfig(), null);
+  });
+
+  describe('isAuthorized', () => {
+    it('rejects everyone when allowlist is empty (secure default)', () => {
+      const store = new JsonFileStore(new Map([
+        ['bridge_feishu_app_id', 'app-id'],
+        ['bridge_feishu_app_secret', 'app-secret'],
+      ]));
+      installContext(store);
+      const adapter = new FeishuAdapter();
+      assert.equal(adapter.isAuthorized('ou_anyone', 'chat-1'), false);
+    });
+
+    it('allows everyone only when allowlist is exactly the single wildcard "*"', () => {
+      const store = new JsonFileStore(new Map([
+        ['bridge_feishu_app_id', 'app-id'],
+        ['bridge_feishu_app_secret', 'app-secret'],
+        ['bridge_feishu_allowed_users', '*'],
+      ]));
+      installContext(store);
+      const adapter = new FeishuAdapter();
+      assert.equal(adapter.isAuthorized('ou_anyone', 'chat-1'), true);
+      assert.equal(adapter.isAuthorized('ou_other', 'chat-2'), true);
+    });
+
+    it('matches exact open_id when allowlist contains specific ids', () => {
+      const store = new JsonFileStore(new Map([
+        ['bridge_feishu_app_id', 'app-id'],
+        ['bridge_feishu_app_secret', 'app-secret'],
+        ['bridge_feishu_allowed_users', 'ou_alice, ou_bob'],
+      ]));
+      installContext(store);
+      const adapter = new FeishuAdapter();
+      assert.equal(adapter.isAuthorized('ou_alice', 'chat-1'), true);
+      assert.equal(adapter.isAuthorized('ou_bob', 'chat-1'), true);
+      assert.equal(adapter.isAuthorized('ou_eve', 'chat-1'), false);
+    });
+
+    it('does not treat "*" as wildcard when mixed with specific ids', () => {
+      // 防止用户写成 ['*', 'ou_alice'] 后产生歧义。明确语义：
+      // 只要列表不是单独一个 '*'，就按精确匹配处理，'*' 字面量不会命中真实 user_id。
+      const store = new JsonFileStore(new Map([
+        ['bridge_feishu_app_id', 'app-id'],
+        ['bridge_feishu_app_secret', 'app-secret'],
+        ['bridge_feishu_allowed_users', '*, ou_alice'],
+      ]));
+      installContext(store);
+      const adapter = new FeishuAdapter();
+      assert.equal(adapter.isAuthorized('ou_alice', 'chat-1'), true);
+      assert.equal(adapter.isAuthorized('ou_anyone_else', 'chat-1'), false);
+    });
   });
 
   it('sends a Claude new-session card with workspace select and existing mode buttons from /new:claude in DM', async () => {

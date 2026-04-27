@@ -163,7 +163,7 @@ CTI_DEFAULT_WORKDIR=/path/to/your/project
 | `CTI_FEISHU_APP_ID` | 是 | 飞书 App ID |
 | `CTI_FEISHU_APP_SECRET` | 是 | 飞书 App Secret |
 | `CTI_FEISHU_DOMAIN` | 否 | 国际版填 `lark` |
-| `CTI_FEISHU_ALLOWED_USERS` | 否 | 逗号分隔的允许用户 ID |
+| `CTI_FEISHU_ALLOWED_USERS` | **是** | 逗号分隔的发送者 ID（open_id / user_id / union_id）。空值会拒绝所有人；填单独一个 `*` 表示放行所有（不安全，见 SECURITY.md）。 |
 | `CTI_FEISHU_SHOW_TOOL_CALL_CARDS` | 否 | 设为 `true` 后在群会话里展示 tool 调用活动卡片，包括 MCP/工具、命令执行和文件修改卡片。默认 `false`，普通助手消息卡片始终保留。 |
 | `CTI_CLAUDE_CODE_EXECUTABLE` | 否 | 显式指定 Claude CLI 路径。Windows 下接受 npm 安装出来的 `claude.cmd`，bridge 会自动映射到真实 CLI 入口。 |
 
