@@ -1711,6 +1711,7 @@ describe('FeishuAdapter', () => {
       tenant_key: 'tenant',
       token: 'token',
       open_message_id: 'open-perm-1',
+      operator: { open_id: 'ou_123' },
       action: {
         value: { callback_data: 'perm:allow_session:req-perm-1' },
         tag: 'button',
@@ -2653,6 +2654,7 @@ describe('FeishuAdapter', () => {
       tenant_key: 'tenant',
       token: 'token',
       open_message_id: 'open-input-1',
+      operator: { open_id: 'ou_123' },
       action: {
         tag: 'select_static',
         value: {},
@@ -2724,6 +2726,7 @@ describe('FeishuAdapter', () => {
       tenant_key: 'tenant',
       token: 'token',
       open_message_id: 'open-submit-1',
+      operator: { open_id: 'ou_123' },
       action: {
         tag: 'button',
         value: {
@@ -2812,6 +2815,7 @@ describe('FeishuAdapter', () => {
       tenant_key: 'tenant',
       token: 'token',
       open_message_id: 'open-submit-multi',
+      operator: { open_id: 'ou_123' },
       action: {
         tag: 'button',
         value: {
@@ -3558,5 +3562,88 @@ describe('FeishuAdapter', () => {
     assert.equal((adapter as any).queue[0].bridgeMeta.planWorkflow.kind, 'plan_execute');
     assert.equal((adapter as any).queue[0].bridgeMeta.planWorkflow.permissionMode, 'bypassPermissions');
     assert.match((adapter as any).queue[0].bridgeMeta.planWorkflow.promptText, /已确认计划/);
+  });
+
+  it('rejects card actions from senders outside the allowlist', async () => {
+    const settings = makeSettings();
+    settings.set('bridge_feishu_allowed_users', 'ou_authorized');
+    const store = new JsonFileStore(settings);
+    installContext(store, {
+      ensureRuntimeAvailable: async () => {},
+    });
+
+    let chatCreateCalls = 0;
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        chat: {
+          create: async () => {
+            chatCreateCalls += 1;
+            return { code: 0, data: { chat_id: 'should-not-create' } };
+          },
+        },
+        message: {
+          create: async () => ({ code: 0, data: { message_id: 'never' } }),
+          patch: async () => ({ code: 0, data: {} }),
+        },
+      },
+    };
+
+    const result = await adapter.handleCardAction({
+      open_id: 'ou_attacker',
+      tenant_key: 'tenant',
+      token: 'token',
+      open_message_id: 'open-card-attacker',
+      operator: { open_id: 'ou_attacker' },
+      context: { open_chat_id: 'chat-shared' },
+      action: {
+        tag: 'button',
+        value: { callback_data: 'new-session:codex:plan' },
+        form_value: { new_session_workdir: '/tmp/codex-plan' },
+      },
+    });
+
+    assert.equal(result.toast.type, 'warning');
+    assert.equal(chatCreateCalls, 0);
+    assert.equal(store.listChannelBindings().length, 0);
+  });
+
+  it('accepts card actions from senders inside the allowlist', async () => {
+    const settings = makeSettings();
+    settings.set('bridge_feishu_allowed_users', 'ou_authorized');
+    const store = new JsonFileStore(settings);
+    installContext(store, {
+      ensureRuntimeAvailable: async () => {},
+    });
+
+    const adapter = new FeishuAdapter() as any;
+    adapter.restClient = {
+      im: {
+        chat: {
+          create: async () => ({ code: 0, data: { chat_id: 'chat-allowed' } }),
+        },
+        message: {
+          create: async () => ({ code: 0, data: { message_id: 'group-msg-1' } }),
+          patch: async () => ({ code: 0, data: {} }),
+        },
+      },
+    };
+
+    const result = await adapter.handleCardAction({
+      open_id: 'ou_authorized',
+      tenant_key: 'tenant',
+      token: 'token',
+      open_message_id: 'open-card-allowed',
+      operator: { open_id: 'ou_authorized' },
+      context: { open_chat_id: 'chat-allowed' },
+      action: {
+        tag: 'button',
+        value: { callback_data: 'new-session:codex:plan' },
+        form_value: { new_session_workdir: '/tmp/codex-plan' },
+      },
+    });
+
+    assert.equal(result.toast.type, 'success');
+    assert.ok(store.getChannelBinding('feishu', 'chat-allowed'));
   });
 });

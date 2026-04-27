@@ -23,6 +23,21 @@ export async function handleCardAction(
     `open_message_id=${event.open_message_id || event.context?.open_message_id || 'unknown'} ` +
     `callback=${callbackData || '(none)'}`,
   );
+
+  // 鉴权：所有 card 按钮回调都必须落入 allowlist。inbound 文本入口已经做了同样校验，
+  // 但此前 card 回调直接进入业务分支，导致群里非 allowlist 成员可点击"允许"批准
+  // Claude 的危险操作或创建会话，等同于 auth bypass。
+  const sender = ctx.extractActionSenderIdentity(event);
+  const actionChatId = event.context?.open_chat_id || '';
+  if (!sender || !ctx.isAuthorized(sender.id, actionChatId)) {
+    console.warn(
+      `[feishu-adapter] Dropped card action: unauthorized or sender identity missing ` +
+      `(chat=${actionChatId || 'unknown'}, tag=${event.action?.tag || 'unknown'}, ` +
+      `callback=${callbackData || '(none)'})`,
+    );
+    return { toast: { type: 'warning', content: '未授权用户' } };
+  }
+
   if (!callbackData) {
     if (isStructuredInputFieldInteraction(event)) {
       return { toast: { type: 'success', content: '已记录选择，填写完成后点击提交。' } };
