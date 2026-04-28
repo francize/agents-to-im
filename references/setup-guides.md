@@ -185,7 +185,7 @@
 ```
 
 说明：
-- 如果你只想跑最小 IM bridge，至少也要保留 IM 消息收发、群聊读写、`im:chat:update`、`im:resource`、`cardkit:card:{read,write}` 和 `card.action.trigger` 对应能力。
+- 如果你只想跑最小 IM bridge，至少也要保留 `im:message`、`im:chat:update`、`im:resource`、`cardkit:card:{read,write}` 和 `card.action.trigger` 对应能力。
 - `application:application:self_manage` 只用于启动期的 best-effort scope 诊断；如果组织策略不允许，不会阻断 bridge 启动，但缺权限时只能在动作执行时暴露 API 错误。
 - 这份导入 JSON 明显大于 bridge 的最小运行集合，但它更适合 Claude/Codex 在真实工作流里调用文档、表格、任务、搜索等飞书工具，能减少后续反复补权限。
 
@@ -236,6 +236,7 @@ agents-to-im start
 
 1. 进入机器人菜单配置
 2. 至少添加两个悬浮菜单命令：
+   (响应动作 选 发送文字消息)
    - `/new:claude`
    - `/new:codex`
 3. 如果你修改了 Bot 菜单，记得再发布一次版本
