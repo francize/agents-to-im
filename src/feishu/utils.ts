@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import type { ChannelBinding, OutboundMessage } from '../bridge/types.js';
 import { htmlToFeishuMarkdown, preprocessFeishuMarkdown } from '../bridge/markdown/feishu.js';
+import { sanitizeAssistantMarkdown } from '../bridge/markdown/sanitizer.js';
 import {
   getClaudeModeOptions,
   getClaudeModeSuffix,
@@ -159,7 +160,7 @@ export function normalizeMarkdown(message: OutboundMessage): string {
   if (message.parseMode === 'Markdown' || message.parseMode === 'HTML') {
     text = preprocessFeishuMarkdown(text);
   }
-  return text;
+  return sanitizeAssistantMarkdown(text).text;
 }
 
 export function buildPlanningPrompt(requestText: string): string {
